@@ -2231,7 +2231,11 @@ test('pure memory functions keep records complete and enforce the global cap', (
   assert.equal(totalMemoryBytes(chunks, config.chunkBytes), 16);
 });
 
-function liveUrlInfoBody(entries) {
+// 实测形状：base_url 挂在拥有 url_info 数组的 codec 对象上（.flv 路径，以 '?' 结尾），
+// url_info 条目只带 host/extra/stream_ttl，完整地址 = host + codec.base_url + extra。
+function liveUrlInfoBody(entries, codecBaseUrl) {
+  const codec = { url_info: entries };
+  if (codecBaseUrl !== undefined) codec.base_url = codecBaseUrl;
   return {
     data: {
       playurl_info: {
@@ -2240,9 +2244,7 @@ function liveUrlInfoBody(entries) {
             {
               format: [
                 {
-                  codec: [
-                    { url_info: entries },
-                  ],
+                  codec: [codec],
                 },
               ],
             },
@@ -2257,13 +2259,16 @@ function liveUrlInfoEntry(url) {
   const parsed = new URL(url);
   return {
     host: parsed.origin,
-    base_url: `${parsed.pathname}?`,
     extra: parsed.search.slice(1),
+    stream_ttl: 1,
   };
 }
 
 function livePlayurlBody(mainUrl = LIVE_URL, backupUrl = LIVE_PAIR_URL) {
-  return liveUrlInfoBody([liveUrlInfoEntry(mainUrl), liveUrlInfoEntry(backupUrl)]);
+  return liveUrlInfoBody(
+    [liveUrlInfoEntry(mainUrl), liveUrlInfoEntry(backupUrl)],
+    `${new URL(mainUrl).pathname}?`,
+  );
 }
 
 function liveConfig(overrides = {}) {
@@ -2362,13 +2367,26 @@ test('live locations and requests classify only flv streams on live media hosts'
   assert.equal(liveUrlExpiresAt('https://d1--ov-gotcha07.bilivideo.com/live-bvc/1/stream.flv'), undefined);
 });
 
-test('live url_info entries rebuild the player URL from host, base_url and extra', () => {
+test('live urls rebuild from host, extra and the entry-over-group base_url precedence', () => {
   const host = 'https://d1--ov-gotcha07.bilivideo.com';
+  assert.equal(urlFromLiveUrlInfo({
+    host,
+    extra: 'expires=4102444800&sign=main',
+  }, '/live-bvc/1/stream.flv?'), LIVE_URL);
+  assert.equal(urlFromLiveUrlInfo({
+    host,
+    extra: 'expires=4102444800&sign=main',
+  }, '/live-bvc/1/stream.flv'), LIVE_URL);
   assert.equal(urlFromLiveUrlInfo({
     host,
     base_url: '/live-bvc/1/stream.flv?',
     extra: 'expires=4102444800&sign=main',
-  }), LIVE_URL);
+  }, '/live-bvc/1/other.flv?'), LIVE_URL);
+  assert.equal(urlFromLiveUrlInfo({
+    host,
+    base_url: 5,
+    extra: 'expires=4102444800&sign=main',
+  }, '/live-bvc/1/stream.flv?'), LIVE_URL);
   assert.equal(urlFromLiveUrlInfo({
     host,
     base_url: '/live-bvc/1/stream.flv',
@@ -2381,6 +2399,7 @@ test('live url_info entries rebuild the player URL from host, base_url and extra
   }), LIVE_URL);
   assert.equal(urlFromLiveUrlInfo({ url: LIVE_PAIR_URL }), LIVE_PAIR_URL);
   assert.throws(() => urlFromLiveUrlInfo({ host, extra: 'expires=1' }));
+  assert.throws(() => urlFromLiveUrlInfo({ host, extra: 'expires=1' }, 5));
   assert.throws(() => urlFromLiveUrlInfo({ host, base_url: 5, extra: 'expires=1' }));
 });
 
@@ -2398,24 +2417,28 @@ test('the live address book reads inline url_info groups and pairs by pathname',
   broken.bank.destroy();
 });
 
-test('the live address book joins base_url and extra across the question-mark placement variants', () => {
+test('the live address book joins the codec base_url and per-entry extra across question-mark variants', () => {
   const collected = [];
-  visitLiveUrlInfoGroups(livePlayurlBody(), (group) => collected.push(group));
+  visitLiveUrlInfoGroups(livePlayurlBody(), (group, groupBaseUrl) => collected.push({ group, groupBaseUrl }));
   assert.equal(collected.length, 1);
+  assert.equal(collected[0].groupBaseUrl, `${LIVE_KEY}?`);
   assert.deepEqual(
-    collected[0].map((info) => ({ host: info.host, base_url: info.base_url, extra: info.extra })),
+    collected[0].group.map((info) => ({ host: info.host, extra: info.extra })),
     [LIVE_URL, LIVE_PAIR_URL].map((url) => {
       const parsed = new URL(url);
-      return { host: parsed.origin, base_url: `${parsed.pathname}?`, extra: parsed.search.slice(1) };
+      return { host: parsed.origin, extra: parsed.search.slice(1) };
     }),
   );
-  for (const mutate of [
-    (entry) => ({ ...entry, base_url: entry.base_url.slice(0, -1) }),
-    (entry) => ({ ...entry, base_url: entry.base_url.slice(0, -1), extra: `?${entry.extra}` }),
+  for (const [codecBaseUrl, extraPrefix] of [
+    [`${LIVE_KEY}?`, ''],
+    [LIVE_KEY, ''],
+    [LIVE_KEY, '?'],
   ]) {
-    const { bank } = createLiveBank({
-      playinfo: liveUrlInfoBody([mutate(liveUrlInfoEntry(LIVE_URL)), mutate(liveUrlInfoEntry(LIVE_PAIR_URL))]),
+    const entries = [LIVE_URL, LIVE_PAIR_URL].map((url) => {
+      const parsed = new URL(url);
+      return { host: parsed.origin, extra: `${extraPrefix}${parsed.search.slice(1)}` };
     });
+    const { bank } = createLiveBank({ playinfo: liveUrlInfoBody(entries, codecBaseUrl) });
     bank.readInlineLivePlayinfo();
     assert.equal(bank.pairUrlFor(LIVE_URL), LIVE_PAIR_URL);
     assert.equal(bank.pairUrlFor(LIVE_PAIR_URL), LIVE_URL);
@@ -2432,7 +2455,7 @@ test('a live url_info group disagreeing on the stream path is skipped', () => {
         base_url: '/live-bvc/1/other.flv?',
         extra: 'expires=4102444800&sign=backup',
       },
-    ]),
+    ], `${LIVE_KEY}?`),
   });
   const errors = [];
   const originalError = console.error;
@@ -2449,10 +2472,16 @@ test('a live url_info group disagreeing on the stream path is skipped', () => {
   bank.destroy();
 });
 
-test('a live url_info group missing base_url is skipped with an error', () => {
+test('a live url_info group with no path source is skipped with an error', () => {
   const { bank } = createLiveBank({
     playinfo: liveUrlInfoBody([
       liveUrlInfoEntry(LIVE_URL),
+      { host: 'https://d1--ov-gotcha07b.bilivideo.com', extra: 'expires=4102444800&sign=backup' },
+    ]),
+  });
+  const halfResolvable = createLiveBank({
+    playinfo: liveUrlInfoBody([
+      { url: LIVE_URL },
       { host: 'https://d1--ov-gotcha07b.bilivideo.com', extra: 'expires=4102444800&sign=backup' },
     ]),
   });
@@ -2461,13 +2490,17 @@ test('a live url_info group missing base_url is skipped with an error', () => {
   console.error = (...args) => errors.push(args);
   try {
     bank.readInlineLivePlayinfo();
+    halfResolvable.bank.readInlineLivePlayinfo();
   } finally {
     console.error = originalError;
   }
-  assert.equal(errors.length, 1);
+  assert.equal(errors.length, 2);
   assert.equal(bank.addressBook.size, 0);
   assert.equal(bank.pairUrlFor(LIVE_URL), undefined);
+  assert.equal(halfResolvable.bank.addressBook.size, 0);
+  assert.equal(halfResolvable.bank.pairUrlFor(LIVE_URL), undefined);
   bank.destroy();
+  halfResolvable.bank.destroy();
 });
 
 test('live stitcher opens racing delivery only after the shared prefix compares equal', () => {

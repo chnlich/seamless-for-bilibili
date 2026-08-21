@@ -706,15 +706,16 @@
     if (!Number.isSafeInteger(expires) || expires <= 0) return void 0;
     return expires * 1e3;
   }
-  function urlFromLiveUrlInfo(info) {
+  function urlFromLiveUrlInfo(info, groupBaseUrl) {
     if (typeof info.url === "string") return info.url;
-    if (typeof info.host !== "string" || typeof info.base_url !== "string" || typeof info.extra !== "string") {
+    const baseUrl = typeof info.base_url === "string" ? info.base_url : groupBaseUrl;
+    if (typeof info.host !== "string" || typeof baseUrl !== "string" || typeof info.extra !== "string") {
       throw new Error("直播 playurl 地址簿条目缺少 host/base_url/extra");
     }
-    if (info.base_url.endsWith("?") || info.extra.startsWith("?") || info.extra.startsWith("&")) {
-      return `${info.host}${info.base_url}${info.extra}`;
+    if (baseUrl.endsWith("?") || info.extra.startsWith("?") || info.extra.startsWith("&")) {
+      return `${info.host}${baseUrl}${info.extra}`;
     }
-    return `${info.host}${info.base_url}?${info.extra}`;
+    return `${info.host}${baseUrl}?${info.extra}`;
   }
   function visitLiveUrlInfoGroups(value, callback) {
     if (value === null || typeof value !== "object") return;
@@ -728,7 +729,7 @@
         if (info === null || typeof info !== "object") continue;
         group.push({ host: info.host, base_url: info.base_url, extra: info.extra, url: info.url });
       }
-      if (group.length > 0) callback(group);
+      if (group.length > 0) callback(group, value.base_url);
     }
     for (const child of Object.values(value)) visitLiveUrlInfoGroups(child, callback);
   }
@@ -1942,9 +1943,9 @@
         }
       }
       const observedAt = this.now();
-      visitLiveUrlInfoGroups(data, (group) => {
+      visitLiveUrlInfoGroups(data, (group, groupBaseUrl) => {
         try {
-          const urls = group.map((info) => new URL(urlFromLiveUrlInfo(info)).href);
+          const urls = group.map((info) => new URL(urlFromLiveUrlInfo(info, groupBaseUrl)).href);
           const pathnames = new Set(urls.map((entry) => new URL(entry).pathname));
           if (pathnames.size !== 1) throw new Error("直播主备地址路径不一致");
           this.addressBook.set(new URL(urls[0]).pathname, { urls, observedAt });

@@ -26,15 +26,18 @@ export function liveUrlExpiresAt(url) {
   return expires * 1000;
 }
 
-export function urlFromLiveUrlInfo(info) {
+// 路径来源优先级：条目 url > 条目 base_url > 组（codec）base_url；
+// base_url 实测挂在拥有 url_info 数组的 codec 对象上，条目本身只有 host/extra/stream_ttl。
+export function urlFromLiveUrlInfo(info, groupBaseUrl) {
   if (typeof info.url === 'string') return info.url;
-  if (typeof info.host !== 'string' || typeof info.base_url !== 'string' || typeof info.extra !== 'string') {
+  const baseUrl = typeof info.base_url === 'string' ? info.base_url : groupBaseUrl;
+  if (typeof info.host !== 'string' || typeof baseUrl !== 'string' || typeof info.extra !== 'string') {
     throw new Error('直播 playurl 地址簿条目缺少 host/base_url/extra');
   }
-  if (info.base_url.endsWith('?') || info.extra.startsWith('?') || info.extra.startsWith('&')) {
-    return `${info.host}${info.base_url}${info.extra}`;
+  if (baseUrl.endsWith('?') || info.extra.startsWith('?') || info.extra.startsWith('&')) {
+    return `${info.host}${baseUrl}${info.extra}`;
   }
-  return `${info.host}${info.base_url}?${info.extra}`;
+  return `${info.host}${baseUrl}?${info.extra}`;
 }
 
 export function visitLiveUrlInfoGroups(value, callback) {
@@ -49,7 +52,7 @@ export function visitLiveUrlInfoGroups(value, callback) {
       if (info === null || typeof info !== 'object') continue;
       group.push({ host: info.host, base_url: info.base_url, extra: info.extra, url: info.url });
     }
-    if (group.length > 0) callback(group);
+    if (group.length > 0) callback(group, value.base_url);
   }
   for (const child of Object.values(value)) visitLiveUrlInfoGroups(child, callback);
 }

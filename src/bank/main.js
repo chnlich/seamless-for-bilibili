@@ -363,9 +363,9 @@ export class SegmentBank {
       }
     }
     const observedAt = this.now();
-    visitLiveUrlInfoGroups(data, (group) => {
+    visitLiveUrlInfoGroups(data, (group, groupBaseUrl) => {
       try {
-        const urls = group.map((info) => new URL(urlFromLiveUrlInfo(info)).href);
+        const urls = group.map((info) => new URL(urlFromLiveUrlInfo(info, groupBaseUrl)).href);
         const pathnames = new Set(urls.map((entry) => new URL(entry).pathname));
         if (pathnames.size !== 1) throw new Error('直播主备地址路径不一致');
         this.addressBook.set(new URL(urls[0]).pathname, { urls, observedAt });
