@@ -19,7 +19,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.bilibili.com/*"
+        "https://www.bilibili.com/*",
+        "https://live.bilibili.com/*"
       ],
       "js": [
         "source-buffer-shim.js"
@@ -30,7 +31,8 @@
     },
     {
       "matches": [
-        "https://www.bilibili.com/*"
+        "https://www.bilibili.com/*",
+        "https://live.bilibili.com/*"
       ],
       "js": [
         "bank.js"
@@ -41,7 +43,8 @@
     },
     {
       "matches": [
-        "https://www.bilibili.com/*"
+        "https://www.bilibili.com/*",
+        "https://live.bilibili.com/*"
       ],
       "js": [
         "main-bridge.js"
@@ -52,7 +55,8 @@
     },
     {
       "matches": [
-        "https://www.bilibili.com/*"
+        "https://www.bilibili.com/*",
+        "https://live.bilibili.com/*"
       ],
       "js": [
         "controller.js"

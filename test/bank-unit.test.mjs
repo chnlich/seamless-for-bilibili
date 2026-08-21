@@ -27,11 +27,23 @@ import {
 } from '../src/bank/storage.js';
 import { SegmentBank } from '../src/bank/main.js';
 import { createBankXMLHttpRequestClass } from '../src/bank/xhr.js';
+import {
+  LiveStreamStitcher,
+  classifyLiveRequest,
+  isLiveLocation,
+  liveUrlExpiresAt,
+} from '../src/bank/live.js';
 
 const MEDIA_URL = 'https://upos-sz-mirrorcosov.bilivideo.com/video/track.m4s?deadline=secret&upsig=secret';
 const PAIR_URL = 'https://upos-hz-mirrorakam.akamaized.net/video/track.m4s?deadline=pair&upsig=pair';
 const MEDIA_KEY = '/video/track.m4s';
 const PLAYURL_URL = 'https://api.bilibili.com/x/player/wbi/playurl?bvid=secret';
+const LIVE_LOCATION = new URL('https://live.bilibili.com/21452505');
+const LIVE_URL = 'https://d1--ov-gotcha07.bilivideo.com/live-bvc/1/stream.flv?expires=4102444800&sign=main';
+const LIVE_PAIR_URL = 'https://d1--ov-gotcha07b.bilivideo.com/live-bvc/1/stream.flv?expires=4102444800&sign=backup';
+const LIVE_HLS_URL = 'https://d1--ov-gotcha105.bilivideo.com/live-bvc/1/index.m3u8?expires=4102444800&sign=hls';
+const LIVE_KEY = '/live-bvc/1/stream.flv';
+const LIVE_PLAYURL_URL = 'https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id=21452505&protocol=0';
 
 function playurlBody(baseUrl = MEDIA_URL, backupUrl = [PAIR_URL]) {
   return {
@@ -2215,4 +2227,561 @@ test('pure memory functions keep records complete and enforce the global cap', (
   const eviction = enforceMemoryLimit({ chunks, maxBankBytes: 16, chunkBytes: config.chunkBytes });
   assert.equal(eviction.bytes, 16);
   assert.equal(totalMemoryBytes(chunks, config.chunkBytes), 16);
+});
+
+function livePlayurlBody(mainUrl = LIVE_URL, backupUrl = LIVE_PAIR_URL) {
+  const main = new URL(mainUrl);
+  const backup = new URL(backupUrl);
+  return {
+    data: {
+      playurl_info: {
+        playurl: {
+          stream: [
+            {
+              format: [
+                {
+                  codec: [
+                    {
+                      url_info: [
+                        { host: main.origin, extra: `${main.pathname}${main.search}` },
+                        { host: backup.origin, extra: `${backup.pathname}${backup.search}` },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+
+function liveConfig(overrides = {}) {
+  return configFor({ chunkBytes: 8, ...overrides });
+}
+
+function liveFeed({ status = 200, headers = { 'Content-Type': 'video/x-flv' } } = {}) {
+  let controller;
+  const feed = { cancelled: false };
+  const stream = new ReadableStream({
+    start(controllerArg) { controller = controllerArg; },
+    cancel() { feed.cancelled = true; },
+  });
+  feed.response = new Response(stream, { status, headers });
+  feed.push = (bytes) => controller.enqueue(bytes);
+  feed.close = () => controller.close();
+  return feed;
+}
+
+function createLiveBank({ nativeFetch, timers, config = liveConfig(), playinfo, now } = {}) {
+  const fixture = createBank({
+    nativeFetch,
+    timers,
+    config,
+    now,
+    location: LIVE_LOCATION,
+  });
+  if (playinfo !== undefined) fixture.windowObject.__NEPTUNE_IS_MY_WAIFU__ = playinfo;
+  return fixture;
+}
+
+function liveFetchThrough(bank, url = LIVE_URL, init = {}) {
+  return bank.handleFetch(bank.windowObject, [url, init], bank.nativeFetch);
+}
+
+function encoded(value) {
+  return new TextEncoder().encode(value);
+}
+
+function stitcherHarness({ legCount = 2, chunkBytes = 8 } = {}) {
+  const harness = {
+    chunks: [],
+    stitches: [],
+    delivered: [],
+    cancelled: [],
+    failed: false,
+    closed: false,
+  };
+  const legMetas = [
+    {
+      slot: 0,
+      source: 'https://d1--ov-gotcha07.bilivideo.com/live-bvc/1/stream.flv',
+      mirror: 'd1--ov-gotcha07.bilivideo.com',
+    },
+    {
+      slot: 1,
+      source: 'https://d1--ov-gotcha07b.bilivideo.com/live-bvc/1/stream.flv',
+      mirror: 'd1--ov-gotcha07b.bilivideo.com',
+    },
+  ].slice(0, legCount);
+  const stitcher = new LiveStreamStitcher({
+    streamPath: LIVE_KEY,
+    legs: legMetas,
+    chunkBytes,
+    now: () => 1000,
+    emitChunk: (payload) => harness.chunks.push(payload),
+    emitStitch: (payload) => harness.stitches.push(payload),
+    deliver: (bytes, start, end) => harness.delivered.push({ bytes: [...bytes], start, end }),
+    cancelLeg: (slot) => harness.cancelled.push(slot),
+    failStream: () => { harness.failed = true; },
+    closeStream: () => { harness.closed = true; },
+  });
+  return { stitcher, harness };
+}
+
+test('live locations and requests classify only flv streams on live media hosts', () => {
+  assert.equal(isLiveLocation(LIVE_LOCATION), true);
+  assert.equal(isLiveLocation(new URL('https://www.bilibili.com/video/BVbank')), false);
+  assert.deepEqual(classifyLiveRequest({ url: LIVE_URL, locationObject: LIVE_LOCATION }).intercepted, true);
+  for (const url of [
+    LIVE_HLS_URL,
+    'https://d1--ov-gotcha105.bilivideo.com/live-bvc/1/seg-1.ts?x=1',
+    'https://d1--ov-gotcha207.bilivideo.com/live-bvc/1/seg-1.m4s?x=1',
+  ]) {
+    const classification = classifyLiveRequest({ url, locationObject: LIVE_LOCATION });
+    assert.equal(classification.intercepted, false);
+    assert.equal(classification.reason, 'live_non_flv');
+  }
+  assert.equal(
+    classifyLiveRequest({ url: 'https://api.live.bilibili.com/xlive/room/flv', locationObject: LIVE_LOCATION }).reason,
+    'non_media_host',
+  );
+  assert.equal(classifyLiveRequest({ url: LIVE_URL, enabled: false, locationObject: LIVE_LOCATION }).intercepted, false);
+  const expiry = new URL(LIVE_URL).searchParams.get('expires');
+  assert.equal(liveUrlExpiresAt(LIVE_URL), Number(expiry) * 1000);
+  assert.equal(liveUrlExpiresAt('https://d1--ov-gotcha07.bilivideo.com/live-bvc/1/stream.flv'), undefined);
+});
+
+test('the live address book reads inline url_info groups and pairs by pathname', () => {
+  const { bank } = createLiveBank({ playinfo: livePlayurlBody() });
+  bank.readInlineLivePlayinfo();
+  assert.equal(bank.pairUrlFor(LIVE_URL), LIVE_PAIR_URL);
+  assert.equal(bank.pairUrlFor(LIVE_PAIR_URL), LIVE_URL);
+  bank.destroy();
+  const broken = createLiveBank({ playinfo: { data: { playurl_info: { unexpected: true } } } });
+  broken.bank.readInlineLivePlayinfo();
+  assert.equal(broken.bank.pairUrlFor(LIVE_URL), undefined);
+  broken.bank.destroy();
+});
+
+test('live stitcher opens racing delivery only after the shared prefix compares equal', () => {
+  const { stitcher, harness } = stitcherHarness();
+  stitcher.noteLegBytes(0, encoded('AB'));
+  stitcher.noteLegBytes(1, encoded('AB'));
+  assert.deepEqual(harness.delivered, []);
+  assert.deepEqual(harness.stitches, []);
+  stitcher.noteLegBytes(0, encoded('CDEFGH'));
+  stitcher.noteLegBytes(1, encoded('CDEFGH'));
+  assert.deepEqual(harness.stitches, [
+    { streamPath: LIVE_KEY, bytesChecked: 8, mismatch: false, phase: 'prefix' },
+  ]);
+  assert.deepEqual(harness.delivered, [{ bytes: [...encoded('ABCDEFGH')], start: 0, end: 7 }]);
+  assert.deepEqual(
+    harness.chunks.map(({ slot, result, bytes, chunkIndex: index }) => [slot, result, bytes, index]),
+    [[0, 'fetched', 8, 0], [1, 'lost_race', 8, 0]],
+  );
+  assert.equal(harness.chunks[0].ttfbMs, 0);
+  stitcher.noteLegBytes(0, encoded('IJKLMNOP'));
+  assert.deepEqual(harness.delivered.at(-1), { bytes: [...encoded('IJKLMNOP')], start: 8, end: 15 });
+  stitcher.noteLegDone(0);
+  stitcher.noteLegDone(1);
+  assert.equal(harness.failed, false);
+  assert.equal(harness.closed, true);
+});
+
+test('live stitcher degrades to the player-named leg when the prefix mismatches', () => {
+  const { stitcher, harness } = stitcherHarness();
+  stitcher.noteLegBytes(0, encoded('ABCDEFGH'));
+  stitcher.noteLegBytes(1, encoded('ABCxEFGH'));
+  assert.deepEqual(harness.stitches, [
+    { streamPath: LIVE_KEY, bytesChecked: 4, mismatch: true, phase: 'prefix' },
+  ]);
+  assert.deepEqual(harness.cancelled, [1]);
+  assert.deepEqual(harness.delivered, [{ bytes: [...encoded('ABCDEFGH')], start: 0, end: 7 }]);
+  stitcher.noteLegBytes(0, encoded('IJ'));
+  stitcher.noteLegDone(0);
+  assert.equal(harness.closed, true);
+  assert.equal(harness.failed, false);
+  const deliveredText = new TextDecoder().decode(
+    Uint8Array.from(harness.delivered.flatMap((piece) => piece.bytes)),
+  );
+  assert.equal(deliveredText, 'ABCDEFGHIJ');
+  assert.deepEqual(
+    harness.chunks.map(({ slot, result, bytes }) => [slot, result, bytes]),
+    [[1, 'lost_race', 8], [1, 'lost_race', 0], [0, 'fetched', 8], [0, 'fetched', 2]],
+  );
+});
+
+test('live stitcher keeps the leading leg and revokes the other on a late mismatch', () => {
+  const { stitcher, harness } = stitcherHarness();
+  stitcher.noteLegBytes(0, encoded('ABCDEFGH'));
+  stitcher.noteLegBytes(1, encoded('ABCDEFGH'));
+  stitcher.noteLegBytes(0, encoded('IJKLMNOP'));
+  assert.deepEqual(harness.delivered.at(-1), { bytes: [...encoded('IJKLMNOP')], start: 8, end: 15 });
+  stitcher.noteLegBytes(1, encoded('IJxLMNOP'));
+  assert.deepEqual(harness.stitches, [
+    { streamPath: LIVE_KEY, bytesChecked: 8, mismatch: false, phase: 'prefix' },
+    { streamPath: LIVE_KEY, bytesChecked: 19, mismatch: true, phase: 'stream' },
+  ]);
+  assert.deepEqual(harness.cancelled, [1]);
+  stitcher.noteLegBytes(0, encoded('QRST'));
+  stitcher.noteLegDone(0);
+  assert.equal(harness.closed, true);
+  assert.equal(harness.failed, false);
+  const deliveredText = new TextDecoder().decode(
+    Uint8Array.from(harness.delivered.flatMap((piece) => piece.bytes)),
+  );
+  assert.equal(deliveredText, 'ABCDEFGHIJKLMNOPQRST');
+});
+
+test('live stitcher treats a stalled backup leg during the gate as a single-leg death', () => {
+  const { stitcher, harness } = stitcherHarness();
+  stitcher.noteLegBytes(0, encoded('ABCDEFGH'));
+  stitcher.noteLegBytes(0, encoded('IJKLMNOP'));
+  stitcher.noteLegBytes(1, encoded('ABCD'));
+  assert.deepEqual(harness.delivered, []);
+  stitcher.noteLegDead(1, 'stalled');
+  assert.deepEqual(harness.stitches, []);
+  assert.deepEqual(harness.cancelled, []);
+  const stalled = harness.chunks.find(({ result }) => result === 'stalled');
+  assert.equal(stalled.slot, 1);
+  assert.equal(stalled.bytes, 4);
+  assert.deepEqual(harness.delivered, [
+    { bytes: [...encoded('ABCDEFGH')], start: 0, end: 7 },
+    { bytes: [...encoded('IJKLMNOP')], start: 8, end: 15 },
+  ]);
+  stitcher.noteLegDone(0);
+  assert.equal(harness.closed, true);
+  assert.equal(harness.failed, false);
+});
+
+test('live stitcher fails the stream when both legs die', () => {
+  const { stitcher, harness } = stitcherHarness();
+  stitcher.noteLegBytes(0, encoded('ABCDEFGH'));
+  stitcher.noteLegBytes(1, encoded('ABCDEFGH'));
+  stitcher.noteLegDead(0, 'network_error');
+  assert.equal(harness.failed, false);
+  stitcher.noteLegDead(1, 'http_error');
+  assert.equal(harness.failed, true);
+  assert.equal(harness.closed, false);
+});
+
+test('live fetch takeover races the inline-paired backup and streams the winner', async () => {
+  const feeds = { [LIVE_URL]: liveFeed(), [LIVE_PAIR_URL]: liveFeed() };
+  const calls = [];
+  const { bank, windowObject } = createLiveBank({
+    playinfo: livePlayurlBody(),
+    nativeFetch: async (url) => {
+      calls.push(url);
+      return feeds[url].response;
+    },
+  });
+  const response = await liveFetchThrough(bank);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('Content-Type'), 'video/x-flv');
+  assert.deepEqual(calls, [LIVE_URL, LIVE_PAIR_URL]);
+  feeds[LIVE_URL].push(encoded('ABCD'));
+  feeds[LIVE_PAIR_URL].push(encoded('ABCD'));
+  await tick();
+  feeds[LIVE_URL].push(encoded('EFGH'));
+  feeds[LIVE_PAIR_URL].push(encoded('EFGH'));
+  feeds[LIVE_URL].close();
+  feeds[LIVE_PAIR_URL].close();
+  assert.equal(await response.text(), 'ABCDEFGH');
+  await tick();
+  const serve = windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.equal(serve.data.result, 'hit');
+  assert.equal(serve.data.reason, 'live_stream');
+  assert.equal(serve.data.mirror, 'd1--ov-gotcha07.bilivideo.com');
+  assert.equal(typeof serve.data.durationMs, 'number');
+  const stitches = windowObject.messages.filter((message) => message.code === 'live.stream.stitch');
+  assert.deepEqual(stitches.map((message) => message.data), [
+    { streamPath: LIVE_KEY, bytesChecked: 8, mismatch: false, phase: 'prefix' },
+  ]);
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result, data.bytes, data.chunkIndex, data.priority]),
+    [[0, 'fetched', 8, 0, 'foreground'], [1, 'lost_race', 8, 0, 'foreground']],
+  );
+  assert.equal(chunks[0].data.mirror, 'd1--ov-gotcha07.bilivideo.com');
+  assert.equal(chunks[1].data.mirror, 'd1--ov-gotcha07b.bilivideo.com');
+  assert.equal(bank.resourceState.size, 0);
+  assert.equal(bank.inflight.size, 0);
+  bank.destroy();
+});
+
+test('live fetch takeover without a pair covers the stream with the player-named URL alone', async () => {
+  const feed = liveFeed();
+  const { bank, windowObject } = createLiveBank({ nativeFetch: async () => feed.response });
+  const response = await liveFetchThrough(bank);
+  feed.push(encoded('XYZ'));
+  feed.close();
+  assert.equal(await response.text(), 'XYZ');
+  const serve = windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.equal(serve.data.result, 'hit');
+  assert.equal(serve.data.reason, 'live_stream_unpaired');
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result, data.bytes]),
+    [[0, 'fetched', 3]],
+  );
+  assert.equal(windowObject.messages.some((message) => message.code === 'live.stream.stitch'), false);
+  bank.destroy();
+});
+
+test('live takeover treats expired signatures as invalid addresses and fails when none remain', async () => {
+  const expiredMain = 'https://d1--ov-gotcha07.bilivideo.com/live-bvc/1/stream.flv?expires=946684800&sign=main';
+  const expiredBackup = 'https://d1--ov-gotcha07b.bilivideo.com/live-bvc/1/stream.flv?expires=946684800&sign=backup';
+  let nativeCalled = 0;
+  const { bank, windowObject } = createLiveBank({
+    playinfo: livePlayurlBody(expiredMain, expiredBackup),
+    nativeFetch: async () => {
+      nativeCalled += 1;
+      return liveFeed().response;
+    },
+  });
+  await assert.rejects(liveFetchThrough(bank, expiredMain), /直播流地址签名到期且无可用地址/);
+  assert.equal(nativeCalled, 0);
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result, data.bytes]),
+    [[0, 'address_expired', 0], [1, 'address_expired', 0]],
+  );
+  assert.equal(windowObject.messages.some((message) => message.code === 'bank.serve'
+    && message.data.result === 'hit'), false);
+  bank.destroy();
+});
+
+test('live takeover drops an expired pair address and continues with the player URL', async () => {
+  const expiredBackup = 'https://d1--ov-gotcha07b.bilivideo.com/live-bvc/1/stream.flv?expires=946684800&sign=backup';
+  const feed = liveFeed();
+  const calls = [];
+  const { bank, windowObject } = createLiveBank({
+    playinfo: livePlayurlBody(LIVE_URL, expiredBackup),
+    nativeFetch: async (url) => {
+      calls.push(url);
+      return feed.response;
+    },
+  });
+  const response = await liveFetchThrough(bank);
+  feed.push(encoded('OK'));
+  feed.close();
+  assert.equal(await response.text(), 'OK');
+  assert.deepEqual(calls, [LIVE_URL]);
+  const serve = windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.equal(serve.data.reason, 'live_stream_unpaired');
+  const expired = windowObject.messages.find((message) => message.code === 'bank.fetch.chunk'
+    && message.data.result === 'address_expired');
+  assert.equal(expired.data.slot, 1);
+  bank.destroy();
+});
+
+test('live fetch passes non-flv live media back to the native path with live_non_flv', async () => {
+  let nativeCalled = 0;
+  const { bank, windowObject } = createLiveBank({
+    nativeFetch: async () => {
+      nativeCalled += 1;
+      return new Response('playlist');
+    },
+  });
+  const response = await liveFetchThrough(bank, LIVE_HLS_URL);
+  assert.equal(await response.text(), 'playlist');
+  assert.equal(nativeCalled, 1);
+  const serve = windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.deepEqual(serve.data, {
+    source: 'https://d1--ov-gotcha105.bilivideo.com/live-bvc/1/index.m3u8',
+    mirror: 'd1--ov-gotcha105.bilivideo.com',
+    result: 'pass',
+    reason: 'live_non_flv',
+  });
+  bank.destroy();
+});
+
+test('live fetch observes the player playurl traffic as an address-book supplement', async () => {
+  const { bank } = createLiveBank({
+    nativeFetch: async () => new Response(JSON.stringify(livePlayurlBody()), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  });
+  const response = await liveFetchThrough(bank, LIVE_PLAYURL_URL);
+  assert.equal(response.status, 200);
+  assert.equal(bank.pairUrlFor(LIVE_URL), LIVE_PAIR_URL);
+  bank.destroy();
+});
+
+test('a stalled backup leg during the live gate degrades through the real stall timer', async () => {
+  const timers = manualTimers();
+  const feeds = { [LIVE_URL]: liveFeed(), [LIVE_PAIR_URL]: liveFeed() };
+  const { bank, windowObject } = createLiveBank({
+    playinfo: livePlayurlBody(),
+    timers,
+    nativeFetch: async (url) => feeds[url].response,
+  });
+  const response = await liveFetchThrough(bank);
+  feeds[LIVE_URL].push(encoded('ABCDEFGH'));
+  feeds[LIVE_PAIR_URL].push(encoded('ABCD'));
+  await tick();
+  assert.equal(windowObject.messages.some((message) => message.code === 'live.stream.stitch'), false);
+  const pendingIds = [...timers.pending.keys()];
+  assert.equal(pendingIds.length, 2);
+  timers.fireId(pendingIds.at(-1));
+  await tick();
+  const stalled = windowObject.messages.find((message) => message.code === 'bank.fetch.chunk'
+    && message.data.result === 'stalled');
+  assert.equal(stalled.data.slot, 1);
+  assert.equal(stalled.data.bytes, 4);
+  assert.equal(windowObject.messages.some((message) => message.code === 'live.stream.stitch'), false);
+  feeds[LIVE_URL].push(encoded('IJKLMNOP'));
+  feeds[LIVE_URL].close();
+  assert.equal(await response.text(), 'ABCDEFGHIJKLMNOP');
+  assert.equal(feeds[LIVE_PAIR_URL].cancelled, true);
+  const serve = windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.equal(serve.data.reason, 'live_stream');
+  bank.destroy();
+});
+
+test('live fetch surfaces an explicit failure when both legs die', async () => {
+  const feeds = { [LIVE_URL]: liveFeed({ status: 500 }), [LIVE_PAIR_URL]: liveFeed({ status: 500 }) };
+  const { bank, windowObject } = createLiveBank({
+    playinfo: livePlayurlBody(),
+    nativeFetch: async (url) => feeds[url].response,
+  });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    await assert.rejects(liveFetchThrough(bank), /直播流双腿取数失败/);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(errors.length, 1);
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result]),
+    [[0, 'http_error'], [1, 'http_error']],
+  );
+  bank.destroy();
+});
+
+test('live XHR takeover races the paired backup and streams response bytes', async () => {
+  const feeds = { [LIVE_URL]: liveFeed(), [LIVE_PAIR_URL]: liveFeed() };
+  const calls = [];
+  const { bank, windowObject } = createLiveBank({
+    playinfo: livePlayurlBody(),
+    nativeFetch: async (url) => {
+      calls.push(url);
+      return feeds[url].response;
+    },
+  });
+  windowObject.XMLHttpRequest = createBankXMLHttpRequestClass({
+    windowObject,
+    nativeConstructor: NativeXHR,
+    bank,
+  });
+  const xhr = new windowObject.XMLHttpRequest();
+  xhr.responseType = 'arraybuffer';
+  const events = [];
+  xhr.addEventListener('readystatechange', () => events.push(`readystatechange:${xhr.readyState}`));
+  xhr.addEventListener('progress', () => events.push(`progress:${xhr._liveLoaded}`));
+  xhr.open('GET', LIVE_URL);
+  xhr.send();
+  assert.equal(xhr._intercepted, true);
+  await tick();
+  assert.deepEqual(calls, [LIVE_URL, LIVE_PAIR_URL]);
+  feeds[LIVE_URL].push(encoded('ABCD'));
+  feeds[LIVE_PAIR_URL].push(encoded('ABCD'));
+  await tick();
+  feeds[LIVE_URL].push(encoded('EFGH'));
+  feeds[LIVE_PAIR_URL].push(encoded('EFGH'));
+  feeds[LIVE_URL].close();
+  feeds[LIVE_PAIR_URL].close();
+  await new Promise((resolve) => xhr.addEventListener('loadend', resolve));
+  assert.equal(xhr.status, 200);
+  assert.deepEqual([...new Uint8Array(xhr.response)], [...encoded('ABCDEFGH')]);
+  assert.equal(xhr._native.sendCalls.length, 0);
+  assert.equal(events[0], 'readystatechange:2');
+  assert.equal(events[1], 'readystatechange:3');
+  assert.equal(events.at(-1), 'readystatechange:4');
+  const serve = windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.equal(serve.data.result, 'hit');
+  assert.equal(serve.data.reason, 'live_stream');
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result, data.bytes, data.chunkIndex]),
+    [[0, 'fetched', 8, 0], [1, 'lost_race', 8, 0]],
+  );
+  assert.equal(windowObject.messages.filter((message) => message.code === 'live.stream.stitch').length, 1);
+  bank.destroy();
+});
+
+test('live XHR passes non-flv live media and synchronous requests back', async () => {
+  for (const [url, asyncFlag, reason] of [
+    [LIVE_HLS_URL, true, 'live_non_flv'],
+    [LIVE_URL, false, 'sync_xhr'],
+  ]) {
+    const { bank, windowObject } = createLiveBank({ nativeFetch: async () => new Response('x') });
+    windowObject.XMLHttpRequest = createBankXMLHttpRequestClass({
+      windowObject,
+      nativeConstructor: NativeXHR,
+      bank,
+    });
+    const xhr = new windowObject.XMLHttpRequest();
+    if (asyncFlag) xhr.open('GET', url);
+    else xhr.open('GET', url, false);
+    xhr.send();
+    const serve = windowObject.messages.find((message) => message.code === 'bank.serve');
+    assert.equal(serve.data.result, 'pass');
+    assert.equal(serve.data.reason, reason);
+    assert.equal(xhr._native.sendCalls.length, 1);
+    assert.equal(xhr._intercepted, false);
+    bank.destroy();
+  }
+});
+
+test('live XHR observes live playurl traffic through responseText on load', async () => {
+  const { bank, windowObject } = createLiveBank({ nativeFetch: async () => new Response('x') });
+  windowObject.XMLHttpRequest = createBankXMLHttpRequestClass({
+    windowObject,
+    nativeConstructor: NativeXHR,
+    bank,
+  });
+  const xhr = new windowObject.XMLHttpRequest();
+  xhr.open('GET', LIVE_PLAYURL_URL);
+  xhr.send();
+  xhr._native.responseText = JSON.stringify(livePlayurlBody());
+  xhr._native.emit('load');
+  await tick();
+  assert.equal(bank.pairUrlFor(LIVE_URL), LIVE_PAIR_URL);
+  bank.destroy();
+});
+
+test('live XHR surfaces an explicit failure when every address is expired', async () => {
+  const expiredMain = 'https://d1--ov-gotcha07.bilivideo.com/live-bvc/1/stream.flv?expires=946684800&sign=main';
+  const expiredBackup = 'https://d1--ov-gotcha07b.bilivideo.com/live-bvc/1/stream.flv?expires=946684800&sign=backup';
+  const { bank, windowObject } = createLiveBank({
+    playinfo: livePlayurlBody(expiredMain, expiredBackup),
+    nativeFetch: async () => new Response('x'),
+  });
+  windowObject.XMLHttpRequest = createBankXMLHttpRequestClass({
+    windowObject,
+    nativeConstructor: NativeXHR,
+    bank,
+  });
+  const xhr = new windowObject.XMLHttpRequest();
+  const events = [];
+  xhr.addEventListener('error', () => events.push('error'));
+  xhr.addEventListener('loadend', () => events.push('loadend'));
+  xhr.open('GET', expiredMain);
+  xhr.send();
+  await tick();
+  assert.deepEqual(events, ['error', 'loadend']);
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result]),
+    [[0, 'address_expired'], [1, 'address_expired']],
+  );
+  bank.destroy();
 });

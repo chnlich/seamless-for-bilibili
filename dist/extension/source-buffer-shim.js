@@ -4,7 +4,8 @@
     manifestVersion: 3,
     minimumChromeVersion: "120",
     matches: Object.freeze([
-      "https://www.bilibili.com/*"
+      "https://www.bilibili.com/*",
+      "https://live.bilibili.com/*"
     ]),
     hostPermissions: Object.freeze([])
   });
@@ -78,6 +79,7 @@
     "bank.store",
     "bank.disabled",
     "bank.inventory",
+    "live.stream.stitch",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
@@ -179,6 +181,12 @@
       "routeActive",
       "pairedAddressAvailable",
       "resources"
+    ]),
+    live: Object.freeze([
+      "streamPath",
+      "bytesChecked",
+      "mismatch",
+      "phase"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"])

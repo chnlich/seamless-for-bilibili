@@ -4,7 +4,8 @@
     manifestVersion: 3,
     minimumChromeVersion: "120",
     matches: Object.freeze([
-      "https://www.bilibili.com/*"
+      "https://www.bilibili.com/*",
+      "https://live.bilibili.com/*"
     ]),
     hostPermissions: Object.freeze([])
   });
@@ -79,6 +80,7 @@
     "bank.store",
     "bank.disabled",
     "bank.inventory",
+    "live.stream.stitch",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
@@ -191,6 +193,12 @@
       "pairedAddressAvailable",
       "resources"
     ]),
+    live: Object.freeze([
+      "streamPath",
+      "bytesChecked",
+      "mismatch",
+      "phase"
+    ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"])
   });
@@ -202,6 +210,7 @@
     if (code.startsWith("resource.")) return DATA_ALLOWLIST.resource;
     if (code.startsWith("bridge.")) return DATA_ALLOWLIST.bridge;
     if (code.startsWith("bank.")) return DATA_ALLOWLIST.bank;
+    if (code.startsWith("live.")) return DATA_ALLOWLIST.live;
     if (code.startsWith("extension.")) return DATA_ALLOWLIST.extension;
     if (code.startsWith("log.persist.")) return DATA_ALLOWLIST.persist;
     throw new Error(`诊断事件代码没有字段 allowlist: ${code}`);
@@ -439,7 +448,7 @@
   }
   function sanitizeField(field, value) {
     if (field === "origin") return scrubOrigin(value);
-    if (field === "pathname") {
+    if (field === "pathname" || field === "streamPath") {
       if (typeof value !== "string" || !value.startsWith("/")) return UNKNOWN_VALUE;
       return scrubPathname(value);
     }
@@ -457,7 +466,7 @@
       return browserMetric(value);
     }
     if (field === "enabled") return value === true || value === false ? value : UNKNOWN_VALUE;
-    if (["disabled", "routeActive", "pairedAddressAvailable"].includes(field)) {
+    if (["disabled", "routeActive", "pairedAddressAvailable", "mismatch"].includes(field)) {
       return value === true || value === false ? value : UNKNOWN_VALUE;
     }
     if ([
@@ -467,7 +476,8 @@
       "maxBankBytes",
       "queued",
       "inflight",
-      "prefetchConcurrency"
+      "prefetchConcurrency",
+      "bytesChecked"
     ].includes(field)) return safeNonnegativeInteger(value);
     if (field === "code") return isSafePersistErrorCode(value) ? value : UNKNOWN_VALUE;
     if (field === "message") return scrubErrorText(value);

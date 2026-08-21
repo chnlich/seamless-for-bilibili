@@ -19,7 +19,8 @@
 
 ## 下载层
 
-- 识别为媒体分片且带闭合单段 `Range` 的请求一律由下载层拦截。命中时从内存中的完整分片切片回应，未命中时由扩展用同一 URL 和凭据取回覆盖范围的完整分片，入库后再回应播放器的原始 Range；播放器不会为这类媒体分片另行发起网络请求。非媒体请求、缺少 `Range`、非闭合 `Range`、同步 XHR，以及下载层自身的 `internal_fallback`/`internal_error` 路径仍按原样放行，并由 `bank.serve` 记录 `pass` 和原因（包括 `range_missing`、`range_not_closed`、`sync_xhr`）。`bank.serve` 的命中事件记录 `mirror` 与 `durationMs`，`bank.fetch.chunk` 记录 `mirror`。
+- 识别为媒体分片且带闭合单段 `Range` 的请求一律由下载层拦截。命中时从内存中的完整分片切片回应，未命中时由扩展用同一 URL 和凭据取回覆盖范围的完整分片，入库后再回应播放器的原始 Range；播放器不会为这类媒体分片另行发起网络请求。非媒体请求、缺少 `Range`、非闭合 `Range`、同步 XHR、直播页非 FLV 媒体请求（`live_non_flv`），以及下载层自身的 `internal_fallback`/`internal_error` 路径仍按原样放行，并由 `bank.serve` 记录 `pass` 和原因（包括 `range_missing`、`range_not_closed`、`sync_xhr`、`live_non_flv`）。`bank.serve` 的命中事件记录 `mirror` 与 `durationMs`，`bank.fetch.chunk` 记录 `mirror`。
+- 直播页（`live.bilibili.com`）只做下载接管与双路竞速，不做预拉、不设缓存目标。播放器在直播页发起的 `.flv` 长连接请求由扩展接管：首个此类请求到达时按需同步解析页面内嵌 `playurl_info`，并观察播放器自身的直播 `getRoomPlayInfo` 流量补充地址簿；只配同 cluster 主备两路（如 07 对 07b），跨 cluster 不配，地址不合成、不猜，URL 签名 `expires` 到期按地址失效处理。双腿 reader 并发累积，拼接窗口与前缀门窗口同按 `BANK_CONFIG.chunkBytes`（1 MiB）分窗：共同前缀比对一致才进入竞速交付，先达字节供给，败腿已读字节按既有浪费口径记录；竞速中重叠窗口持续比对，晚到不一致保领先腿、撤销另一腿；门期备腿停滞按单腿死处理，单腿死后余腿独跑、不重连。查无配对或前缀不一致时永久降级为播放器所名 URL 单腿接管（不制造播放故障）。双腿全灭、或签名到期且无新地址时显式失败，不静默退回原生。直播流事件按偏移分窗复用 `bank.fetch.chunk`（`chunkIndex` 为偏移对 `chunkBytes` 下取整，`slot` 标腿）与 `bank.serve`（`result`/`reason` 增 `live_stream`、`live_stream_unpaired`、`live_non_flv`），拼接裁决记 `live.stream.stitch`（`streamPath` 为去 query 的流路径、`bytesChecked` 为累计比对字节数、`mismatch`、`phase` 为 `prefix` 或 `stream`）。
 - 预取窗口按媒体资源分别锚定在仍未供数完成的播放器请求所需的最小块号；没有在途请求时使用最近一次播放器请求的起始块。窗口最多覆盖 48 个块，并发上限 4，只选择窗口内尚未入库且连续失败未达 3 次的前四个块。失败块下一轮自然重新进入窗口，达到上限后向需要它的播放器请求报告错误。
 - 每个块的扩展取数按 `raceLegs=2` 同时向 Bilibili 返回的主/备媒体地址发起双腿竞速，first-finish 的完整响应入库并返回播放器，败选腿已读字节是竞速固有成本；配对地址簿来自网络 playurl 响应，未配对时会按需读取页面内联 `window.__playinfo__`。
 - 前台取数失败和下载层无法供数的异常会向 `console.error` 报告；预取失败由下一轮重试吸收并保留 `bank.fetch.chunk`，不输出 console；正常的停滞取消也不输出 console。

@@ -132,7 +132,7 @@ assert.equal(manifest.manifest_version, 3);
 assert.equal(manifest.minimum_chrome_version, '120');
 assert.deepEqual(manifest.permissions, ['storage', 'unlimitedStorage']);
 assert.deepEqual(manifest.host_permissions, [...EXTENSION_MANIFEST.hostPermissions]);
-assert.deepEqual(EXTENSION_MANIFEST.matches, ['https://www.bilibili.com/*']);
+assert.deepEqual(EXTENSION_MANIFEST.matches, ['https://www.bilibili.com/*', 'https://live.bilibili.com/*']);
 assert.deepEqual(manifest.background, { service_worker: 'worker.js' });
 assert.deepEqual(manifest.content_scripts, [
   {
@@ -259,6 +259,7 @@ assert.doesNotMatch(`${source}\n${controller}\n${bridge}\n${worker}\n${logs}`, /
 const bankSourceAllowlist = new Set([
   'bank/contract.js',
   'bank/errors.js',
+  'bank/live.js',
   'bank/logic.js',
   'bank/main.js',
   'bank/storage.js',
@@ -320,7 +321,7 @@ for (const removedCode of [
 ]) assert.equal(EVENT_CODES.includes(removedCode), false);
 assert.equal(EVENT_CODES.includes('log.persist.degraded'), true);
 assert.equal(EVENT_CODES.includes('video.buffer_observed'), true);
-assert.equal(EVENT_CODES.some((code) => code.startsWith('live.')), false);
+assert.equal(EVENT_CODES.includes('live.stream.stitch'), true);
 assert.doesNotMatch(source, /\broomId\b/);
 assert.equal(EVENT_CODES.includes('bank.fetch.chunk'), true);
 assert.equal(EVENT_CODES.includes('bank.serve'), true);
@@ -354,6 +355,12 @@ assert.deepEqual([...DATA_ALLOWLIST.bank].sort(), [
   'routeActive',
   'pairedAddressAvailable',
   'resources',
+].sort());
+assert.deepEqual([...DATA_ALLOWLIST.live].sort(), [
+  'streamPath',
+  'bytesChecked',
+  'mismatch',
+  'phase',
 ].sort());
 for (const field of [
   'mediaSourceInstance',
@@ -395,6 +402,8 @@ assert.match(readme, /上次停顿/);
 assert.match(readme, /frameTiming/);
 assert.match(readme, /库存只列出本次播放实际参与的分轨/);
 assert.match(readme, /CDN 竞速面板/);
+assert.match(readme, /live_non_flv/);
+assert.match(readme, /live\.stream\.stitch/);
 const readmeSourceAnchors = [
   ['src/extension/popup.js', ['renderMediaReadout', 'lastStallText', 'renderRaceReadout']],
   ['src/extension/readouts.js', ['buildReadouts']],
@@ -444,7 +453,8 @@ assert.match(readme, /GOAL\.md/);
 assert.match(readme, /\/list\/watchlater\*/);
 assert.match(source, /\/list\/watchlater/);
 assert.match(goal, /视频[\s\S]*120 秒/);
-assert.match(goal, /直播功能已从扩展移除[\s\S]*不再是产品目标/);
+assert.match(goal, /视频与直播尽量少卡/);
+assert.match(goal, /直播页（live\.bilibili\.com）只做下载接管与双路竞速/);
 assert.match(goal, /live\.bilibili\.com/);
 assert.match(goal, /用户[\s\S]*控制/);
 assert.match(goal, /完整结构化日志/);

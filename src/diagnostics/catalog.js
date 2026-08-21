@@ -56,6 +56,7 @@ export const EVENT_CODES = Object.freeze([
   'bank.store',
   'bank.disabled',
   'bank.inventory',
+  'live.stream.stitch',
   'extension.started',
   'extension.boot_error',
   'extension.observer_error',
@@ -172,6 +173,12 @@ export const DATA_ALLOWLIST = Object.freeze({
     'pairedAddressAvailable',
     'resources',
   ]),
+  live: Object.freeze([
+    'streamPath',
+    'bytesChecked',
+    'mismatch',
+    'phase',
+  ]),
   extension: Object.freeze(['action', 'reason', 'status']),
   persist: Object.freeze(['status', 'batchSize', 'eventCount', 'message', 'code']),
 });
@@ -184,6 +191,7 @@ export function allowedDataFields(code) {
   if (code.startsWith('resource.')) return DATA_ALLOWLIST.resource;
   if (code.startsWith('bridge.')) return DATA_ALLOWLIST.bridge;
   if (code.startsWith('bank.')) return DATA_ALLOWLIST.bank;
+  if (code.startsWith('live.')) return DATA_ALLOWLIST.live;
   if (code.startsWith('extension.')) return DATA_ALLOWLIST.extension;
   if (code.startsWith('log.persist.')) return DATA_ALLOWLIST.persist;
   throw new Error(`诊断事件代码没有字段 allowlist: ${code}`);

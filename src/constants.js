@@ -5,6 +5,7 @@ export const EXTENSION_MANIFEST = Object.freeze({
   minimumChromeVersion: '120',
   matches: Object.freeze([
     'https://www.bilibili.com/*',
+    'https://live.bilibili.com/*',
   ]),
   hostPermissions: Object.freeze([]),
 });

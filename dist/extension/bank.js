@@ -4,7 +4,8 @@
     manifestVersion: 3,
     minimumChromeVersion: "120",
     matches: Object.freeze([
-      "https://www.bilibili.com/*"
+      "https://www.bilibili.com/*",
+      "https://live.bilibili.com/*"
     ]),
     hostPermissions: Object.freeze([])
   });
@@ -78,6 +79,7 @@
     "bank.store",
     "bank.disabled",
     "bank.inventory",
+    "live.stream.stitch",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
@@ -180,6 +182,12 @@
       "pairedAddressAvailable",
       "resources"
     ]),
+    live: Object.freeze([
+      "streamPath",
+      "bytesChecked",
+      "mismatch",
+      "phase"
+    ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"])
   });
@@ -224,6 +232,9 @@
     }
     if (locationObject.hostname === "www.bilibili.com" && pathname.startsWith("/list/watchlater")) {
       return { routeKind: "video", watchLaterItem: pathname.split("/")[3] || void 0, part };
+    }
+    if (locationObject.hostname === "live.bilibili.com") {
+      return { routeKind: "live", part };
     }
     return { routeKind: "other", part };
   }
@@ -673,6 +684,418 @@
     chunks.clear();
   }
 
+  // src/bank/live.js
+  function isLiveLocation(locationObject) {
+    return locationObject !== void 0 && locationObject.hostname === "live.bilibili.com";
+  }
+  function isLivePlayurlUrl(url) {
+    const parsed = new URL(url);
+    return parsed.hostname === "api.live.bilibili.com" && parsed.pathname.endsWith("/getRoomPlayInfo");
+  }
+  function classifyLiveRequest({ url, enabled = true, locationObject }) {
+    if (enabled !== true) return { intercepted: false };
+    const parsed = new URL(url, locationObject?.href);
+    if (!isMediaHost(parsed.hostname)) return { intercepted: false, reason: "non_media_host" };
+    if (!parsed.pathname.endsWith(".flv")) return { intercepted: false, reason: "live_non_flv" };
+    return { intercepted: true, url: parsed.href };
+  }
+  function liveUrlExpiresAt(url) {
+    const raw = new URL(url).searchParams.get("expires");
+    if (raw === null) return void 0;
+    const expires = Number(raw);
+    if (!Number.isSafeInteger(expires) || expires <= 0) return void 0;
+    return expires * 1e3;
+  }
+  function visitLiveUrlInfoGroups(value, callback) {
+    if (value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) visitLiveUrlInfoGroups(item, callback);
+      return;
+    }
+    if (Array.isArray(value.url_info)) {
+      const group = [];
+      for (const info of value.url_info) {
+        if (info === null || typeof info !== "object") continue;
+        if (typeof info.host !== "string" || typeof info.extra !== "string") continue;
+        group.push({ host: info.host, extra: info.extra });
+      }
+      if (group.length > 0) callback(group);
+    }
+    for (const child of Object.values(value)) visitLiveUrlInfoGroups(child, callback);
+  }
+  function compareByteRegions(left, right) {
+    const length = Math.min(left.byteLength, right.byteLength);
+    for (let index = 0; index < length; index += 1) {
+      if (left[index] !== right[index]) return index;
+    }
+    return -1;
+  }
+  var LiveStreamStitcher = class {
+    constructor({
+      streamPath,
+      legs,
+      chunkBytes = BANK_CONFIG.chunkBytes,
+      now = Date.now,
+      emitChunk,
+      emitStitch,
+      deliver,
+      cancelLeg,
+      failStream,
+      closeStream
+    }) {
+      if (!Array.isArray(legs) || legs.length < 1 || legs.length > 2) {
+        throw new Error("直播流腿数必须是 1 或 2");
+      }
+      this.streamPath = streamPath;
+      this.chunkBytes = chunkBytes;
+      this.now = now;
+      this.callbacks = { emitChunk, emitStitch, deliver, cancelLeg, failStream, closeStream };
+      this.bytesChecked = 0;
+      this.closed = false;
+      this.completionSequence = 0;
+      this.deliveredOffset = 0;
+      this.deliveredWindows = /* @__PURE__ */ new Map();
+      this.state = legs.length === 2 ? "gating" : "single";
+      this.gateCompared = 0;
+      this.legs = legs.map((meta) => ({
+        slot: meta.slot,
+        source: meta.source,
+        mirror: meta.mirror,
+        receivedTotal: 0,
+        currentWindow: new Uint8Array(chunkBytes),
+        windowFilled: 0,
+        windowStartedAt: void 0,
+        reportedInWindow: 0,
+        ahead: /* @__PURE__ */ new Map(),
+        startedAt: this.now(),
+        ttfbAt: void 0,
+        done: false,
+        dead: false
+      }));
+    }
+    legFor(slot) {
+      return this.legs.find((leg) => leg.slot === slot);
+    }
+    noteLegBytes(slot, chunk) {
+      if (this.closed) return;
+      const leg = this.legFor(slot);
+      if (leg === void 0 || leg.dead || leg.done) {
+        throw new Error("直播腿结束后仍收到字节");
+      }
+      if (!(chunk instanceof Uint8Array) || chunk.byteLength === 0) {
+        throw new Error("直播腿字节必须是长度大于零的 Uint8Array");
+      }
+      if (leg.ttfbAt === void 0) leg.ttfbAt = this.now();
+      let view = chunk;
+      while (view.byteLength > 0) {
+        const windowIndex = chunkIndex(leg.receivedTotal, this.chunkBytes);
+        if (leg.windowStartedAt === void 0) leg.windowStartedAt = this.now();
+        const portion = Math.min(this.chunkBytes - leg.windowFilled, view.byteLength);
+        leg.currentWindow.set(view.subarray(0, portion), leg.windowFilled);
+        leg.windowFilled += portion;
+        leg.receivedTotal += portion;
+        view = view.subarray(portion);
+        if (leg.windowFilled === this.chunkBytes) this.completeWindow(leg, windowIndex);
+      }
+      this.progress();
+    }
+    noteLegDone(slot) {
+      if (this.closed) return;
+      const leg = this.legFor(slot);
+      if (leg === void 0 || leg.dead || leg.done) {
+        throw new Error("直播腿重复结束");
+      }
+      if (leg.windowFilled > 0) {
+        const windowIndex = chunkIndex(leg.receivedTotal, this.chunkBytes);
+        const bytes = leg.currentWindow.slice(0, leg.windowFilled);
+        this.completionSequence += 1;
+        leg.ahead.set(windowIndex, {
+          bytes,
+          seq: this.completionSequence,
+          startedAt: leg.windowStartedAt ?? leg.startedAt
+        });
+        leg.currentWindow = new Uint8Array(this.chunkBytes);
+        leg.windowFilled = 0;
+        leg.reportedInWindow = 0;
+        leg.windowStartedAt = void 0;
+      }
+      leg.done = true;
+      if (this.state === "gating") {
+        if (this.legs.every((candidate) => candidate.done)) {
+          this.resolveGateOnAllDone();
+        } else if (leg.receivedTotal < this.chunkBytes) {
+          this.reportLegUnreported(leg, "lost_race");
+          this.legs.splice(this.legs.indexOf(leg), 1);
+          this.state = "single";
+        }
+      }
+      this.progress();
+    }
+    noteLegDead(slot, outcome) {
+      if (this.closed) return;
+      const leg = this.legFor(slot);
+      if (leg === void 0 || leg.dead || leg.done) {
+        throw new Error("直播腿重复死亡");
+      }
+      leg.dead = true;
+      this.reportLegUnreported(leg, outcome);
+      for (const delivered of this.deliveredWindows.values()) delivered.compared.add(slot);
+      this.legs.splice(this.legs.indexOf(leg), 1);
+      if (this.state === "gating") {
+        this.state = "single";
+      }
+      if (this.legs.length === 0) {
+        this.failStreamNow();
+        return;
+      }
+      if (this.legs.length === 1) this.state = "single";
+      this.progress();
+    }
+    abortStream() {
+      if (this.closed) return;
+      for (const leg of this.legs) this.reportLegUnreported(leg, "aborted");
+      this.legs = [];
+      this.deliveredWindows.clear();
+      this.closed = true;
+    }
+    completeWindow(leg, windowIndex) {
+      const bytes = leg.currentWindow;
+      leg.currentWindow = new Uint8Array(this.chunkBytes);
+      this.completionSequence += 1;
+      leg.ahead.set(windowIndex, {
+        bytes,
+        seq: this.completionSequence,
+        startedAt: leg.windowStartedAt ?? leg.startedAt
+      });
+      leg.windowFilled = 0;
+      leg.reportedInWindow = 0;
+      leg.windowStartedAt = void 0;
+    }
+    regionOf(leg, windowIndex) {
+      const entry = leg.ahead.get(windowIndex);
+      if (entry !== void 0) return entry.bytes;
+      return leg.currentWindow.subarray(0, leg.windowFilled);
+    }
+    emitChunkNow(leg, windowIndex, result, bytes, entry) {
+      const start = windowIndex * this.chunkBytes;
+      const startedAt = entry?.startedAt ?? leg.windowStartedAt;
+      const payload = {
+        slot: leg.slot,
+        source: leg.source,
+        mirror: leg.mirror,
+        chunkIndex: windowIndex,
+        start,
+        end: bytes > 0 ? start + bytes - 1 : start,
+        bytes,
+        durationMs: startedAt === void 0 ? 0 : this.now() - startedAt,
+        result
+      };
+      if (windowIndex === 0 && leg.ttfbAt !== void 0) payload.ttfbMs = leg.ttfbAt - leg.startedAt;
+      this.callbacks.emitChunk(payload);
+    }
+    emitLegWindowEvent(leg, result) {
+      const windowIndex = chunkIndex(leg.receivedTotal, this.chunkBytes);
+      const bytes = leg.windowFilled - leg.reportedInWindow;
+      leg.reportedInWindow = leg.windowFilled;
+      this.emitChunkNow(leg, windowIndex, result, bytes, void 0);
+    }
+    reportLegUnreported(leg, result) {
+      const indices = [...leg.ahead.keys()].sort((left, right) => left - right);
+      for (const windowIndex of indices) {
+        const entry = leg.ahead.get(windowIndex);
+        this.emitChunkNow(leg, windowIndex, result, entry.bytes.byteLength, entry);
+        leg.ahead.delete(windowIndex);
+      }
+      this.emitLegWindowEvent(leg, result);
+    }
+    emitStitchNow(mismatch, phase) {
+      this.callbacks.emitStitch({
+        streamPath: this.streamPath,
+        bytesChecked: this.bytesChecked,
+        mismatch,
+        phase
+      });
+    }
+    failStreamNow() {
+      if (this.closed) return;
+      this.closed = true;
+      this.callbacks.failStream();
+    }
+    progress() {
+      if (this.closed) return;
+      if (this.state === "gating") this.progressGate();
+      if (this.closed || this.state === "gating") return;
+      if (this.state === "racing") this.progressRacing();
+      if (this.closed) return;
+      if (this.state === "single") this.progressSingle();
+      if (this.closed) return;
+      this.checkFinish();
+    }
+    progressGate() {
+      if (this.legs.length !== 2) return;
+      const [first, second] = this.legs;
+      for (; ; ) {
+        const limit = Math.min(first.receivedTotal, second.receivedTotal, this.chunkBytes);
+        if (limit <= this.gateCompared) break;
+        const start = this.gateCompared;
+        const left = this.regionOf(first, 0).subarray(start, limit);
+        const right = this.regionOf(second, 0).subarray(start, limit);
+        const mismatchAt = compareByteRegions(left, right);
+        if (mismatchAt !== -1) {
+          this.bytesChecked += mismatchAt + 1;
+          this.gateCompared += mismatchAt + 1;
+          this.emitStitchNow(true, "prefix");
+          this.degradeToSingle(first.slot);
+          return;
+        }
+        this.bytesChecked += limit - start;
+        this.gateCompared = limit;
+      }
+      if (this.gateCompared >= this.chunkBytes) {
+        this.state = "racing";
+        this.emitStitchNow(false, "prefix");
+      }
+    }
+    resolveGateOnAllDone() {
+      const [first, second] = this.legs;
+      const common = Math.min(first.receivedTotal, second.receivedTotal);
+      if (common > this.gateCompared) {
+        const left = this.regionOf(first, 0).subarray(this.gateCompared, common);
+        const right = this.regionOf(second, 0).subarray(this.gateCompared, common);
+        const mismatchAt = compareByteRegions(left, right);
+        if (mismatchAt !== -1) {
+          this.bytesChecked += mismatchAt + 1;
+          this.emitStitchNow(true, "prefix");
+          this.degradeToSingle(first.slot);
+          return;
+        }
+        this.bytesChecked += common - this.gateCompared;
+      }
+      if (first.receivedTotal !== second.receivedTotal) {
+        this.emitStitchNow(true, "prefix");
+        this.degradeToSingle(first.slot);
+        return;
+      }
+      this.state = "racing";
+      this.emitStitchNow(false, "prefix");
+    }
+    degradeToSingle(keepSlot) {
+      const keep = this.legs.find((leg) => leg.slot === keepSlot && !leg.dead);
+      if (keep === void 0) {
+        this.failStreamNow();
+        return;
+      }
+      for (const leg of [...this.legs]) {
+        if (leg === keep || leg.dead) continue;
+        this.reportLegUnreported(leg, "lost_race");
+        leg.dead = true;
+        this.legs.splice(this.legs.indexOf(leg), 1);
+        this.callbacks.cancelLeg(leg.slot);
+      }
+      this.deliveredWindows.clear();
+      this.state = "single";
+    }
+    progressRacing() {
+      if (this.state !== "racing") return;
+      for (; ; ) {
+        const windowIndex = chunkIndex(this.deliveredOffset, this.chunkBytes);
+        const start = windowIndex * this.chunkBytes;
+        let winner;
+        for (const leg of this.legs) {
+          if (leg.dead) continue;
+          const entry = leg.ahead.get(windowIndex);
+          if (entry === void 0) continue;
+          if (winner === void 0 || entry.seq < winner.entry.seq) winner = { leg, entry };
+        }
+        if (winner === void 0) break;
+        const end = start + winner.entry.bytes.byteLength - 1;
+        this.emitChunkNow(winner.leg, windowIndex, "fetched", winner.entry.bytes.byteLength, winner.entry);
+        for (const other of this.legs) {
+          if (other === winner.leg || other.dead) continue;
+          const otherEntry = other.ahead.get(windowIndex);
+          if (otherEntry !== void 0) {
+            this.emitChunkNow(other, windowIndex, "lost_race", otherEntry.bytes.byteLength, otherEntry);
+          } else if (!other.done) {
+            this.emitLegWindowEvent(other, "lost_race");
+          }
+        }
+        this.callbacks.deliver(winner.entry.bytes.slice(), start, end);
+        this.deliveredOffset = end + 1;
+        winner.leg.ahead.delete(windowIndex);
+        this.deliveredWindows.set(windowIndex, {
+          bytes: winner.entry.bytes,
+          winnerSlot: winner.leg.slot,
+          compared: /* @__PURE__ */ new Set([winner.leg.slot])
+        });
+        this.progressTripwire();
+        if (this.closed || this.state !== "racing") return;
+      }
+      this.progressTripwire();
+    }
+    progressTripwire() {
+      if (this.closed || this.state !== "racing") return;
+      for (const [windowIndex, delivered] of [...this.deliveredWindows]) {
+        for (const leg of this.legs) {
+          if (leg.dead || leg.slot === delivered.winnerSlot || delivered.compared.has(leg.slot)) continue;
+          const entry = leg.ahead.get(windowIndex);
+          if (entry === void 0) continue;
+          const mismatchAt = compareByteRegions(entry.bytes, delivered.bytes);
+          this.bytesChecked += mismatchAt === -1 ? delivered.bytes.byteLength : mismatchAt + 1;
+          delivered.compared.add(leg.slot);
+          leg.ahead.delete(windowIndex);
+          if (mismatchAt === -1) continue;
+          this.emitStitchNow(true, "stream");
+          const winner = this.legFor(delivered.winnerSlot);
+          if (winner === void 0 || winner.dead) {
+            this.failStreamNow();
+            return;
+          }
+          this.degradeToSingle(winner.slot);
+          return;
+        }
+        const open = this.legs.some((leg) => {
+          if (leg.dead || leg.slot === delivered.winnerSlot || delivered.compared.has(leg.slot)) return false;
+          return !leg.done || leg.ahead.has(windowIndex);
+        });
+        if (!open) this.deliveredWindows.delete(windowIndex);
+      }
+    }
+    progressSingle() {
+      const leg = this.legs[0];
+      if (leg === void 0) return;
+      while (this.deliveredOffset < leg.receivedTotal) {
+        const windowIndex = chunkIndex(this.deliveredOffset, this.chunkBytes);
+        const start = windowIndex * this.chunkBytes;
+        const targetEnd = Math.min(leg.receivedTotal, start + this.chunkBytes);
+        const region = this.regionOf(leg, windowIndex);
+        const piece = region.subarray(this.deliveredOffset - start, targetEnd - start);
+        this.callbacks.deliver(piece.slice(), this.deliveredOffset, targetEnd - 1);
+        this.deliveredOffset = targetEnd;
+        if (targetEnd === start + this.chunkBytes) {
+          this.emitChunkNow(leg, windowIndex, "fetched", targetEnd - start, leg.ahead.get(windowIndex));
+        }
+      }
+      if (leg.done && this.deliveredOffset === leg.receivedTotal && leg.receivedTotal % this.chunkBytes !== 0) {
+        const windowIndex = chunkIndex(leg.receivedTotal, this.chunkBytes);
+        this.emitChunkNow(
+          leg,
+          windowIndex,
+          "fetched",
+          leg.receivedTotal - windowIndex * this.chunkBytes,
+          leg.ahead.get(windowIndex)
+        );
+      }
+    }
+    checkFinish() {
+      if (this.closed || this.legs.length === 0) return;
+      if (!this.legs.every((leg) => leg.done)) return;
+      if (this.state === "gating") return;
+      this.deliveredWindows.clear();
+      this.closed = true;
+      this.callbacks.closeStream();
+    }
+  };
+
   // src/bank/xhr.js
   var EVENT_NAMES = Object.freeze([
     "readystatechange",
@@ -751,6 +1174,11 @@
         this._generation = 0;
         this._playurlObservationGeneration = void 0;
         this._playurlObservationUrl = void 0;
+        this._livePlayurlObservationUrl = void 0;
+        this._liveTakeover = void 0;
+        this._liveChunks = [];
+        this._liveLoaded = 0;
+        this._liveTextState = void 0;
         for (const eventName of EVENT_NAMES) {
           this._native.addEventListener(eventName, (event) => {
             if (!this._intercepted) {
@@ -759,6 +1187,13 @@
                   bank.observePlayurlText(this._native.responseText);
                 } catch (error) {
                   console.error("[BilibiliBuffer] playurl 地址簿读取失败", error);
+                }
+              }
+              if (event.type === "load" && this._playurlObservationGeneration === this._generation && this._livePlayurlObservationUrl !== void 0) {
+                try {
+                  bank.observeLivePlayurlText(this._native.responseText);
+                } catch (error) {
+                  console.error("[BilibiliBuffer] 直播 playurl 地址簿读取失败", error);
                 }
               }
               if (event.type === "loadstart" && this._suppressNativeLoadstart) {
@@ -774,13 +1209,20 @@
         return this._intercepted ? this._state : this._native.readyState;
       }
       get response() {
-        return this._intercepted ? this._response : this._native.response;
+        if (this._intercepted) {
+          if (this._liveTakeover !== void 0) {
+            return responseValue(windowObject, this._responseType, this.joinLiveChunks());
+          }
+          return this._response;
+        }
+        return this._native.response;
       }
       get responseText() {
         if (this._intercepted) {
           if (this.responseType !== "" && this.responseType !== "text") {
             throw new DOMException("responseText is unavailable for this responseType", "InvalidStateError");
           }
+          if (this._liveTakeover !== void 0) return this.liveText();
           return this._response || "";
         }
         return this._native.responseText;
@@ -819,6 +1261,11 @@
         this._generation += 1;
         this._playurlObservationGeneration = void 0;
         this._playurlObservationUrl = void 0;
+        this._livePlayurlObservationUrl = void 0;
+        this._liveTakeover = void 0;
+        this._liveChunks = [];
+        this._liveLoaded = 0;
+        this._liveTextState = void 0;
         this._openArgs = args;
         this._headers = {};
         this._range = void 0;
@@ -873,6 +1320,9 @@
       }
       send(body) {
         this._body = body;
+        if (typeof bank.isLiveRoute === "function" && bank.isLiveRoute()) {
+          return this.sendLive(body);
+        }
         if (typeof bank.syncRouteLifecycle === "function" && !bank.syncRouteLifecycle()) {
           return this._native.send(body);
         }
@@ -945,6 +1395,145 @@
           if (!served.intercepted) throw new Error("媒体分片请求未被下载层拦截");
           void this.serve(served, url, body, generation);
         }).catch((error) => this.handleServeError(error, url, body, generation));
+      }
+      joinLiveChunks() {
+        const bytes = new Uint8Array(this._liveLoaded);
+        let offset = 0;
+        for (const chunk of this._liveChunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        return bytes.buffer;
+      }
+      liveText() {
+        if (this._liveTextState === void 0) {
+          this._liveTextState = { decoder: new TextDecoder(), text: "", consumed: 0 };
+        }
+        const state = this._liveTextState;
+        for (; state.consumed < this._liveChunks.length; state.consumed += 1) {
+          state.text += state.decoder.decode(this._liveChunks[state.consumed], { stream: true });
+        }
+        return state.text;
+      }
+      sendLive(body) {
+        const url = new URL(this._openArgs?.[1], windowObject.location.href).href;
+        const asyncFlag = this._openArgs?.[2] !== false;
+        const generation = this._generation;
+        this._playurlObservationGeneration = generation;
+        this._livePlayurlObservationUrl = typeof bank.isLivePlayurlUrl === "function" && bank.isLivePlayurlUrl(url) ? url : void 0;
+        const enabled = bankEnabled(bank);
+        const classification = classifyLiveRequest({
+          url,
+          enabled,
+          locationObject: windowObject.location
+        });
+        if (!asyncFlag) {
+          if (enabled) {
+            bank.emitDiagnostic("bank.serve", {
+              source: scrubUrl(url),
+              mirror: mirrorForUrl(url),
+              result: "pass",
+              reason: "sync_xhr"
+            });
+          }
+          return this._native.send(body);
+        }
+        if (!classification.intercepted) {
+          if (enabled) {
+            bank.emitDiagnostic("bank.serve", {
+              source: scrubUrl(url),
+              mirror: mirrorForUrl(url),
+              result: "pass",
+              reason: classification.reason
+            });
+          }
+          return this._native.send(body);
+        }
+        this._intercepted = true;
+        this._state = 1;
+        this._abortController = new AbortController();
+        this._status = 0;
+        this._statusText = "";
+        this._responseURL = "";
+        this._responseHeaders = void 0;
+        this._response = null;
+        this.dispatchEvent(eventFor(windowObject, "loadstart"));
+        if (this.timeout > 0) {
+          this._timer = windowObject.setTimeout(() => {
+            if (this._done || generation !== this._generation) return;
+            this._timedOut = true;
+            this._abortController.abort();
+            this._done = true;
+            this._state = 4;
+            this.dispatchEvent(eventFor(windowObject, "readystatechange"));
+            this.dispatchEvent(eventFor(windowObject, "timeout"));
+            this.dispatchEvent(eventFor(windowObject, "loadend"));
+          }, this.timeout);
+        }
+        let takeover;
+        try {
+          takeover = bank.serveLive({
+            url,
+            credentials: this.withCredentials ? "include" : "same-origin",
+            signal: this._abortController.signal
+          });
+        } catch (error) {
+          console.error("[BilibiliBuffer] 直播流前台接管失败", error);
+          this.finishError(error, generation);
+          return void 0;
+        }
+        this._liveTakeover = takeover;
+        takeover.onHeaders = ({ status, statusText, contentType }) => {
+          if (this._done || generation !== this._generation) return;
+          this._status = status;
+          this._statusText = statusText;
+          this._responseURL = url;
+          const HeadersConstructor = windowObject.Headers || globalThis.Headers;
+          const headers = new HeadersConstructor();
+          if (contentType !== void 0) headers.set("Content-Type", contentType);
+          this._responseHeaders = headers;
+          this._state = 2;
+          this.dispatchEvent(eventFor(windowObject, "readystatechange"));
+          this._state = 3;
+          this.dispatchEvent(eventFor(windowObject, "readystatechange"));
+        };
+        takeover.onBytes = (bytes) => {
+          if (this._done || generation !== this._generation) return;
+          this._liveChunks.push(bytes);
+          this._liveLoaded += bytes.byteLength;
+          this.dispatchEvent(eventFor(windowObject, "progress", {
+            loaded: this._liveLoaded,
+            total: 0,
+            lengthComputable: false
+          }));
+        };
+        takeover.onEnd = () => {
+          if (this._done || generation !== this._generation) return;
+          this._response = responseValue(windowObject, this._responseType, this.joinLiveChunks());
+          this._liveTakeover = void 0;
+          this._state = 4;
+          this._done = true;
+          this.dispatchEvent(eventFor(windowObject, "readystatechange"));
+          this.dispatchEvent(eventFor(windowObject, "load"));
+          this.dispatchEvent(eventFor(windowObject, "loadend"));
+          this.clearTimer();
+        };
+        takeover.onError = (error) => {
+          if (this._done || generation !== this._generation) return;
+          if (this._aborted || this._timedOut) return;
+          console.error("[BilibiliBuffer] 直播流前台接管失败", error);
+          this.finishError(error, generation);
+        };
+        void takeover.headersPromise.catch((error) => {
+          if (this._done || generation !== this._generation) return;
+          if (isAbortError(error)) {
+            if (!this._aborted && !this._timedOut) this.finishError(error, generation);
+            return;
+          }
+          console.error("[BilibiliBuffer] 直播流前台接管失败", error);
+          this.finishError(error, generation);
+        });
+        return void 0;
       }
       handleServeError(error, url, body, generation) {
         if (this._done || generation !== this._generation) return;
@@ -1292,6 +1881,12 @@
     isPlayurlUrl(url) {
       return new URL(url).pathname.endsWith("/playurl");
     }
+    isLiveRoute() {
+      return isLiveLocation(this.windowObject.location);
+    }
+    isLivePlayurlUrl(url) {
+      return isLivePlayurlUrl(url);
+    }
     async observePlayurlResponse(response) {
       const clone = response.clone();
       const data = await clone.json();
@@ -1303,6 +1898,49 @@
       } catch (error) {
         console.error("[BilibiliBuffer] playurl 地址簿解析失败", error);
       }
+    }
+    async observeLivePlayurlResponse(response) {
+      const clone = response.clone();
+      const data = await clone.json();
+      this.observeLivePlayurlData(data);
+    }
+    observeLivePlayurlText(responseText) {
+      try {
+        this.observeLivePlayurlData(JSON.parse(responseText));
+      } catch (error) {
+        console.error("[BilibiliBuffer] 直播 playurl 地址簿解析失败", error);
+      }
+    }
+    readInlineLivePlayinfo() {
+      const addressBook = new Map(this.addressBook);
+      try {
+        this.observeLivePlayurlData(this.windowObject.__NEPTUNE_IS_MY_WAIFU__);
+      } catch (error) {
+        this.addressBook = addressBook;
+        console.error("[BilibiliBuffer] 直播内嵌地址簿读取失败", error);
+      }
+    }
+    observeLivePlayurlData(data) {
+      if (data === void 0 || data === null) return;
+      if (typeof data === "string") {
+        try {
+          data = JSON.parse(data);
+        } catch (error) {
+          console.error("[BilibiliBuffer] 直播 playurl 地址簿解析失败", error);
+          return;
+        }
+      }
+      const observedAt = this.now();
+      visitLiveUrlInfoGroups(data, (group) => {
+        try {
+          const urls = group.map(({ host, extra }) => new URL(extra, host).href);
+          const pathnames = new Set(urls.map((entry) => new URL(entry).pathname));
+          if (pathnames.size !== 1) throw new Error("直播主备地址路径不一致");
+          this.addressBook.set(new URL(urls[0]).pathname, { urls, observedAt });
+        } catch (error) {
+          console.error("[BilibiliBuffer] 直播 playurl 地址簿 URL 无效", error);
+        }
+      });
     }
     readInlinePlayinfo() {
       const addressBook = new Map(this.addressBook);
@@ -1386,6 +2024,9 @@
       }
     }
     async handleFetch(thisArg, args, originalFetch) {
+      if (this.isLiveRoute()) {
+        return this.handleLiveFetch(thisArg, args, originalFetch);
+      }
       if (!this.syncRouteLifecycle()) {
         return originalFetch.apply(thisArg, args);
       }
@@ -1460,6 +2101,310 @@
           reason: "internal_error"
         });
         return originalFetch.apply(thisArg, args);
+      }
+    }
+    async handleLiveFetch(thisArg, args, originalFetch) {
+      let request;
+      try {
+        request = inspectFetchArguments(args, this.windowObject.location);
+      } catch (error) {
+        return originalFetch.apply(thisArg, args);
+      }
+      let classification;
+      try {
+        classification = classifyLiveRequest({
+          url: request.url,
+          enabled: this.isEnabled(),
+          locationObject: this.windowObject.location
+        });
+      } catch (error) {
+        return originalFetch.apply(thisArg, args);
+      }
+      if (!classification.intercepted) {
+        if (this.isEnabled()) {
+          this.emitDiagnostic("bank.serve", {
+            source: scrubUrl(request.url),
+            mirror: mirrorForUrl2(request.url),
+            result: "pass",
+            reason: classification.reason
+          });
+        }
+        const response2 = await originalFetch.apply(thisArg, args);
+        if (this.isLivePlayurlUrl(request.url)) {
+          await this.observeLivePlayurlResponse(response2).catch((error) => {
+            console.error("[BilibiliBuffer] 直播 playurl 地址簿读取失败", error);
+          });
+        }
+        return response2;
+      }
+      const takeover = this.serveLive({
+        url: request.url,
+        credentials: request.credentials,
+        signal: request.signal
+      });
+      let streamController;
+      const body = new ReadableStream({
+        start(controller) {
+          streamController = controller;
+        },
+        cancel() {
+          takeover.cancel();
+        }
+      });
+      takeover.onBytes = (bytes) => {
+        streamController.enqueue(bytes);
+      };
+      takeover.onEnd = () => {
+        streamController.close();
+      };
+      takeover.onError = (error) => {
+        streamController.error(error);
+      };
+      let headers;
+      try {
+        headers = await takeover.headersPromise;
+      } catch (error) {
+        if (isAbortError2(error)) throw error;
+        console.error("[BilibiliBuffer] 直播流前台接管失败", error);
+        throw error;
+      }
+      const ResponseConstructor = responseTypeConstructor(this.windowObject, "Response");
+      const responseHeaders = {};
+      if (headers.contentType !== void 0) responseHeaders["Content-Type"] = headers.contentType;
+      const response = new ResponseConstructor(body, {
+        status: headers.status,
+        statusText: headers.statusText,
+        headers: responseHeaders
+      });
+      Object.defineProperty(response, "url", { configurable: true, value: request.url });
+      Object.defineProperty(response, "type", { configurable: true, value: "basic" });
+      return response;
+    }
+    serveLive({ url, credentials, signal }) {
+      if (signal?.aborted) throw abortError();
+      const startedAt = performanceNow(this.windowObject);
+      let pairUrl;
+      if (this.config.raceLegs > 1) {
+        pairUrl = this.pairUrlFor(url);
+        if (pairUrl === void 0) {
+          this.readInlineLivePlayinfo();
+          pairUrl = this.pairUrlFor(url);
+        }
+      }
+      const candidateUrls = pairUrl === void 0 ? [url] : [url, pairUrl];
+      const legDescriptors = [];
+      for (const [slot, candidate] of candidateUrls.entries()) {
+        const expiresAt = liveUrlExpiresAt(candidate);
+        if (expiresAt !== void 0 && this.now() >= expiresAt) {
+          this.emitDiagnostic("bank.fetch.chunk", {
+            source: scrubUrl(candidate),
+            mirror: mirrorForUrl2(candidate),
+            chunkIndex: 0,
+            start: 0,
+            end: 0,
+            bytes: 0,
+            durationMs: 0,
+            slot,
+            priority: "foreground",
+            result: "address_expired"
+          });
+          continue;
+        }
+        legDescriptors.push({ slot, url: candidate });
+      }
+      if (legDescriptors.length === 0) {
+        throw new BankNetworkError("直播流地址签名到期且无可用地址");
+      }
+      const legs = legDescriptors.map((descriptor) => ({
+        ...descriptor,
+        controller: new AbortController(),
+        reader: void 0,
+        stallTimer: void 0,
+        abortReason: void 0,
+        cancelledByStitcher: false,
+        outcome: void 0
+      }));
+      let headersSettled = false;
+      let resolveHeaders;
+      let rejectHeaders;
+      const headersPromise = new Promise((resolve, reject) => {
+        resolveHeaders = resolve;
+        rejectHeaders = reject;
+      });
+      const takeover = {
+        headersPromise,
+        onHeaders: void 0,
+        onBytes: void 0,
+        onEnd: void 0,
+        onError: void 0,
+        cancel: void 0
+      };
+      const clearLiveLegStall = (leg) => {
+        if (leg.stallTimer !== void 0) {
+          this.windowObject.clearTimeout(leg.stallTimer);
+          leg.stallTimer = void 0;
+        }
+      };
+      const cancelLiveLeg = (leg) => {
+        clearLiveLegStall(leg);
+        leg.controller.abort();
+        if (leg.reader !== void 0) {
+          void leg.reader.cancel().catch((error) => {
+            if (!isAbortError2(error)) console.error("[BilibiliBuffer] 直播流读取取消失败", error);
+          });
+        }
+      };
+      const abortAllLegs = () => {
+        for (const leg of legs) {
+          leg.cancelledByStitcher = true;
+          cancelLiveLeg(leg);
+        }
+      };
+      const stitcher = new LiveStreamStitcher({
+        streamPath: new URL(url).pathname,
+        legs: legs.map((leg) => ({
+          slot: leg.slot,
+          source: scrubUrl(leg.url),
+          mirror: mirrorForUrl2(leg.url)
+        })),
+        chunkBytes: this.config.chunkBytes,
+        now: this.now,
+        emitChunk: (payload) => {
+          this.emitDiagnostic("bank.fetch.chunk", { ...payload, priority: "foreground" });
+        },
+        emitStitch: (payload) => {
+          this.emitDiagnostic("live.stream.stitch", payload);
+        },
+        deliver: (bytes) => takeover.onBytes?.(bytes),
+        cancelLeg: (slot) => {
+          const leg = legs.find((candidate) => candidate.slot === slot);
+          if (leg === void 0) return;
+          leg.cancelledByStitcher = true;
+          cancelLiveLeg(leg);
+        },
+        failStream: () => {
+          abortAllLegs();
+          const error = new BankNetworkError("直播流双腿取数失败");
+          if (!headersSettled) {
+            headersSettled = true;
+            rejectHeaders(error);
+            return;
+          }
+          takeover.onError?.(error);
+        },
+        closeStream: () => takeover.onEnd?.()
+      });
+      let cancelled = false;
+      takeover.cancel = () => {
+        if (cancelled) return;
+        cancelled = true;
+        stitcher.abortStream();
+        abortAllLegs();
+        if (!headersSettled) {
+          headersSettled = true;
+          rejectHeaders(abortError());
+          return;
+        }
+        takeover.onError?.(abortError());
+      };
+      if (signal !== void 0) {
+        signal.addEventListener("abort", () => takeover.cancel(), { once: true });
+      }
+      const noteHeaders = (leg, response) => {
+        if (headersSettled) return;
+        headersSettled = true;
+        this.emitDiagnostic("bank.serve", {
+          source: scrubUrl(url),
+          mirror: mirrorForUrl2(url),
+          durationMs: performanceNow(this.windowObject) - startedAt,
+          result: "hit",
+          reason: legs.length > 1 ? "live_stream" : "live_stream_unpaired"
+        });
+        const info = {
+          status: response.status,
+          statusText: response.statusText,
+          contentType: headerValue(response.headers, "Content-Type") || void 0
+        };
+        takeover.onHeaders?.(info);
+        resolveHeaders(info);
+      };
+      for (const leg of legs) {
+        void this.runLiveLeg(leg, { credentials, stitcher, noteHeaders }).catch((error) => {
+          console.error("[BilibiliBuffer] 直播流腿执行失败", error);
+        });
+      }
+      return takeover;
+    }
+    async runLiveLeg(leg, { credentials, stitcher, noteHeaders }) {
+      const armStall = () => {
+        if (leg.stallTimer !== void 0) this.windowObject.clearTimeout(leg.stallTimer);
+        leg.stallTimer = this.windowObject.setTimeout(() => {
+          if (leg.controller.signal.aborted) return;
+          leg.abortReason = "stalled";
+          leg.controller.abort();
+          if (leg.reader !== void 0) {
+            void leg.reader.cancel().catch((error) => {
+              if (!isAbortError2(error)) console.error("[BilibiliBuffer] 直播停滞读取取消失败", error);
+            });
+          }
+        }, this.config.stallMs);
+      };
+      armStall();
+      try {
+        let response;
+        try {
+          response = await this.nativeFetch.call(this.windowObject, leg.url, {
+            credentials,
+            signal: leg.controller.signal
+          });
+        } catch (error) {
+          if (isAbortError2(error) || leg.controller.signal.aborted) throw error;
+          leg.outcome = "network_error";
+          stitcher.noteLegDead(leg.slot, "network_error");
+          return;
+        }
+        if (leg.controller.signal.aborted) throw abortError();
+        if (response.status < 200 || response.status >= 300) {
+          leg.outcome = "http_error";
+          stitcher.noteLegDead(leg.slot, "http_error");
+          return;
+        }
+        noteHeaders(leg, response);
+        try {
+          const reader = response.body.getReader();
+          leg.reader = reader;
+          armStall();
+          for (; ; ) {
+            const read = await reader.read();
+            if (read.done) break;
+            const chunk = read.value.slice();
+            if (chunk.byteLength > 0) {
+              stitcher.noteLegBytes(leg.slot, chunk);
+              armStall();
+            }
+            if (leg.controller.signal.aborted) throw abortError();
+          }
+          if (leg.controller.signal.aborted) throw abortError();
+          stitcher.noteLegDone(leg.slot);
+        } catch (error) {
+          if (isAbortError2(error) || leg.controller.signal.aborted) throw error;
+          leg.outcome = "network_error";
+          stitcher.noteLegDead(leg.slot, "network_error");
+          return;
+        }
+      } catch (error) {
+        if (isAbortError2(error) || leg.controller.signal.aborted) {
+          if (leg.abortReason === "stalled" && !leg.cancelledByStitcher) {
+            stitcher.noteLegDead(leg.slot, "stalled");
+          }
+          return;
+        }
+        throw error;
+      } finally {
+        if (leg.stallTimer !== void 0) {
+          this.windowObject.clearTimeout(leg.stallTimer);
+          leg.stallTimer = void 0;
+        }
       }
     }
     readStoredRange(bankKeyValue, start, end) {
@@ -2144,7 +3089,7 @@
   }
   if (typeof window !== "undefined" && typeof document !== "undefined") {
     const locationObject = window.location;
-    if (locationObject !== void 0 && locationObject.hostname === "www.bilibili.com") {
+    if (locationObject !== void 0 && (locationObject.hostname === "www.bilibili.com" || isLiveLocation(locationObject))) {
       installSegmentBank(window);
     }
   }

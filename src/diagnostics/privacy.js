@@ -229,7 +229,7 @@ function safeResolution(value) {
 
 function sanitizeField(field, value) {
   if (field === 'origin') return scrubOrigin(value);
-  if (field === 'pathname') {
+  if (field === 'pathname' || field === 'streamPath') {
     if (typeof value !== 'string' || !value.startsWith('/')) return UNKNOWN_VALUE;
     return scrubPathname(value);
   }
@@ -256,7 +256,7 @@ function sanitizeField(field, value) {
     return browserMetric(value);
   }
   if (field === 'enabled') return value === true || value === false ? value : UNKNOWN_VALUE;
-  if (['disabled', 'routeActive', 'pairedAddressAvailable'].includes(field)) {
+  if (['disabled', 'routeActive', 'pairedAddressAvailable', 'mismatch'].includes(field)) {
     return value === true || value === false ? value : UNKNOWN_VALUE;
   }
   if ([
@@ -267,6 +267,7 @@ function sanitizeField(field, value) {
     'queued',
     'inflight',
     'prefetchConcurrency',
+    'bytesChecked',
   ].includes(field)) return safeNonnegativeInteger(value);
   if (field === 'code') return isSafePersistErrorCode(value) ? value : UNKNOWN_VALUE;
   if (field === 'message') return scrubErrorText(value);

@@ -1468,6 +1468,34 @@ test('watch-later route identity preserves the real item and omits an absent ite
   }), { routeKind: 'video', watchLaterItem: undefined, part: undefined });
 });
 
+test('live route identity marks live.bilibili.com without exposing the room path', () => {
+  assert.deepEqual(createRouteIdentity({
+    hostname: 'live.bilibili.com',
+    pathname: '/21452505',
+    search: '?hot_rank=1',
+  }), { routeKind: 'live', part: undefined });
+  assert.deepEqual(createRouteIdentity({
+    hostname: 'www.bilibili.com',
+    pathname: '/21452505',
+    search: '',
+  }), { routeKind: 'other', part: undefined });
+});
+
+test('live.stream.stitch allowlist sanitisation keeps verdict fields and scrubs paths', () => {
+  assert.deepEqual(sanitizeEventData('live.stream.stitch', {
+    streamPath: '/live-bvc/1/stream.flv?expires=4102444800&sign=secret',
+    bytesChecked: 1048576,
+    mismatch: true,
+    phase: 'stream',
+    secretToken: 'drop',
+  }), {
+    streamPath: '/live-bvc/1/stream.flv',
+    bytesChecked: 1048576,
+    mismatch: true,
+    phase: 'stream',
+  });
+});
+
 test('bridge and privacy error contracts preserve deep causes, scrub URLs, and mark cycles', () => {
   let deepest = Object.assign(new Error('deep https://secret.example/path?token=redact'), { code: 'DEEP' });
   for (let index = 0; index < 24; index += 1) {

@@ -18,6 +18,7 @@ import {
   postBankControl,
 } from '../bank/contract.js';
 import { isVideoLocation } from '../bank/logic.js';
+import { isLiveLocation } from '../bank/live.js';
 
 export function isVideoPage(locationObject) {
   return isVideoLocation(locationObject);
@@ -424,7 +425,8 @@ export class ExtensionCoordinator {
 
 if (typeof chrome !== 'undefined' && typeof document !== 'undefined' && typeof window !== 'undefined') {
   const diagnostics = new DiagnosticsClient();
-  const bankDiagnostics = window.location.hostname === 'www.bilibili.com'
+  const bankDiagnostics = (window.location.hostname === 'www.bilibili.com'
+    || isLiveLocation(window.location))
     ? installBankDiagnostics({ diagnostics })
     : undefined;
   const coordinator = new ExtensionCoordinator({

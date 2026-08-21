@@ -59,6 +59,18 @@ test('video route selection has one behavior for video and Watch Later only', ()
   }
 });
 
+test('live pages stay outside the video mode while keeping extension presence', () => {
+  const location = (href) => new URL(href);
+  for (const url of [
+    'https://live.bilibili.com/21452505',
+    'https://live.bilibili.com/',
+  ]) {
+    assert.equal(isVideoPage(location(url)), false);
+    assert.equal(isVodPage(location(url)), false);
+    assert.equal(modeForLocation(location(url)), undefined);
+  }
+});
+
 test('status panel exposes only direct video facts and no playback or recovery actions', () => {
   const unavailable = createUnavailableStatusSnapshot('video');
   assert.equal(unavailable.mode, '视频');

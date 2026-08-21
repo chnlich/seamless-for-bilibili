@@ -7,5 +7,8 @@ export function routeIdentity(locationObject) {
   if (locationObject.hostname === 'www.bilibili.com' && pathname.startsWith('/list/watchlater')) {
     return { routeKind: 'video', watchLaterItem: pathname.split('/')[3] || undefined, part };
   }
+  if (locationObject.hostname === 'live.bilibili.com') {
+    return { routeKind: 'live', part };
+  }
   return { routeKind: 'other', part };
 }

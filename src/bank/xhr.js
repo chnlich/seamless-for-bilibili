@@ -1,6 +1,7 @@
 import { BankFallbackError, BankNetworkError } from './errors.js';
 import { scrubUrl } from '../diagnostics/privacy.js';
 import { classifyRequest } from './logic.js';
+import { classifyLiveRequest } from './live.js';
 
 const EVENT_NAMES = Object.freeze([
   'readystatechange',
@@ -87,6 +88,11 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
       this._generation = 0;
       this._playurlObservationGeneration = undefined;
       this._playurlObservationUrl = undefined;
+      this._livePlayurlObservationUrl = undefined;
+      this._liveTakeover = undefined;
+      this._liveChunks = [];
+      this._liveLoaded = 0;
+      this._liveTextState = undefined;
       for (const eventName of EVENT_NAMES) {
         this._native.addEventListener(eventName, (event) => {
           if (!this._intercepted) {
@@ -97,6 +103,15 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
                 bank.observePlayurlText(this._native.responseText);
               } catch (error) {
                 console.error('[BilibiliBuffer] playurl 地址簿读取失败', error);
+              }
+            }
+            if (event.type === 'load'
+              && this._playurlObservationGeneration === this._generation
+              && this._livePlayurlObservationUrl !== undefined) {
+              try {
+                bank.observeLivePlayurlText(this._native.responseText);
+              } catch (error) {
+                console.error('[BilibiliBuffer] 直播 playurl 地址簿读取失败', error);
               }
             }
             if (event.type === 'loadstart' && this._suppressNativeLoadstart) {
@@ -111,13 +126,22 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
 
     get readyState() { return this._intercepted ? this._state : this._native.readyState; }
 
-    get response() { return this._intercepted ? this._response : this._native.response; }
+    get response() {
+      if (this._intercepted) {
+        if (this._liveTakeover !== undefined) {
+          return responseValue(windowObject, this._responseType, this.joinLiveChunks());
+        }
+        return this._response;
+      }
+      return this._native.response;
+    }
 
     get responseText() {
       if (this._intercepted) {
         if (this.responseType !== '' && this.responseType !== 'text') {
           throw new DOMException('responseText is unavailable for this responseType', 'InvalidStateError');
         }
+        if (this._liveTakeover !== undefined) return this.liveText();
         return this._response || '';
       }
       return this._native.responseText;
@@ -150,6 +174,11 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
       this._generation += 1;
       this._playurlObservationGeneration = undefined;
       this._playurlObservationUrl = undefined;
+      this._livePlayurlObservationUrl = undefined;
+      this._liveTakeover = undefined;
+      this._liveChunks = [];
+      this._liveLoaded = 0;
+      this._liveTextState = undefined;
       this._openArgs = args;
       this._headers = {};
       this._range = undefined;
@@ -210,6 +239,9 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
 
     send(body) {
       this._body = body;
+      if (typeof bank.isLiveRoute === 'function' && bank.isLiveRoute()) {
+        return this.sendLive(body);
+      }
       if (typeof bank.syncRouteLifecycle === 'function' && !bank.syncRouteLifecycle()) {
         return this._native.send(body);
       }
@@ -287,6 +319,150 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
           void this.serve(served, url, body, generation);
         })
         .catch((error) => this.handleServeError(error, url, body, generation));
+    }
+
+    joinLiveChunks() {
+      const bytes = new Uint8Array(this._liveLoaded);
+      let offset = 0;
+      for (const chunk of this._liveChunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return bytes.buffer;
+    }
+
+    liveText() {
+      if (this._liveTextState === undefined) {
+        this._liveTextState = { decoder: new TextDecoder(), text: '', consumed: 0 };
+      }
+      const state = this._liveTextState;
+      for (; state.consumed < this._liveChunks.length; state.consumed += 1) {
+        state.text += state.decoder.decode(this._liveChunks[state.consumed], { stream: true });
+      }
+      return state.text;
+    }
+
+    sendLive(body) {
+      const url = new URL(this._openArgs?.[1], windowObject.location.href).href;
+      const asyncFlag = this._openArgs?.[2] !== false;
+      const generation = this._generation;
+      this._playurlObservationGeneration = generation;
+      this._livePlayurlObservationUrl = typeof bank.isLivePlayurlUrl === 'function' && bank.isLivePlayurlUrl(url)
+        ? url
+        : undefined;
+      const enabled = bankEnabled(bank);
+      const classification = classifyLiveRequest({
+        url,
+        enabled,
+        locationObject: windowObject.location,
+      });
+      if (!asyncFlag) {
+        if (enabled) {
+          bank.emitDiagnostic('bank.serve', {
+            source: scrubUrl(url),
+            mirror: mirrorForUrl(url),
+            result: 'pass',
+            reason: 'sync_xhr',
+          });
+        }
+        return this._native.send(body);
+      }
+      if (!classification.intercepted) {
+        if (enabled) {
+          bank.emitDiagnostic('bank.serve', {
+            source: scrubUrl(url),
+            mirror: mirrorForUrl(url),
+            result: 'pass',
+            reason: classification.reason,
+          });
+        }
+        return this._native.send(body);
+      }
+      this._intercepted = true;
+      this._state = 1;
+      this._abortController = new AbortController();
+      this._status = 0;
+      this._statusText = '';
+      this._responseURL = '';
+      this._responseHeaders = undefined;
+      this._response = null;
+      this.dispatchEvent(eventFor(windowObject, 'loadstart'));
+      if (this.timeout > 0) {
+        this._timer = windowObject.setTimeout(() => {
+          if (this._done || generation !== this._generation) return;
+          this._timedOut = true;
+          this._abortController.abort();
+          this._done = true;
+          this._state = 4;
+          this.dispatchEvent(eventFor(windowObject, 'readystatechange'));
+          this.dispatchEvent(eventFor(windowObject, 'timeout'));
+          this.dispatchEvent(eventFor(windowObject, 'loadend'));
+        }, this.timeout);
+      }
+      let takeover;
+      try {
+        takeover = bank.serveLive({
+          url,
+          credentials: this.withCredentials ? 'include' : 'same-origin',
+          signal: this._abortController.signal,
+        });
+      } catch (error) {
+        console.error('[BilibiliBuffer] 直播流前台接管失败', error);
+        this.finishError(error, generation);
+        return undefined;
+      }
+      this._liveTakeover = takeover;
+      takeover.onHeaders = ({ status, statusText, contentType }) => {
+        if (this._done || generation !== this._generation) return;
+        this._status = status;
+        this._statusText = statusText;
+        this._responseURL = url;
+        const HeadersConstructor = windowObject.Headers || globalThis.Headers;
+        const headers = new HeadersConstructor();
+        if (contentType !== undefined) headers.set('Content-Type', contentType);
+        this._responseHeaders = headers;
+        this._state = 2;
+        this.dispatchEvent(eventFor(windowObject, 'readystatechange'));
+        this._state = 3;
+        this.dispatchEvent(eventFor(windowObject, 'readystatechange'));
+      };
+      takeover.onBytes = (bytes) => {
+        if (this._done || generation !== this._generation) return;
+        this._liveChunks.push(bytes);
+        this._liveLoaded += bytes.byteLength;
+        this.dispatchEvent(eventFor(windowObject, 'progress', {
+          loaded: this._liveLoaded,
+          total: 0,
+          lengthComputable: false,
+        }));
+      };
+      takeover.onEnd = () => {
+        if (this._done || generation !== this._generation) return;
+        this._response = responseValue(windowObject, this._responseType, this.joinLiveChunks());
+        this._liveTakeover = undefined;
+        this._state = 4;
+        this._done = true;
+        this.dispatchEvent(eventFor(windowObject, 'readystatechange'));
+        this.dispatchEvent(eventFor(windowObject, 'load'));
+        this.dispatchEvent(eventFor(windowObject, 'loadend'));
+        this.clearTimer();
+      };
+      takeover.onError = (error) => {
+        if (this._done || generation !== this._generation) return;
+        if (this._aborted || this._timedOut) return;
+        console.error('[BilibiliBuffer] 直播流前台接管失败', error);
+        this.finishError(error, generation);
+      };
+      void takeover.headersPromise.catch((error) => {
+        if (this._done || generation !== this._generation) return;
+        if (isAbortError(error)) {
+          if (!this._aborted && !this._timedOut) this.finishError(error, generation);
+          return;
+        }
+        console.error('[BilibiliBuffer] 直播流前台接管失败', error);
+        this.finishError(error, generation);
+      });
+      return undefined;
     }
 
     handleServeError(error, url, body, generation) {

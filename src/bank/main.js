@@ -30,6 +30,14 @@ import {
   readMemoryRange,
   writeMemoryChunk,
 } from './storage.js';
+import {
+  LiveStreamStitcher,
+  classifyLiveRequest,
+  isLiveLocation,
+  isLivePlayurlUrl,
+  liveUrlExpiresAt,
+  visitLiveUrlInfoGroups,
+} from './live.js';
 import { createBankXMLHttpRequestClass } from './xhr.js';
 
 const MAX_PREFETCH_CONCURRENCY = 4;
@@ -297,6 +305,14 @@ export class SegmentBank {
     return new URL(url).pathname.endsWith('/playurl');
   }
 
+  isLiveRoute() {
+    return isLiveLocation(this.windowObject.location);
+  }
+
+  isLivePlayurlUrl(url) {
+    return isLivePlayurlUrl(url);
+  }
+
   async observePlayurlResponse(response) {
     const clone = response.clone();
     const data = await clone.json();
@@ -309,6 +325,53 @@ export class SegmentBank {
     } catch (error) {
       console.error('[BilibiliBuffer] playurl 地址簿解析失败', error);
     }
+  }
+
+  async observeLivePlayurlResponse(response) {
+    const clone = response.clone();
+    const data = await clone.json();
+    this.observeLivePlayurlData(data);
+  }
+
+  observeLivePlayurlText(responseText) {
+    try {
+      this.observeLivePlayurlData(JSON.parse(responseText));
+    } catch (error) {
+      console.error('[BilibiliBuffer] 直播 playurl 地址簿解析失败', error);
+    }
+  }
+
+  readInlineLivePlayinfo() {
+    const addressBook = new Map(this.addressBook);
+    try {
+      this.observeLivePlayurlData(this.windowObject.__NEPTUNE_IS_MY_WAIFU__);
+    } catch (error) {
+      this.addressBook = addressBook;
+      console.error('[BilibiliBuffer] 直播内嵌地址簿读取失败', error);
+    }
+  }
+
+  observeLivePlayurlData(data) {
+    if (data === undefined || data === null) return;
+    if (typeof data === 'string') {
+      try {
+        data = JSON.parse(data);
+      } catch (error) {
+        console.error('[BilibiliBuffer] 直播 playurl 地址簿解析失败', error);
+        return;
+      }
+    }
+    const observedAt = this.now();
+    visitLiveUrlInfoGroups(data, (group) => {
+      try {
+        const urls = group.map(({ host, extra }) => new URL(extra, host).href);
+        const pathnames = new Set(urls.map((entry) => new URL(entry).pathname));
+        if (pathnames.size !== 1) throw new Error('直播主备地址路径不一致');
+        this.addressBook.set(new URL(urls[0]).pathname, { urls, observedAt });
+      } catch (error) {
+        console.error('[BilibiliBuffer] 直播 playurl 地址簿 URL 无效', error);
+      }
+    });
   }
 
   readInlinePlayinfo() {
@@ -398,6 +461,9 @@ export class SegmentBank {
   }
 
   async handleFetch(thisArg, args, originalFetch) {
+    if (this.isLiveRoute()) {
+      return this.handleLiveFetch(thisArg, args, originalFetch);
+    }
     if (!this.syncRouteLifecycle()) {
       return originalFetch.apply(thisArg, args);
     }
@@ -472,6 +538,313 @@ export class SegmentBank {
         reason: 'internal_error',
       });
       return originalFetch.apply(thisArg, args);
+    }
+  }
+
+  async handleLiveFetch(thisArg, args, originalFetch) {
+    let request;
+    try {
+      request = inspectFetchArguments(args, this.windowObject.location);
+    } catch (error) {
+      return originalFetch.apply(thisArg, args);
+    }
+    let classification;
+    try {
+      classification = classifyLiveRequest({
+        url: request.url,
+        enabled: this.isEnabled(),
+        locationObject: this.windowObject.location,
+      });
+    } catch (error) {
+      return originalFetch.apply(thisArg, args);
+    }
+    if (!classification.intercepted) {
+      if (this.isEnabled()) {
+        this.emitDiagnostic('bank.serve', {
+          source: scrubUrl(request.url),
+          mirror: mirrorForUrl(request.url),
+          result: 'pass',
+          reason: classification.reason,
+        });
+      }
+      const response = await originalFetch.apply(thisArg, args);
+      if (this.isLivePlayurlUrl(request.url)) {
+        await this.observeLivePlayurlResponse(response).catch((error) => {
+          console.error('[BilibiliBuffer] 直播 playurl 地址簿读取失败', error);
+        });
+      }
+      return response;
+    }
+    const takeover = this.serveLive({
+      url: request.url,
+      credentials: request.credentials,
+      signal: request.signal,
+    });
+    let streamController;
+    const body = new ReadableStream({
+      start(controller) {
+        streamController = controller;
+      },
+      cancel() {
+        takeover.cancel();
+      },
+    });
+    takeover.onBytes = (bytes) => {
+      streamController.enqueue(bytes);
+    };
+    takeover.onEnd = () => {
+      streamController.close();
+    };
+    takeover.onError = (error) => {
+      streamController.error(error);
+    };
+    let headers;
+    try {
+      headers = await takeover.headersPromise;
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      console.error('[BilibiliBuffer] 直播流前台接管失败', error);
+      throw error;
+    }
+    const ResponseConstructor = responseTypeConstructor(this.windowObject, 'Response');
+    const responseHeaders = {};
+    if (headers.contentType !== undefined) responseHeaders['Content-Type'] = headers.contentType;
+    const response = new ResponseConstructor(body, {
+      status: headers.status,
+      statusText: headers.statusText,
+      headers: responseHeaders,
+    });
+    Object.defineProperty(response, 'url', { configurable: true, value: request.url });
+    Object.defineProperty(response, 'type', { configurable: true, value: 'basic' });
+    return response;
+  }
+
+  serveLive({ url, credentials, signal }) {
+    if (signal?.aborted) throw abortError();
+    const startedAt = performanceNow(this.windowObject);
+    let pairUrl;
+    if (this.config.raceLegs > 1) {
+      pairUrl = this.pairUrlFor(url);
+      if (pairUrl === undefined) {
+        this.readInlineLivePlayinfo();
+        pairUrl = this.pairUrlFor(url);
+      }
+    }
+    const candidateUrls = pairUrl === undefined ? [url] : [url, pairUrl];
+    const legDescriptors = [];
+    for (const [slot, candidate] of candidateUrls.entries()) {
+      const expiresAt = liveUrlExpiresAt(candidate);
+      if (expiresAt !== undefined && this.now() >= expiresAt) {
+        this.emitDiagnostic('bank.fetch.chunk', {
+          source: scrubUrl(candidate),
+          mirror: mirrorForUrl(candidate),
+          chunkIndex: 0,
+          start: 0,
+          end: 0,
+          bytes: 0,
+          durationMs: 0,
+          slot,
+          priority: 'foreground',
+          result: 'address_expired',
+        });
+        continue;
+      }
+      legDescriptors.push({ slot, url: candidate });
+    }
+    if (legDescriptors.length === 0) {
+      throw new BankNetworkError('直播流地址签名到期且无可用地址');
+    }
+    const legs = legDescriptors.map((descriptor) => ({
+      ...descriptor,
+      controller: new AbortController(),
+      reader: undefined,
+      stallTimer: undefined,
+      abortReason: undefined,
+      cancelledByStitcher: false,
+      outcome: undefined,
+    }));
+    let headersSettled = false;
+    let resolveHeaders;
+    let rejectHeaders;
+    const headersPromise = new Promise((resolve, reject) => {
+      resolveHeaders = resolve;
+      rejectHeaders = reject;
+    });
+    const takeover = {
+      headersPromise,
+      onHeaders: undefined,
+      onBytes: undefined,
+      onEnd: undefined,
+      onError: undefined,
+      cancel: undefined,
+    };
+    const clearLiveLegStall = (leg) => {
+      if (leg.stallTimer !== undefined) {
+        this.windowObject.clearTimeout(leg.stallTimer);
+        leg.stallTimer = undefined;
+      }
+    };
+    const cancelLiveLeg = (leg) => {
+      clearLiveLegStall(leg);
+      leg.controller.abort();
+      if (leg.reader !== undefined) {
+        void leg.reader.cancel().catch((error) => {
+          if (!isAbortError(error)) console.error('[BilibiliBuffer] 直播流读取取消失败', error);
+        });
+      }
+    };
+    const abortAllLegs = () => {
+      for (const leg of legs) {
+        leg.cancelledByStitcher = true;
+        cancelLiveLeg(leg);
+      }
+    };
+    const stitcher = new LiveStreamStitcher({
+      streamPath: new URL(url).pathname,
+      legs: legs.map((leg) => ({
+        slot: leg.slot,
+        source: scrubUrl(leg.url),
+        mirror: mirrorForUrl(leg.url),
+      })),
+      chunkBytes: this.config.chunkBytes,
+      now: this.now,
+      emitChunk: (payload) => {
+        this.emitDiagnostic('bank.fetch.chunk', { ...payload, priority: 'foreground' });
+      },
+      emitStitch: (payload) => {
+        this.emitDiagnostic('live.stream.stitch', payload);
+      },
+      deliver: (bytes) => takeover.onBytes?.(bytes),
+      cancelLeg: (slot) => {
+        const leg = legs.find((candidate) => candidate.slot === slot);
+        if (leg === undefined) return;
+        leg.cancelledByStitcher = true;
+        cancelLiveLeg(leg);
+      },
+      failStream: () => {
+        abortAllLegs();
+        const error = new BankNetworkError('直播流双腿取数失败');
+        if (!headersSettled) {
+          headersSettled = true;
+          rejectHeaders(error);
+          return;
+        }
+        takeover.onError?.(error);
+      },
+      closeStream: () => takeover.onEnd?.(),
+    });
+    let cancelled = false;
+    takeover.cancel = () => {
+      if (cancelled) return;
+      cancelled = true;
+      stitcher.abortStream();
+      abortAllLegs();
+      if (!headersSettled) {
+        headersSettled = true;
+        rejectHeaders(abortError());
+        return;
+      }
+      takeover.onError?.(abortError());
+    };
+    if (signal !== undefined) {
+      signal.addEventListener('abort', () => takeover.cancel(), { once: true });
+    }
+    const noteHeaders = (leg, response) => {
+      if (headersSettled) return;
+      headersSettled = true;
+      this.emitDiagnostic('bank.serve', {
+        source: scrubUrl(url),
+        mirror: mirrorForUrl(url),
+        durationMs: performanceNow(this.windowObject) - startedAt,
+        result: 'hit',
+        reason: legs.length > 1 ? 'live_stream' : 'live_stream_unpaired',
+      });
+      const info = {
+        status: response.status,
+        statusText: response.statusText,
+        contentType: headerValue(response.headers, 'Content-Type') || undefined,
+      };
+      takeover.onHeaders?.(info);
+      resolveHeaders(info);
+    };
+    for (const leg of legs) {
+      void this.runLiveLeg(leg, { credentials, stitcher, noteHeaders }).catch((error) => {
+        console.error('[BilibiliBuffer] 直播流腿执行失败', error);
+      });
+    }
+    return takeover;
+  }
+
+  async runLiveLeg(leg, { credentials, stitcher, noteHeaders }) {
+    const armStall = () => {
+      if (leg.stallTimer !== undefined) this.windowObject.clearTimeout(leg.stallTimer);
+      leg.stallTimer = this.windowObject.setTimeout(() => {
+        if (leg.controller.signal.aborted) return;
+        leg.abortReason = 'stalled';
+        leg.controller.abort();
+        if (leg.reader !== undefined) {
+          void leg.reader.cancel().catch((error) => {
+            if (!isAbortError(error)) console.error('[BilibiliBuffer] 直播停滞读取取消失败', error);
+          });
+        }
+      }, this.config.stallMs);
+    };
+    armStall();
+    try {
+      let response;
+      try {
+        response = await this.nativeFetch.call(this.windowObject, leg.url, {
+          credentials,
+          signal: leg.controller.signal,
+        });
+      } catch (error) {
+        if (isAbortError(error) || leg.controller.signal.aborted) throw error;
+        leg.outcome = 'network_error';
+        stitcher.noteLegDead(leg.slot, 'network_error');
+        return;
+      }
+      if (leg.controller.signal.aborted) throw abortError();
+      if (response.status < 200 || response.status >= 300) {
+        leg.outcome = 'http_error';
+        stitcher.noteLegDead(leg.slot, 'http_error');
+        return;
+      }
+      noteHeaders(leg, response);
+      try {
+        const reader = response.body.getReader();
+        leg.reader = reader;
+        armStall();
+        for (;;) {
+          const read = await reader.read();
+          if (read.done) break;
+          const chunk = read.value.slice();
+          if (chunk.byteLength > 0) {
+            stitcher.noteLegBytes(leg.slot, chunk);
+            armStall();
+          }
+          if (leg.controller.signal.aborted) throw abortError();
+        }
+        if (leg.controller.signal.aborted) throw abortError();
+        stitcher.noteLegDone(leg.slot);
+      } catch (error) {
+        if (isAbortError(error) || leg.controller.signal.aborted) throw error;
+        leg.outcome = 'network_error';
+        stitcher.noteLegDead(leg.slot, 'network_error');
+        return;
+      }
+    } catch (error) {
+      if (isAbortError(error) || leg.controller.signal.aborted) {
+        if (leg.abortReason === 'stalled' && !leg.cancelledByStitcher) {
+          stitcher.noteLegDead(leg.slot, 'stalled');
+        }
+        return;
+      }
+      throw error;
+    } finally {
+      if (leg.stallTimer !== undefined) {
+        this.windowObject.clearTimeout(leg.stallTimer);
+        leg.stallTimer = undefined;
+      }
     }
   }
 
@@ -1203,7 +1576,8 @@ function installSegmentBank(windowObject = window) {
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const locationObject = window.location;
-  if (locationObject !== undefined && locationObject.hostname === 'www.bilibili.com') {
+  if (locationObject !== undefined
+    && (locationObject.hostname === 'www.bilibili.com' || isLiveLocation(locationObject))) {
     installSegmentBank(window);
   }
 }
