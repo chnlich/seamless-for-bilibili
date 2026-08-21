@@ -32,6 +32,8 @@ import {
   classifyLiveRequest,
   isLiveLocation,
   liveUrlExpiresAt,
+  urlFromLiveUrlInfo,
+  visitLiveUrlInfoGroups,
 } from '../src/bank/live.js';
 
 const MEDIA_URL = 'https://upos-sz-mirrorcosov.bilivideo.com/video/track.m4s?deadline=secret&upsig=secret';
@@ -2229,9 +2231,7 @@ test('pure memory functions keep records complete and enforce the global cap', (
   assert.equal(totalMemoryBytes(chunks, config.chunkBytes), 16);
 });
 
-function livePlayurlBody(mainUrl = LIVE_URL, backupUrl = LIVE_PAIR_URL) {
-  const main = new URL(mainUrl);
-  const backup = new URL(backupUrl);
+function liveUrlInfoBody(entries) {
   return {
     data: {
       playurl_info: {
@@ -2241,12 +2241,7 @@ function livePlayurlBody(mainUrl = LIVE_URL, backupUrl = LIVE_PAIR_URL) {
               format: [
                 {
                   codec: [
-                    {
-                      url_info: [
-                        { host: main.origin, extra: `${main.pathname}${main.search}` },
-                        { host: backup.origin, extra: `${backup.pathname}${backup.search}` },
-                      ],
-                    },
+                    { url_info: entries },
                   ],
                 },
               ],
@@ -2256,6 +2251,19 @@ function livePlayurlBody(mainUrl = LIVE_URL, backupUrl = LIVE_PAIR_URL) {
       },
     },
   };
+}
+
+function liveUrlInfoEntry(url) {
+  const parsed = new URL(url);
+  return {
+    host: parsed.origin,
+    base_url: `${parsed.pathname}?`,
+    extra: parsed.search.slice(1),
+  };
+}
+
+function livePlayurlBody(mainUrl = LIVE_URL, backupUrl = LIVE_PAIR_URL) {
+  return liveUrlInfoBody([liveUrlInfoEntry(mainUrl), liveUrlInfoEntry(backupUrl)]);
 }
 
 function liveConfig(overrides = {}) {
@@ -2354,9 +2362,33 @@ test('live locations and requests classify only flv streams on live media hosts'
   assert.equal(liveUrlExpiresAt('https://d1--ov-gotcha07.bilivideo.com/live-bvc/1/stream.flv'), undefined);
 });
 
+test('live url_info entries rebuild the player URL from host, base_url and extra', () => {
+  const host = 'https://d1--ov-gotcha07.bilivideo.com';
+  assert.equal(urlFromLiveUrlInfo({
+    host,
+    base_url: '/live-bvc/1/stream.flv?',
+    extra: 'expires=4102444800&sign=main',
+  }), LIVE_URL);
+  assert.equal(urlFromLiveUrlInfo({
+    host,
+    base_url: '/live-bvc/1/stream.flv',
+    extra: 'expires=4102444800&sign=main',
+  }), LIVE_URL);
+  assert.equal(urlFromLiveUrlInfo({
+    host,
+    base_url: '/live-bvc/1/stream.flv',
+    extra: '?expires=4102444800&sign=main',
+  }), LIVE_URL);
+  assert.equal(urlFromLiveUrlInfo({ url: LIVE_PAIR_URL }), LIVE_PAIR_URL);
+  assert.throws(() => urlFromLiveUrlInfo({ host, extra: 'expires=1' }));
+  assert.throws(() => urlFromLiveUrlInfo({ host, base_url: 5, extra: 'expires=1' }));
+});
+
 test('the live address book reads inline url_info groups and pairs by pathname', () => {
   const { bank } = createLiveBank({ playinfo: livePlayurlBody() });
   bank.readInlineLivePlayinfo();
+  assert.deepEqual([...bank.addressBook.keys()], [LIVE_KEY]);
+  assert.deepEqual(bank.addressBook.get(LIVE_KEY).urls, [LIVE_URL, LIVE_PAIR_URL]);
   assert.equal(bank.pairUrlFor(LIVE_URL), LIVE_PAIR_URL);
   assert.equal(bank.pairUrlFor(LIVE_PAIR_URL), LIVE_URL);
   bank.destroy();
@@ -2364,6 +2396,78 @@ test('the live address book reads inline url_info groups and pairs by pathname',
   broken.bank.readInlineLivePlayinfo();
   assert.equal(broken.bank.pairUrlFor(LIVE_URL), undefined);
   broken.bank.destroy();
+});
+
+test('the live address book joins base_url and extra across the question-mark placement variants', () => {
+  const collected = [];
+  visitLiveUrlInfoGroups(livePlayurlBody(), (group) => collected.push(group));
+  assert.equal(collected.length, 1);
+  assert.deepEqual(
+    collected[0].map((info) => ({ host: info.host, base_url: info.base_url, extra: info.extra })),
+    [LIVE_URL, LIVE_PAIR_URL].map((url) => {
+      const parsed = new URL(url);
+      return { host: parsed.origin, base_url: `${parsed.pathname}?`, extra: parsed.search.slice(1) };
+    }),
+  );
+  for (const mutate of [
+    (entry) => ({ ...entry, base_url: entry.base_url.slice(0, -1) }),
+    (entry) => ({ ...entry, base_url: entry.base_url.slice(0, -1), extra: `?${entry.extra}` }),
+  ]) {
+    const { bank } = createLiveBank({
+      playinfo: liveUrlInfoBody([mutate(liveUrlInfoEntry(LIVE_URL)), mutate(liveUrlInfoEntry(LIVE_PAIR_URL))]),
+    });
+    bank.readInlineLivePlayinfo();
+    assert.equal(bank.pairUrlFor(LIVE_URL), LIVE_PAIR_URL);
+    assert.equal(bank.pairUrlFor(LIVE_PAIR_URL), LIVE_URL);
+    bank.destroy();
+  }
+});
+
+test('a live url_info group disagreeing on the stream path is skipped', () => {
+  const { bank } = createLiveBank({
+    playinfo: liveUrlInfoBody([
+      liveUrlInfoEntry(LIVE_URL),
+      {
+        host: 'https://d1--ov-gotcha07b.bilivideo.com',
+        base_url: '/live-bvc/1/other.flv?',
+        extra: 'expires=4102444800&sign=backup',
+      },
+    ]),
+  });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    bank.readInlineLivePlayinfo();
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(errors.length, 1);
+  assert.match(errors[0][1].message, /直播主备地址路径不一致/);
+  assert.equal(bank.addressBook.size, 0);
+  assert.equal(bank.pairUrlFor(LIVE_URL), undefined);
+  bank.destroy();
+});
+
+test('a live url_info group missing base_url is skipped with an error', () => {
+  const { bank } = createLiveBank({
+    playinfo: liveUrlInfoBody([
+      liveUrlInfoEntry(LIVE_URL),
+      { host: 'https://d1--ov-gotcha07b.bilivideo.com', extra: 'expires=4102444800&sign=backup' },
+    ]),
+  });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    bank.readInlineLivePlayinfo();
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(errors.length, 1);
+  assert.equal(bank.addressBook.size, 0);
+  assert.equal(bank.pairUrlFor(LIVE_URL), undefined);
+  bank.destroy();
 });
 
 test('live stitcher opens racing delivery only after the shared prefix compares equal', () => {

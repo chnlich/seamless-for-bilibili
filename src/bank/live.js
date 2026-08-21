@@ -26,6 +26,17 @@ export function liveUrlExpiresAt(url) {
   return expires * 1000;
 }
 
+export function urlFromLiveUrlInfo(info) {
+  if (typeof info.url === 'string') return info.url;
+  if (typeof info.host !== 'string' || typeof info.base_url !== 'string' || typeof info.extra !== 'string') {
+    throw new Error('直播 playurl 地址簿条目缺少 host/base_url/extra');
+  }
+  if (info.base_url.endsWith('?') || info.extra.startsWith('?') || info.extra.startsWith('&')) {
+    return `${info.host}${info.base_url}${info.extra}`;
+  }
+  return `${info.host}${info.base_url}?${info.extra}`;
+}
+
 export function visitLiveUrlInfoGroups(value, callback) {
   if (value === null || typeof value !== 'object') return;
   if (Array.isArray(value)) {
@@ -36,8 +47,7 @@ export function visitLiveUrlInfoGroups(value, callback) {
     const group = [];
     for (const info of value.url_info) {
       if (info === null || typeof info !== 'object') continue;
-      if (typeof info.host !== 'string' || typeof info.extra !== 'string') continue;
-      group.push({ host: info.host, extra: info.extra });
+      group.push({ host: info.host, base_url: info.base_url, extra: info.extra, url: info.url });
     }
     if (group.length > 0) callback(group);
   }

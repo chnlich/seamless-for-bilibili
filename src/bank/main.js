@@ -36,6 +36,7 @@ import {
   isLiveLocation,
   isLivePlayurlUrl,
   liveUrlExpiresAt,
+  urlFromLiveUrlInfo,
   visitLiveUrlInfoGroups,
 } from './live.js';
 import { createBankXMLHttpRequestClass } from './xhr.js';
@@ -364,7 +365,7 @@ export class SegmentBank {
     const observedAt = this.now();
     visitLiveUrlInfoGroups(data, (group) => {
       try {
-        const urls = group.map(({ host, extra }) => new URL(extra, host).href);
+        const urls = group.map((info) => new URL(urlFromLiveUrlInfo(info)).href);
         const pathnames = new Set(urls.map((entry) => new URL(entry).pathname));
         if (pathnames.size !== 1) throw new Error('直播主备地址路径不一致');
         this.addressBook.set(new URL(urls[0]).pathname, { urls, observedAt });
