@@ -1073,6 +1073,7 @@
         this.deliveredOffset = targetEnd;
         if (targetEnd === start + this.chunkBytes) {
           this.emitChunkNow(leg, windowIndex, "fetched", targetEnd - start, leg.ahead.get(windowIndex));
+          leg.ahead.delete(windowIndex);
         }
       }
       if (leg.done && this.deliveredOffset === leg.receivedTotal && leg.receivedTotal % this.chunkBytes !== 0) {
@@ -1084,6 +1085,7 @@
           leg.receivedTotal - windowIndex * this.chunkBytes,
           leg.ahead.get(windowIndex)
         );
+        leg.ahead.delete(windowIndex);
       }
     }
     checkFinish() {
@@ -2137,11 +2139,17 @@
         }
         return response2;
       }
-      const takeover = this.serveLive({
-        url: request.url,
-        credentials: request.credentials,
-        signal: request.signal
-      });
+      let takeover;
+      try {
+        takeover = this.serveLive({
+          url: request.url,
+          credentials: request.credentials,
+          signal: request.signal
+        });
+      } catch (error) {
+        if (!isAbortError2(error)) console.error("[BilibiliBuffer] 直播流前台接管失败", error);
+        throw error;
+      }
       let streamController;
       const body = new ReadableStream({
         start(controller) {
@@ -2158,6 +2166,7 @@
         streamController.close();
       };
       takeover.onError = (error) => {
+        if (!isAbortError2(error)) console.error("[BilibiliBuffer] 直播流前台接管失败", error);
         streamController.error(error);
       };
       let headers;

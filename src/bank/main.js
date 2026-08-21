@@ -575,11 +575,17 @@ export class SegmentBank {
       }
       return response;
     }
-    const takeover = this.serveLive({
-      url: request.url,
-      credentials: request.credentials,
-      signal: request.signal,
-    });
+    let takeover;
+    try {
+      takeover = this.serveLive({
+        url: request.url,
+        credentials: request.credentials,
+        signal: request.signal,
+      });
+    } catch (error) {
+      if (!isAbortError(error)) console.error('[BilibiliBuffer] 直播流前台接管失败', error);
+      throw error;
+    }
     let streamController;
     const body = new ReadableStream({
       start(controller) {
@@ -596,6 +602,7 @@ export class SegmentBank {
       streamController.close();
     };
     takeover.onError = (error) => {
+      if (!isAbortError(error)) console.error('[BilibiliBuffer] 直播流前台接管失败', error);
       streamController.error(error);
     };
     let headers;

@@ -2436,6 +2436,15 @@ test('live stitcher keeps the leading leg and revokes the other on a late mismat
   assert.equal(deliveredText, 'ABCDEFGHIJKLMNOPQRST');
 });
 
+test('live stitcher releases delivered windows instead of retaining them for a long-running single leg', () => {
+  const { stitcher, harness } = stitcherHarness({ legCount: 1 });
+  for (let index = 0; index < 50; index += 1) stitcher.noteLegBytes(0, encoded('ABCDEFGH'));
+  assert.equal(harness.delivered.length, 50);
+  assert.equal(stitcher.legs[0].ahead.size, 0);
+  stitcher.noteLegDone(0);
+  assert.equal(harness.closed, true);
+});
+
 test('live stitcher treats a stalled backup leg during the gate as a single-leg death', () => {
   const { stitcher, harness } = stitcherHarness();
   stitcher.noteLegBytes(0, encoded('ABCDEFGH'));
@@ -2542,7 +2551,15 @@ test('live takeover treats expired signatures as invalid addresses and fails whe
       return liveFeed().response;
     },
   });
-  await assert.rejects(liveFetchThrough(bank, expiredMain), /直播流地址签名到期且无可用地址/);
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    await assert.rejects(liveFetchThrough(bank, expiredMain), /直播流地址签名到期且无可用地址/);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(errors.length, 1);
   assert.equal(nativeCalled, 0);
   const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
   assert.deepEqual(
@@ -2640,6 +2657,31 @@ test('a stalled backup leg during the live gate degrades through the real stall 
   assert.equal(feeds[LIVE_PAIR_URL].cancelled, true);
   const serve = windowObject.messages.find((message) => message.code === 'bank.serve');
   assert.equal(serve.data.reason, 'live_stream');
+  bank.destroy();
+});
+
+test('live fetch logs a console error when the sole leg stalls after streaming already started', async () => {
+  const timers = manualTimers();
+  const feed = liveFeed();
+  const { bank } = createLiveBank({
+    timers,
+    nativeFetch: async () => feed.response,
+  });
+  const response = await liveFetchThrough(bank);
+  feed.push(encoded('ABCDEFGH'));
+  await tick();
+  const pendingIds = [...timers.pending.keys()];
+  assert.equal(pendingIds.length, 1);
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    timers.fireId(pendingIds.at(-1));
+    await assert.rejects(response.text(), /直播流双腿取数失败/);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(errors.length, 1);
   bank.destroy();
 });
 

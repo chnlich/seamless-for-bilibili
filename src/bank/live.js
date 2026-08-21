@@ -418,6 +418,7 @@ export class LiveStreamStitcher {
       this.deliveredOffset = targetEnd;
       if (targetEnd === start + this.chunkBytes) {
         this.emitChunkNow(leg, windowIndex, 'fetched', targetEnd - start, leg.ahead.get(windowIndex));
+        leg.ahead.delete(windowIndex);
       }
     }
     if (leg.done && this.deliveredOffset === leg.receivedTotal
@@ -430,6 +431,7 @@ export class LiveStreamStitcher {
         leg.receivedTotal - windowIndex * this.chunkBytes,
         leg.ahead.get(windowIndex),
       );
+      leg.ahead.delete(windowIndex);
     }
   }
 
