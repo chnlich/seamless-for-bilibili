@@ -63,6 +63,119 @@
     FAILED: "失败"
   });
 
+  // src/extension/popup-live.js
+  var POPUP_ROUTE = Object.freeze({ VIDEO: "video", LIVE: "live" });
+  var TOGGLE_LABELS = Object.freeze({ video: "视频增强", live: "直播增强" });
+  function popupRouteForTabUrl(urlString) {
+    if (typeof urlString !== "string" || urlString.length === 0) return POPUP_ROUTE.VIDEO;
+    let parsed;
+    try {
+      parsed = new URL(urlString);
+    } catch (error) {
+      return POPUP_ROUTE.VIDEO;
+    }
+    return parsed.hostname === "live.bilibili.com" ? POPUP_ROUTE.LIVE : POPUP_ROUTE.VIDEO;
+  }
+  function popupToggleLabel(route) {
+    return route === POPUP_ROUTE.LIVE ? TOGGLE_LABELS.live : TOGGLE_LABELS.video;
+  }
+  function applyPopupRoute(documentObject, route) {
+    const livePanel = documentObject.querySelector("[data-live-panel]");
+    if (livePanel !== null) livePanel.hidden = route !== POPUP_ROUTE.LIVE;
+    const label = documentObject.querySelector("[data-vod-toggle-label]");
+    if (label !== null) label.textContent = popupToggleLabel(route);
+    for (const block of documentObject.querySelectorAll("[data-vod-only]")) {
+      block.hidden = route === POPUP_ROUTE.LIVE;
+    }
+  }
+  function emptyLiveFacts() {
+    return {
+      serveCount: 0,
+      pairMissCount: 0,
+      stitchCount: 0,
+      errorCount: 0,
+      latestServe: void 0,
+      latestStitch: void 0
+    };
+  }
+  function foldLiveEvent(facts, event) {
+    const code = event?.code;
+    const data = event?.data !== null && typeof event?.data === "object" ? event.data : {};
+    if (code === "bank.serve") {
+      facts.serveCount += 1;
+      if (typeof data.pairMiss === "string" && data.pairMiss.length > 0) facts.pairMissCount += 1;
+      facts.latestServe = {
+        result: data.result,
+        reason: data.reason,
+        durationMs: data.durationMs,
+        pairMiss: data.pairMiss,
+        pairedAddressAvailable: data.pairedAddressAvailable,
+        errorName: data.errorName
+      };
+      return;
+    }
+    if (code === "live.stream.stitch") {
+      facts.stitchCount += 1;
+      facts.latestStitch = {
+        mismatch: data.mismatch,
+        phase: data.phase,
+        bytesChecked: data.bytesChecked
+      };
+      return;
+    }
+    if (code === "log.error") facts.errorCount += 1;
+  }
+  function foldLiveEvents(facts, events) {
+    for (const event of events || []) foldLiveEvent(facts, event);
+    return facts;
+  }
+  function textValue(value) {
+    return value === void 0 || value === null || value === "" ? "未提供" : String(value);
+  }
+  function liveServeText(latestServe) {
+    if (latestServe === void 0) return "未提供";
+    const parts = [textValue(latestServe.result), textValue(latestServe.reason)];
+    if (latestServe.pairedAddressAvailable === true) parts.push("pairedAddressAvailable");
+    if (latestServe.pairMiss !== void 0) parts.push(latestServe.pairMiss);
+    if (latestServe.errorName !== void 0) parts.push(latestServe.errorName);
+    return parts.join(" · ");
+  }
+  function liveStitchText(latestStitch) {
+    if (latestStitch === void 0) return "未提供";
+    return `${textValue(latestStitch.phase)} · mismatch=${textValue(latestStitch.mismatch)} · bytesChecked=${textValue(latestStitch.bytesChecked)}`;
+  }
+  function renderLiveFacts(documentObject, container, facts, { error, inFlight = false, hasSession = true } = {}) {
+    container.replaceChildren();
+    const append = (label, value) => {
+      const row = documentObject.createElement("div");
+      row.className = "readout-row";
+      const name = documentObject.createElement("dt");
+      name.textContent = label;
+      const valueElement = documentObject.createElement("dd");
+      valueElement.textContent = textValue(value);
+      row.append(name, valueElement);
+      container.append(row);
+    };
+    if (!hasSession) {
+      append("直播事实", "未提供");
+      return;
+    }
+    if (error !== void 0) {
+      append("直播事实", `读取失败: ${textValue(error)}`);
+      return;
+    }
+    if (inFlight && facts.serveCount === 0 && facts.stitchCount === 0) {
+      append("直播事实", "读取中");
+      return;
+    }
+    append("接管状态", liveServeText(facts.latestServe));
+    append("缝合门", liveStitchText(facts.latestStitch));
+    append("应答计数", facts.serveCount);
+    append("配对缺失", facts.pairMissCount);
+    append("缝合计数", facts.stitchCount);
+    append("错误计数", facts.errorCount);
+  }
+
   // src/diagnostics/catalog.js
   var MEDIA_EVENT_NAMES = Object.freeze([
     "loadstart",
@@ -278,6 +391,14 @@
   var raceError;
   var raceQueryInFlight = false;
   var nextRaceQueryAt = 0;
+  var popupRoute = POPUP_ROUTE.VIDEO;
+  var liveSessionId;
+  var liveFacts = emptyLiveFacts();
+  var liveAfterEventId = 0;
+  var liveError;
+  var liveQueryInFlight = false;
+  var nextLiveQueryAt = 0;
+  var livePanelBodyElement = document.querySelector("[data-live-panel-body]");
   var readoutMediaElement = document.querySelector("[data-readout-media]");
   var readoutBankElement = document.querySelector("[data-readout-bank]");
   var readoutBankTitle = document.querySelector("[data-readout-bank-title]");
@@ -289,7 +410,7 @@
   function fieldsForSnapshot(snapshot) {
     return VIDEO_FIELDS;
   }
-  function textValue(value) {
+  function textValue2(value) {
     return value === void 0 || value === null || value === "" ? "未提供" : String(value);
   }
   function numberText(value, suffix = "") {
@@ -311,7 +432,7 @@
     const name = document.createElement("dt");
     name.textContent = label;
     const valueElement = document.createElement("dd");
-    valueElement.textContent = textValue(value);
+    valueElement.textContent = textValue2(value);
     if (estimate && value !== "未提供") {
       const marker = document.createElement("span");
       marker.className = "estimate-marker";
@@ -328,7 +449,7 @@
   }
   function lastStallText(lastStall) {
     if (lastStall === void 0 || lastStall === "未提供") return "未提供";
-    return `${textValue(lastStall.kind)} · ${numberText(lastStall.agoMs, " ms 前")}`;
+    return `${textValue2(lastStall.kind)} · ${numberText(lastStall.agoMs, " ms 前")}`;
   }
   function renderMediaReadout(media, lastStall) {
     clearReadout(readoutMediaElement);
@@ -346,7 +467,7 @@
     appendRow(readoutMediaElement, "当前时间", numberText(media.element.currentTime, " 秒"));
     appendRow(readoutMediaElement, "时长", numberText(media.element.duration, " 秒"));
     appendRow(readoutMediaElement, "倍速", numberText(media.element.playbackRate, "×"));
-    appendRow(readoutMediaElement, "分辨率", media.element.resolution === "未提供" ? "未提供" : `${textValue(media.element.resolution?.width)}×${textValue(media.element.resolution?.height)}`);
+    appendRow(readoutMediaElement, "分辨率", media.element.resolution === "未提供" ? "未提供" : `${textValue2(media.element.resolution?.width)}×${textValue2(media.element.resolution?.height)}`);
     appendRow(readoutMediaElement, "暂停", media.element.paused);
     appendRow(readoutMediaElement, "结束", media.element.ended);
     appendRow(readoutMediaElement, "上次停顿", lastStallText(lastStall));
@@ -355,7 +476,7 @@
       return;
     }
     for (const track of media.tracks) {
-      appendHeading(readoutMediaElement, `轨道 ${textValue(track.track)}`);
+      appendHeading(readoutMediaElement, `轨道 ${textValue2(track.track)}`);
       appendRow(readoutMediaElement, "附着", track.attached);
       appendRow(readoutMediaElement, "前向秒数", numberText(track.forwardSeconds, " 秒"));
       appendRow(readoutMediaElement, "ranges", rangeText(track.ranges));
@@ -386,7 +507,7 @@
     appendRow(readoutBankElement, "视频路由", bank.routeActive);
     appendRow(readoutBankElement, "有配对地址", bank.pairedAddressAvailable);
     for (const resource of bank.resources) {
-      appendHeading(readoutBankElement, `${textValue(resource.label)} · ${textValue(resource.pathname)}`);
+      appendHeading(readoutBankElement, `${textValue2(resource.label)} · ${textValue2(resource.pathname)}`);
       appendRow(readoutBankElement, "类型", resource.kind);
       appendRow(readoutBankElement, "已存字节", integerText(resource.storedBytes));
       appendRow(readoutBankElement, "已存块数", integerText(resource.storedChunks));
@@ -434,7 +555,7 @@
     appendRow(readoutRaceElement, "配对覆盖率", `${(summary.pairCoverage * 100).toFixed(1)}%`);
     appendRow(readoutRaceElement, "浪费字节率", `${(summary.wastedByteRatio * 100).toFixed(1)}%`);
     for (const row of summary.rows) {
-      appendHeading(readoutRaceElement, `镜像 ${textValue(row.mirror)}`);
+      appendHeading(readoutRaceElement, `镜像 ${textValue2(row.mirror)}`);
       appendRow(readoutRaceElement, "竞速进入", row.racesEntered);
       appendRow(readoutRaceElement, "胜出", row.wins);
       appendRow(readoutRaceElement, "胜率", `${(row.winRate * 100).toFixed(1)}%`);
@@ -525,19 +646,90 @@
       if (raceSessionId !== sessionId) return;
       raceSummary = response;
     } catch (error) {
-      if (raceSessionId === sessionId) raceError = textValue(error?.message || error);
+      if (raceSessionId === sessionId) raceError = textValue2(error?.message || error);
     } finally {
       raceQueryInFlight = false;
       nextRaceQueryAt = Date.now() + 1e3;
       renderRaceReadout(latestReadouts?.diagnostics?.persistence);
     }
   }
+  function renderLivePanel() {
+    renderLiveFacts(document, livePanelBodyElement, liveFacts, {
+      error: liveError,
+      inFlight: liveQueryInFlight,
+      hasSession: liveSessionId !== void 0 && liveSessionId !== "未提供"
+    });
+  }
+  async function sendLogsRead(message) {
+    const response = await chrome.runtime.sendMessage({ version: 1, ...message });
+    if (response?.ok !== true) throw new Error(response?.error?.message || "日志服务拒绝请求");
+    return response;
+  }
+  async function refreshLivePanel(sessionId) {
+    if (popupRoute !== POPUP_ROUTE.LIVE) return;
+    if (sessionId === void 0 || sessionId === "未提供") {
+      liveSessionId = sessionId;
+      liveFacts = emptyLiveFacts();
+      liveAfterEventId = 0;
+      liveError = void 0;
+      renderLivePanel();
+      return;
+    }
+    if (liveSessionId !== sessionId) {
+      liveSessionId = sessionId;
+      liveFacts = emptyLiveFacts();
+      liveAfterEventId = 0;
+      liveError = void 0;
+      nextLiveQueryAt = 0;
+    }
+    if (liveQueryInFlight || Date.now() < nextLiveQueryAt) return;
+    liveQueryInFlight = true;
+    renderLivePanel();
+    try {
+      const max = await sendLogsRead({ type: "logs:max-event-id", sessionId });
+      let afterEventId = liveAfterEventId;
+      for (; ; ) {
+        const page = await sendLogsRead({
+          type: "logs:events-page",
+          limit: 250,
+          afterEventId,
+          maxEventId: max.maxEventId,
+          sessionId
+        });
+        if (liveSessionId !== sessionId) return;
+        foldLiveEvents(liveFacts, page.events);
+        if (!page.hasMore) {
+          afterEventId = page.nextAfterEventId;
+          break;
+        }
+        const nextAfterEventId = page.nextAfterEventId ?? page.events.at(-1)?.eventId;
+        if (!Number.isInteger(nextAfterEventId) || nextAfterEventId <= afterEventId) {
+          throw new Error("日志分页没有向前推进");
+        }
+        afterEventId = nextAfterEventId;
+      }
+      liveAfterEventId = afterEventId;
+      liveError = void 0;
+    } catch (error) {
+      if (liveSessionId === sessionId) liveError = error?.message || String(error);
+    } finally {
+      liveQueryInFlight = false;
+      nextLiveQueryAt = Date.now() + 1e3;
+      renderLivePanel();
+    }
+  }
   async function pollReadouts() {
     try {
       const tab = await activeTab();
+      const route = popupRouteForTabUrl(tab?.url);
+      if (route !== popupRoute) {
+        popupRoute = route;
+        applyPopupRoute(document, popupRoute);
+      }
       if (tab === void 0) {
         renderReadouts(void 0);
         await refreshRace(void 0);
+        if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(void 0);
         return;
       }
       const response = await chrome.tabs.sendMessage(tab.id, {
@@ -547,9 +739,11 @@
       if (response?.ok === false) throw new Error(response.error?.message || "当前页面拒绝实时读数请求");
       renderReadouts(response);
       await refreshRace(response?.diagnostics?.sessionId);
+      if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(response?.diagnostics?.sessionId);
     } catch (error) {
       renderReadouts(void 0);
       await refreshRace(void 0);
+      if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(void 0);
       if (error?.message === "Could not establish connection. Receiving end does not exist.") {
         console.warn("[BilibiliBuffer] 当前活动页面没有实时面板接收端", error);
       } else {

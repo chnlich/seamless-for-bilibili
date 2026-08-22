@@ -2,6 +2,14 @@ import { EXTENSION_PREFERENCES } from '../constants.js';
 import { CDN_RESULT_VALUES } from '../diagnostics/cdn.js';
 import { logSessionFragment } from '../diagnostics/log-session.js';
 import { STATUS_MESSAGE_VERSION, VIDEO_FIELDS } from '../ui/panel.js';
+import {
+  POPUP_ROUTE,
+  applyPopupRoute,
+  emptyLiveFacts,
+  foldLiveEvents,
+  popupRouteForTabUrl,
+  renderLiveFacts,
+} from './popup-live.js';
 import { inventoryStoppedPublishing } from './readouts.js';
 
 const PREFERENCES = Object.freeze(Object.values(EXTENSION_PREFERENCES));
@@ -22,7 +30,15 @@ let raceSummary;
 let raceError;
 let raceQueryInFlight = false;
 let nextRaceQueryAt = 0;
+let popupRoute = POPUP_ROUTE.VIDEO;
+let liveSessionId;
+let liveFacts = emptyLiveFacts();
+let liveAfterEventId = 0;
+let liveError;
+let liveQueryInFlight = false;
+let nextLiveQueryAt = 0;
 
+const livePanelBodyElement = document.querySelector('[data-live-panel-body]');
 const readoutMediaElement = document.querySelector('[data-readout-media]');
 const readoutBankElement = document.querySelector('[data-readout-bank]');
 const readoutBankTitle = document.querySelector('[data-readout-bank-title]');
@@ -299,12 +315,86 @@ async function refreshRace(sessionId) {
   }
 }
 
+function renderLivePanel() {
+  renderLiveFacts(document, livePanelBodyElement, liveFacts, {
+    error: liveError,
+    inFlight: liveQueryInFlight,
+    hasSession: liveSessionId !== undefined && liveSessionId !== '未提供',
+  });
+}
+
+async function sendLogsRead(message) {
+  const response = await chrome.runtime.sendMessage({ version: 1, ...message });
+  if (response?.ok !== true) throw new Error(response?.error?.message || '日志服务拒绝请求');
+  return response;
+}
+
+async function refreshLivePanel(sessionId) {
+  if (popupRoute !== POPUP_ROUTE.LIVE) return;
+  if (sessionId === undefined || sessionId === '未提供') {
+    liveSessionId = sessionId;
+    liveFacts = emptyLiveFacts();
+    liveAfterEventId = 0;
+    liveError = undefined;
+    renderLivePanel();
+    return;
+  }
+  if (liveSessionId !== sessionId) {
+    liveSessionId = sessionId;
+    liveFacts = emptyLiveFacts();
+    liveAfterEventId = 0;
+    liveError = undefined;
+    nextLiveQueryAt = 0;
+  }
+  if (liveQueryInFlight || Date.now() < nextLiveQueryAt) return;
+  liveQueryInFlight = true;
+  renderLivePanel();
+  try {
+    const max = await sendLogsRead({ type: 'logs:max-event-id', sessionId });
+    let afterEventId = liveAfterEventId;
+    for (;;) {
+      const page = await sendLogsRead({
+        type: 'logs:events-page',
+        limit: 250,
+        afterEventId,
+        maxEventId: max.maxEventId,
+        sessionId,
+      });
+      if (liveSessionId !== sessionId) return;
+      foldLiveEvents(liveFacts, page.events);
+      if (!page.hasMore) {
+        afterEventId = page.nextAfterEventId;
+        break;
+      }
+      const nextAfterEventId = page.nextAfterEventId ?? page.events.at(-1)?.eventId;
+      if (!Number.isInteger(nextAfterEventId) || nextAfterEventId <= afterEventId) {
+        throw new Error('日志分页没有向前推进');
+      }
+      afterEventId = nextAfterEventId;
+    }
+    liveAfterEventId = afterEventId;
+    liveError = undefined;
+  } catch (error) {
+    if (liveSessionId === sessionId) liveError = error?.message || String(error);
+  } finally {
+    liveQueryInFlight = false;
+    nextLiveQueryAt = Date.now() + 1000;
+    renderLivePanel();
+  }
+}
+
 async function pollReadouts() {
   try {
     const tab = await activeTab();
+    const route = popupRouteForTabUrl(tab?.url);
+    if (route !== popupRoute) {
+      popupRoute = route;
+      applyPopupRoute(document, popupRoute);
+    }
     if (tab === undefined) {
       renderReadouts(undefined);
       await refreshRace(undefined);
+      if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(undefined);
       return;
     }
     const response = await chrome.tabs.sendMessage(tab.id, {
@@ -314,9 +404,11 @@ async function pollReadouts() {
     if (response?.ok === false) throw new Error(response.error?.message || '当前页面拒绝实时读数请求');
     renderReadouts(response);
     await refreshRace(response?.diagnostics?.sessionId);
+    if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(response?.diagnostics?.sessionId);
   } catch (error) {
     renderReadouts(undefined);
     await refreshRace(undefined);
+    if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(undefined);
     if (error?.message === 'Could not establish connection. Receiving end does not exist.') {
       console.warn('[BilibiliBuffer] 当前活动页面没有实时面板接收端', error);
     } else {

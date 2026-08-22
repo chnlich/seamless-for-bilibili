@@ -11,12 +11,16 @@
       <h1>Bilibili 抗卡</h1>
       <section class="preferences" aria-label="增强开关">
         <label class="switch-row">
-          <span>视频增强</span>
+          <span data-vod-toggle-label>视频增强</span>
           <input type="checkbox" data-preference="vodEnabled">
         </label>
         <p class="hint">开关是刷新后的默认值；扩展不接管播放控制。</p>
       </section>
-      <section class="snapshot" aria-label="当前页面事实">
+      <section class="readout-section" aria-label="直播接管" data-live-panel hidden>
+        <h2>直播接管</h2>
+        <div data-live-panel-body></div>
+      </section>
+      <section class="snapshot" aria-label="当前页面事实" data-vod-only>
         <div class="title-row"><span>当前页面</span><strong data-status-field="mode">未提供</strong></div>
         <dl>
           <div><dt>增强状态</dt><dd data-status-field="state">未提供</dd></div>
@@ -26,11 +30,11 @@
           <div><dt>错误</dt><dd data-status-field="error">未提供</dd></div>
         </dl>
       </section>
-      <section class="readout-section" aria-label="媒体缓冲">
+      <section class="readout-section" aria-label="媒体缓冲" data-vod-only>
         <h2>媒体缓冲</h2>
         <div data-readout-media></div>
       </section>
-      <section class="readout-section" aria-label="下载层库存">
+      <section class="readout-section" aria-label="下载层库存" data-vod-only>
         <h2 data-readout-bank-title>下载层库存</h2>
         <div data-readout-bank></div>
       </section>
