@@ -82,11 +82,13 @@
     "bank.disabled",
     "bank.inventory",
     "live.stream.stitch",
+    "live.playurl_observed",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
     "extension.destroyed",
-    "log.persist.degraded"
+    "log.persist.degraded",
+    "log.error"
   ]);
   var EXACT_CODES = new Set(EVENT_CODES);
   var PERSIST_ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
@@ -179,9 +181,12 @@
       "durationMs",
       "slot",
       "ttfbMs",
+      "httpStatus",
       "priority",
       "result",
       "reason",
+      "errorName",
+      "pairMiss",
       "sessionGeneration",
       "storedBytes",
       "storedChunks",
@@ -198,10 +203,15 @@
       "streamPath",
       "bytesChecked",
       "mismatch",
-      "phase"
+      "phase",
+      "channel",
+      "groupCount",
+      "flvGroupCount",
+      "errorName"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
-    persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"])
+    persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),
+    log: Object.freeze(["errorName", "message", "code"])
   });
   function allowedDataFields(code) {
     if (code.startsWith("route.")) return DATA_ALLOWLIST.route;
@@ -214,6 +224,7 @@
     if (code.startsWith("live.")) return DATA_ALLOWLIST.live;
     if (code.startsWith("extension.")) return DATA_ALLOWLIST.extension;
     if (code.startsWith("log.persist.")) return DATA_ALLOWLIST.persist;
+    if (code === "log.error") return DATA_ALLOWLIST.log;
     throw new Error(`诊断事件代码没有字段 allowlist: ${code}`);
   }
 
@@ -268,9 +279,14 @@
     const identifier = value.split(/[?#]/, 1)[0];
     return identifier.length === 0 ? UNKNOWN_VALUE : identifier;
   }
+  var MESSAGE_MAX_LENGTH = 200;
   function scrubErrorText(value) {
     if (typeof value !== "string") return UNKNOWN_VALUE;
     return value.replace(/https?:\/\/[^\s"'<>]+/g, (url) => scrubUrl(url));
+  }
+  function scrubMessageText(value) {
+    const text = scrubErrorText(value);
+    return text.length > MESSAGE_MAX_LENGTH ? text.slice(0, MESSAGE_MAX_LENGTH) : text;
   }
   function safeRangeList(value) {
     if (!Array.isArray(value)) return UNKNOWN_VALUE;
@@ -451,10 +467,13 @@
       "queued",
       "inflight",
       "prefetchConcurrency",
-      "bytesChecked"
+      "bytesChecked",
+      "httpStatus",
+      "groupCount",
+      "flvGroupCount"
     ].includes(field)) return safeNonnegativeInteger(value);
     if (field === "code") return isSafePersistErrorCode(value) ? value : UNKNOWN_VALUE;
-    if (field === "message") return scrubErrorText(value);
+    if (field === "message") return scrubMessageText(value);
     if (field === "samples") return safeSampleList(value);
     if (field === "mediaSourceInstance" || field === "sourceBufferInstance" || field === "appendSequence") {
       return safePositiveInteger(value);
@@ -584,7 +603,7 @@
   }
 
   // src/build-id.js
-  var BUILT_BUILD_ID = true ? "src-6dbc102ff1b4fa177ea70014" : "source-build";
+  var BUILT_BUILD_ID = true ? "src-6702f8565097c74c7a56dbfa" : "source-build";
   function readBuildId() {
     return BUILT_BUILD_ID;
   }
@@ -821,13 +840,13 @@
       this.destroyed = false;
       this.tearingDown = false;
       this.persistence = "未提供";
-      this.pendingPersistResult = void 0;
+      this.droppedPersistResults = [];
       this.noVideoTimer = void 0;
       this.startSession(routeIdentity(locationObject));
       this.documentObject?.defaultView?.addEventListener?.("pagehide", () => {
         this.beginTeardown();
         void this.flushForTeardown().catch((error) => {
-          this.logger.error?.("[BilibiliBuffer] diagnostic teardown flush failed", serializeError(error));
+          this.logMirrorError("LOG_TEARDOWN_FLUSH_FAILED", "[BilibiliBuffer] diagnostic teardown flush failed", error);
         }).finally(() => this.destroy());
       }, { once: true });
     }
@@ -877,21 +896,28 @@
     log(code, data = {}, error, context = {}) {
       if (this.destroyed || this.tearingDown) return;
       try {
-        if (this.pendingPersistResult !== void 0 && !code.startsWith("log.persist.")) {
-          const result = this.pendingPersistResult;
-          this.pendingPersistResult = void 0;
-          if (result.status === "DEGRADED") {
-            this.append("log.persist.degraded", result, void 0, {});
-          }
-        }
         this.append(code, data, error, context);
         if (!code.startsWith("log.persist.")) this.scheduleFlush();
       } catch (logError) {
-        try {
-          this.logger.error?.("[BilibiliBuffer] diagnostic event rejected", serializeError(logError));
-        } catch (mirrorError) {
-          console.error("[BilibiliBuffer] diagnostic event rejection mirror failed", mirrorError);
-        }
+        this.logMirrorError("LOG_EVENT_REJECTED", "[BilibiliBuffer] diagnostic event rejected", logError);
+      }
+    }
+    logMirrorError(code, message, error) {
+      try {
+        this.logger.error?.(message, serializeError(error));
+      } catch (mirrorError) {
+        console.error("[BilibiliBuffer] diagnostic client error mirror failed", mirrorError);
+      }
+      if (this.destroyed || this.tearingDown) return;
+      try {
+        this.append("log.error", {
+          errorName: error?.name,
+          message: error?.message === void 0 ? message : `${message}: ${error.message}`,
+          code
+        }, void 0, {});
+        this.scheduleFlush();
+      } catch (persistError) {
+        console.error("[BilibiliBuffer] diagnostic client error channel persist failed", persistError);
       }
     }
     append(code, data, error, context) {
@@ -935,7 +961,12 @@
       }
     }
     enqueuePendingBatch() {
-      if (this.pending.length === 0 || this.session === void 0) return;
+      if (this.session === void 0) return;
+      if (this.droppedPersistResults.length > 0) {
+        const results = this.droppedPersistResults.splice(0);
+        for (const result of results) this.append("log.persist.degraded", result, void 0, {});
+      }
+      if (this.pending.length === 0) return;
       this.outbox.push({
         session: this.session,
         batch: this.pending.splice(0, this.pending.length),
@@ -963,30 +994,32 @@
           });
         }
         this.persistence = response.status;
-        this.pendingPersistResult = {
-          status: response.status,
-          batchSize: batch.length,
-          eventCount: response.eventCount
-        };
         return response;
       }).catch((error) => {
         this.persistence = "DEGRADED";
-        item.failed = true;
         item.retryCount += 1;
-        this.outbox.unshift(item);
-        this.pendingPersistResult = {
-          status: "DEGRADED",
-          batchSize: batch.length,
-          message: error.message || String(error),
-          code: persistenceErrorCode(error)
-        };
+        let result;
+        if (item.retryCount > PERSIST_RETRY_MAX_ATTEMPTS) {
+          this.droppedPersistResults.push({
+            status: "DEGRADED",
+            batchSize: batch.length,
+            message: error.message || String(error),
+            code: persistenceErrorCode(error)
+          });
+          this.closeSequenceGapAfterDrop(item);
+          result = { status: "DROPPED", error: serializeError(error) };
+        } else {
+          item.failed = true;
+          this.outbox.unshift(item);
+          this.scheduleHeadRetry(item);
+          result = { status: "DEGRADED", error: serializeError(error) };
+        }
         try {
           this.logger.error?.("[BilibiliBuffer] diagnostic persistence degraded", serializeError(error));
         } catch (consoleError) {
           this.logger.warn?.("[BilibiliBuffer] diagnostic degraded mirror failed", serializeError(consoleError));
         }
-        this.scheduleHeadRetry(item);
-        return { status: "DEGRADED", error: serializeError(error) };
+        return result;
       }).finally(() => {
         this.flushPromise = void 0;
         if (!this.destroyed && !this.tearingDown && this.outbox.length > 0 && this.outbox[0].failed !== true) {
@@ -994,6 +1027,27 @@
         }
       });
       return this.flushPromise;
+    }
+    // 丢弃批次后靠重排序列闭合 worker 的连续 sequence 校验：同 session 后续批次与
+    // pending 事件从被丢批次的首序号起连续重排，损失封顶为被丢批次本身。
+    closeSequenceGapAfterDrop(item) {
+      const sessionId = item.session.sessionId;
+      let nextSequence = item.batch[0]?.sequence;
+      if (!Number.isInteger(nextSequence)) return;
+      for (const queued of this.outbox) {
+        if (queued.session.sessionId !== sessionId) continue;
+        for (const event of queued.batch) {
+          event.sequence = nextSequence;
+          nextSequence += 1;
+        }
+      }
+      if (sessionId === this.session?.sessionId) {
+        for (const event of this.pending) {
+          event.sequence = nextSequence;
+          nextSequence += 1;
+        }
+        this.sequence = nextSequence - 1;
+      }
     }
     cancelScheduledRetry(item) {
       if (this.retryItem !== item) return;

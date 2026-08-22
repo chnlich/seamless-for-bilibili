@@ -173,14 +173,14 @@ export class LiveStreamStitcher {
     this.progress();
   }
 
-  noteLegDead(slot, outcome) {
+  noteLegDead(slot, outcome, detail = {}) {
     if (this.closed) return;
     const leg = this.legFor(slot);
     if (leg === undefined || leg.dead || leg.done) {
       throw new Error('直播腿重复死亡');
     }
     leg.dead = true;
-    this.reportLegUnreported(leg, outcome);
+    this.reportLegUnreported(leg, outcome, detail);
     for (const delivered of this.deliveredWindows.values()) delivered.compared.add(slot);
     this.legs.splice(this.legs.indexOf(leg), 1);
     if (this.state === 'gating') {
@@ -223,7 +223,7 @@ export class LiveStreamStitcher {
     return leg.currentWindow.subarray(0, leg.windowFilled);
   }
 
-  emitChunkNow(leg, windowIndex, result, bytes, entry) {
+  emitChunkNow(leg, windowIndex, result, bytes, entry, detail = {}) {
     const start = windowIndex * this.chunkBytes;
     const startedAt = entry?.startedAt ?? leg.windowStartedAt;
     const payload = {
@@ -238,24 +238,26 @@ export class LiveStreamStitcher {
       result,
     };
     if (windowIndex === 0 && leg.ttfbAt !== undefined) payload.ttfbMs = leg.ttfbAt - leg.startedAt;
+    if (Number.isInteger(detail.httpStatus)) payload.httpStatus = detail.httpStatus;
+    if (typeof detail.errorName === 'string' && detail.errorName.length > 0) payload.errorName = detail.errorName;
     this.callbacks.emitChunk(payload);
   }
 
-  emitLegWindowEvent(leg, result) {
+  emitLegWindowEvent(leg, result, detail) {
     const windowIndex = chunkIndex(leg.receivedTotal, this.chunkBytes);
     const bytes = leg.windowFilled - leg.reportedInWindow;
     leg.reportedInWindow = leg.windowFilled;
-    this.emitChunkNow(leg, windowIndex, result, bytes, undefined);
+    this.emitChunkNow(leg, windowIndex, result, bytes, undefined, detail);
   }
 
-  reportLegUnreported(leg, result) {
+  reportLegUnreported(leg, result, detail = {}) {
     const indices = [...leg.ahead.keys()].sort((left, right) => left - right);
     for (const windowIndex of indices) {
       const entry = leg.ahead.get(windowIndex);
-      this.emitChunkNow(leg, windowIndex, result, entry.bytes.byteLength, entry);
+      this.emitChunkNow(leg, windowIndex, result, entry.bytes.byteLength, entry, detail);
       leg.ahead.delete(windowIndex);
     }
-    this.emitLegWindowEvent(leg, result);
+    this.emitLegWindowEvent(leg, result, detail);
   }
 
   emitStitchNow(mismatch, phase) {

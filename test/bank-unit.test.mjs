@@ -2964,3 +2964,222 @@ test('live XHR surfaces an explicit failure when every address is expired', asyn
   );
   bank.destroy();
 });
+
+test('live pairing evaluator names the three miss branches and keeps pairUrlFor unchanged', () => {
+  const clock = { value: 100000 };
+  const { bank } = createLiveBank({ nativeFetch: async () => new Response('x'), now: () => clock.value });
+  assert.deepEqual(bank.evaluateLivePair(LIVE_URL), { pairUrl: undefined, miss: 'no_book_entry' });
+
+  bank.observeLivePlayurlData(livePlayurlBody());
+  const pairedDecision = bank.evaluateLivePair(LIVE_URL);
+  assert.equal(pairedDecision.pairUrl, LIVE_PAIR_URL);
+  assert.equal(pairedDecision.miss, undefined);
+  assert.equal(bank.pairUrlFor(LIVE_URL), LIVE_PAIR_URL);
+
+  clock.value += 3600000 + 1;
+  assert.deepEqual(bank.evaluateLivePair(LIVE_URL), { pairUrl: undefined, miss: 'stale' });
+  assert.equal(bank.pairUrlFor(LIVE_URL), undefined);
+  bank.destroy();
+
+  const single = createLiveBank({ nativeFetch: async () => new Response('x') });
+  single.bank.observeLivePlayurlData(liveUrlInfoBody(
+    [liveUrlInfoEntry(LIVE_URL)],
+    `${new URL(LIVE_URL).pathname}?`,
+  ));
+  assert.deepEqual(single.bank.evaluateLivePair(LIVE_URL), { pairUrl: undefined, miss: 'no_alt_host' });
+  assert.equal(single.bank.pairUrlFor(LIVE_URL), undefined);
+  single.bank.destroy();
+});
+
+test('live playurl observation emits channel, group counts, and error names', () => {
+  const { bank, windowObject } = createLiveBank({ nativeFetch: async () => new Response('x') });
+
+  bank.observeLivePlayurlData(undefined);
+  let observed = windowObject.messages.at(-1);
+  assert.equal(observed.code, 'live.playurl_observed');
+  assert.deepEqual(observed.data, { channel: 'playinfo_api', groupCount: 0, flvGroupCount: 0 });
+
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    bank.observeLivePlayurlData('{broken json');
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(errors.length, 1);
+  observed = windowObject.messages.at(-1);
+  assert.equal(observed.code, 'live.playurl_observed');
+  assert.deepEqual(observed.data, {
+    channel: 'playinfo_api',
+    groupCount: 0,
+    flvGroupCount: 0,
+    errorName: 'SyntaxError',
+  });
+  const logError = windowObject.messages.filter((message) => message.code === 'log.error').at(-1);
+  assert.equal(logError.data.code, 'LIVE_PLAYURL');
+  assert.equal(logError.data.errorName, 'SyntaxError');
+
+  bank.observeLivePlayurlData(livePlayurlBody());
+  observed = windowObject.messages.at(-1);
+  assert.deepEqual(observed.data, { channel: 'playinfo_api', groupCount: 1, flvGroupCount: 1 });
+
+  const hlsGroup = liveUrlInfoBody(
+    [liveUrlInfoEntry('https://d1--ov-gotcha105.bilivideo.com/live-bvc/1/index.m3u8?expires=4102444800&sign=hls')],
+    '/live-bvc/1/index.m3u8?',
+  );
+  bank.observeLivePlayurlData(hlsGroup, 'playinfo_api');
+  observed = windowObject.messages.at(-1);
+  assert.deepEqual(observed.data, { channel: 'playinfo_api', groupCount: 1, flvGroupCount: 0 });
+  bank.destroy();
+});
+
+test('live inline address-book read reports the inline_blob channel and zero groups when absent', () => {
+  const { bank, windowObject } = createLiveBank({ nativeFetch: async () => new Response('x') });
+  bank.readInlineLivePlayinfo();
+  const observed = windowObject.messages.at(-1);
+  assert.equal(observed.code, 'live.playurl_observed');
+  assert.deepEqual(observed.data, { channel: 'inline_blob', groupCount: 0, flvGroupCount: 0 });
+  bank.destroy();
+
+  const withInline = createLiveBank({
+    nativeFetch: async () => new Response('x'),
+    playinfo: livePlayurlBody(),
+  });
+  withInline.bank.readInlineLivePlayinfo();
+  const inlineObserved = withInline.windowObject.messages.at(-1);
+  assert.equal(inlineObserved.code, 'live.playurl_observed');
+  assert.deepEqual(inlineObserved.data, { channel: 'inline_blob', groupCount: 1, flvGroupCount: 1 });
+  withInline.bank.destroy();
+});
+
+test('live serve hit events carry pairMiss on unpaired and pairedAddressAvailable on paired', async () => {
+  const pairedFeeds = { [LIVE_URL]: liveFeed(), [LIVE_PAIR_URL]: liveFeed() };
+  const paired = createLiveBank({
+    playinfo: livePlayurlBody(),
+    nativeFetch: async (url) => pairedFeeds[url].response,
+  });
+  const pairedResponse = await liveFetchThrough(paired.bank);
+  pairedFeeds[LIVE_URL].push(encoded('ABCD'));
+  pairedFeeds[LIVE_PAIR_URL].push(encoded('ABCD'));
+  await tick();
+  pairedFeeds[LIVE_URL].close();
+  pairedFeeds[LIVE_PAIR_URL].close();
+  await pairedResponse.text();
+  const pairedServe = paired.windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.equal(pairedServe.data.result, 'hit');
+  assert.equal(pairedServe.data.pairedAddressAvailable, true);
+  assert.equal(Object.hasOwn(pairedServe.data, 'pairMiss'), false);
+  paired.bank.destroy();
+
+  const single = liveFeed();
+  const unpaired = createLiveBank({ nativeFetch: async () => single.response });
+  const response = await liveFetchThrough(unpaired.bank);
+  single.push(encoded('OK'));
+  single.close();
+  assert.equal(await response.text(), 'OK');
+  const unpairedServe = unpaired.windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.equal(unpairedServe.data.reason, 'live_stream_unpaired');
+  assert.equal(unpairedServe.data.pairMiss, 'no_book_entry');
+  assert.equal(Object.hasOwn(unpairedServe.data, 'pairedAddressAvailable'), false);
+  unpaired.bank.destroy();
+});
+
+test('live takeover emits one failed serve with errorName when every address is expired', async () => {
+  const expiredMain = 'https://d1--ov-gotcha07.bilivideo.com/live-bvc/1/stream.flv?expires=946684800&sign=main';
+  const expiredBackup = 'https://d1--ov-gotcha07b.bilivideo.com/live-bvc/1/stream.flv?expires=946684800&sign=backup';
+  const { bank, windowObject } = createLiveBank({
+    playinfo: livePlayurlBody(expiredMain, expiredBackup),
+    nativeFetch: async () => new Response('x'),
+  });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    await assert.rejects(liveFetchThrough(bank, expiredMain), /直播流地址签名到期且无可用地址/);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(errors.length, 1);
+  const failedServes = windowObject.messages.filter((message) => message.code === 'bank.serve'
+    && message.data.result === 'failed');
+  assert.equal(failedServes.length, 1);
+  assert.equal(failedServes[0].data.reason, 'live_stream_failed');
+  assert.equal(failedServes[0].data.errorName, 'BankNetworkError');
+  assert.equal(typeof failedServes[0].data.durationMs, 'number');
+  const logErrors = windowObject.messages.filter((message) => message.code === 'log.error');
+  assert.equal(logErrors.length, 1);
+  assert.equal(logErrors[0].data.code, 'LIVE_TAKEOVER');
+  bank.destroy();
+});
+
+test('live takeover emits exactly one failed serve after both legs die', async () => {
+  const feeds = { [LIVE_URL]: liveFeed({ status: 500 }), [LIVE_PAIR_URL]: liveFeed({ status: 500 }) };
+  const { bank, windowObject } = createLiveBank({
+    playinfo: livePlayurlBody(),
+    nativeFetch: async (url) => feeds[url].response,
+  });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    await assert.rejects(liveFetchThrough(bank), /直播流双腿取数失败/);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(errors.length, 1);
+  const failedServes = windowObject.messages.filter((message) => message.code === 'bank.serve'
+    && message.data.result === 'failed');
+  assert.equal(failedServes.length, 1);
+  assert.equal(failedServes[0].data.reason, 'live_stream_failed');
+  assert.equal(failedServes[0].data.errorName, 'BankNetworkError');
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result, data.httpStatus]),
+    [[0, 'http_error', 500], [1, 'http_error', 500]],
+  );
+  bank.destroy();
+});
+
+test('live chunk events carry errorName on network errors and omit details on success paths', async () => {
+  const { bank, windowObject } = createLiveBank({
+    nativeFetch: async () => { throw new TypeError('fetch failed'); },
+  });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    await assert.rejects(liveFetchThrough(bank), /直播流双腿取数失败/);
+  } finally {
+    console.error = originalError;
+  }
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.equal(chunks.length, 1);
+  assert.equal(chunks[0].data.result, 'network_error');
+  assert.equal(chunks[0].data.errorName, 'TypeError');
+  assert.equal(Object.hasOwn(chunks[0].data, 'httpStatus'), false);
+  assert.equal(errors.length, 1);
+  assert.equal(windowObject.messages.some((message) => message.code === 'log.error'
+    && message.data.code === 'LIVE_TAKEOVER'), true);
+  bank.destroy();
+
+  const feeds = { [LIVE_URL]: liveFeed(), [LIVE_PAIR_URL]: liveFeed() };
+  const paired = createLiveBank({
+    playinfo: livePlayurlBody(),
+    nativeFetch: async (url) => feeds[url].response,
+  });
+  const response = await liveFetchThrough(paired.bank);
+  feeds[LIVE_URL].push(encoded('ABCD'));
+  feeds[LIVE_PAIR_URL].push(encoded('ABCD'));
+  await tick();
+  feeds[LIVE_URL].close();
+  feeds[LIVE_PAIR_URL].close();
+  assert.equal(await response.text(), 'ABCD');
+  const successChunks = paired.windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.equal(successChunks.length > 0, true);
+  for (const chunk of successChunks) {
+    assert.equal(Object.hasOwn(chunk.data, 'httpStatus'), false);
+    assert.equal(Object.hasOwn(chunk.data, 'errorName'), false);
+  }
+  paired.bank.destroy();
+});

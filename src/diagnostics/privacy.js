@@ -58,9 +58,16 @@ function scrubIdentifier(value) {
   return identifier.length === 0 ? UNKNOWN_VALUE : identifier;
 }
 
+const MESSAGE_MAX_LENGTH = 200;
+
 function scrubErrorText(value) {
   if (typeof value !== 'string') return UNKNOWN_VALUE;
   return value.replace(/https?:\/\/[^\s"'<>]+/g, (url) => scrubUrl(url));
+}
+
+function scrubMessageText(value) {
+  const text = scrubErrorText(value);
+  return text.length > MESSAGE_MAX_LENGTH ? text.slice(0, MESSAGE_MAX_LENGTH) : text;
 }
 
 function safeRangeList(value) {
@@ -268,9 +275,12 @@ function sanitizeField(field, value) {
     'inflight',
     'prefetchConcurrency',
     'bytesChecked',
+    'httpStatus',
+    'groupCount',
+    'flvGroupCount',
   ].includes(field)) return safeNonnegativeInteger(value);
   if (field === 'code') return isSafePersistErrorCode(value) ? value : UNKNOWN_VALUE;
-  if (field === 'message') return scrubErrorText(value);
+  if (field === 'message') return scrubMessageText(value);
   if (field === 'samples') return safeSampleList(value);
   if (field === 'mediaSourceInstance' || field === 'sourceBufferInstance' || field === 'appendSequence') {
     return safePositiveInteger(value);

@@ -344,6 +344,9 @@ assert.deepEqual([...DATA_ALLOWLIST.bank].sort(), [
   'start',
   'slot',
   'ttfbMs',
+  'httpStatus',
+  'errorName',
+  'pairMiss',
   'sessionGeneration',
   'storedBytes',
   'storedChunks',
@@ -361,7 +364,18 @@ assert.deepEqual([...DATA_ALLOWLIST.live].sort(), [
   'bytesChecked',
   'mismatch',
   'phase',
+  'channel',
+  'groupCount',
+  'flvGroupCount',
+  'errorName',
 ].sort());
+assert.deepEqual([...DATA_ALLOWLIST.log].sort(), [
+  'errorName',
+  'message',
+  'code',
+].sort());
+assert.equal(EVENT_CODES.includes('log.error'), true);
+assert.equal(EVENT_CODES.includes('live.playurl_observed'), true);
 for (const field of [
   'mediaSourceInstance',
   'sourceBufferInstance',

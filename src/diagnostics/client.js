@@ -81,13 +81,13 @@ export class DiagnosticsClient {
     this.destroyed = false;
     this.tearingDown = false;
     this.persistence = '未提供';
-    this.pendingPersistResult = undefined;
+    this.droppedPersistResults = [];
     this.noVideoTimer = undefined;
     this.startSession(routeIdentity(locationObject));
     this.documentObject?.defaultView?.addEventListener?.('pagehide', () => {
       this.beginTeardown();
       void this.flushForTeardown().catch((error) => {
-        this.logger.error?.('[BilibiliBuffer] diagnostic teardown flush failed', serializeError(error));
+        this.logMirrorError('LOG_TEARDOWN_FLUSH_FAILED', '[BilibiliBuffer] diagnostic teardown flush failed', error);
       }).finally(() => this.destroy());
     }, { once: true });
   }
@@ -141,21 +141,29 @@ export class DiagnosticsClient {
   log(code, data = {}, error, context = {}) {
     if (this.destroyed || this.tearingDown) return;
     try {
-      if (this.pendingPersistResult !== undefined && !code.startsWith('log.persist.')) {
-        const result = this.pendingPersistResult;
-        this.pendingPersistResult = undefined;
-        if (result.status === 'DEGRADED') {
-          this.append('log.persist.degraded', result, undefined, {});
-        }
-      }
       this.append(code, data, error, context);
       if (!code.startsWith('log.persist.')) this.scheduleFlush();
     } catch (logError) {
-      try {
-        this.logger.error?.('[BilibiliBuffer] diagnostic event rejected', serializeError(logError));
-      } catch (mirrorError) {
-        console.error('[BilibiliBuffer] diagnostic event rejection mirror failed', mirrorError);
-      }
+      this.logMirrorError('LOG_EVENT_REJECTED', '[BilibiliBuffer] diagnostic event rejected', logError);
+    }
+  }
+
+  logMirrorError(code, message, error) {
+    try {
+      this.logger.error?.(message, serializeError(error));
+    } catch (mirrorError) {
+      console.error('[BilibiliBuffer] diagnostic client error mirror failed', mirrorError);
+    }
+    if (this.destroyed || this.tearingDown) return;
+    try {
+      this.append('log.error', {
+        errorName: error?.name,
+        message: error?.message === undefined ? message : `${message}: ${error.message}`,
+        code,
+      }, undefined, {});
+      this.scheduleFlush();
+    } catch (persistError) {
+      console.error('[BilibiliBuffer] diagnostic client error channel persist failed', persistError);
     }
   }
 
@@ -204,7 +212,12 @@ export class DiagnosticsClient {
   }
 
   enqueuePendingBatch() {
-    if (this.pending.length === 0 || this.session === undefined) return;
+    if (this.session === undefined) return;
+    if (this.droppedPersistResults.length > 0) {
+      const results = this.droppedPersistResults.splice(0);
+      for (const result of results) this.append('log.persist.degraded', result, undefined, {});
+    }
+    if (this.pending.length === 0) return;
     this.outbox.push({
       session: this.session,
       batch: this.pending.splice(0, this.pending.length),
@@ -233,30 +246,32 @@ export class DiagnosticsClient {
         });
       }
       this.persistence = response.status;
-      this.pendingPersistResult = {
-        status: response.status,
-        batchSize: batch.length,
-        eventCount: response.eventCount,
-      };
       return response;
     }).catch((error) => {
       this.persistence = 'DEGRADED';
-      item.failed = true;
       item.retryCount += 1;
-      this.outbox.unshift(item);
-      this.pendingPersistResult = {
-        status: 'DEGRADED',
-        batchSize: batch.length,
-        message: error.message || String(error),
-        code: persistenceErrorCode(error),
-      };
+      let result;
+      if (item.retryCount > PERSIST_RETRY_MAX_ATTEMPTS) {
+        this.droppedPersistResults.push({
+          status: 'DEGRADED',
+          batchSize: batch.length,
+          message: error.message || String(error),
+          code: persistenceErrorCode(error),
+        });
+        this.closeSequenceGapAfterDrop(item);
+        result = { status: 'DROPPED', error: serializeError(error) };
+      } else {
+        item.failed = true;
+        this.outbox.unshift(item);
+        this.scheduleHeadRetry(item);
+        result = { status: 'DEGRADED', error: serializeError(error) };
+      }
       try {
         this.logger.error?.('[BilibiliBuffer] diagnostic persistence degraded', serializeError(error));
       } catch (consoleError) {
         this.logger.warn?.('[BilibiliBuffer] diagnostic degraded mirror failed', serializeError(consoleError));
       }
-      this.scheduleHeadRetry(item);
-      return { status: 'DEGRADED', error: serializeError(error) };
+      return result;
     }).finally(() => {
       this.flushPromise = undefined;
       if (!this.destroyed && !this.tearingDown && this.outbox.length > 0 && this.outbox[0].failed !== true) {
@@ -264,6 +279,28 @@ export class DiagnosticsClient {
       }
     });
     return this.flushPromise;
+  }
+
+  // 丢弃批次后靠重排序列闭合 worker 的连续 sequence 校验：同 session 后续批次与
+  // pending 事件从被丢批次的首序号起连续重排，损失封顶为被丢批次本身。
+  closeSequenceGapAfterDrop(item) {
+    const sessionId = item.session.sessionId;
+    let nextSequence = item.batch[0]?.sequence;
+    if (!Number.isInteger(nextSequence)) return;
+    for (const queued of this.outbox) {
+      if (queued.session.sessionId !== sessionId) continue;
+      for (const event of queued.batch) {
+        event.sequence = nextSequence;
+        nextSequence += 1;
+      }
+    }
+    if (sessionId === this.session?.sessionId) {
+      for (const event of this.pending) {
+        event.sequence = nextSequence;
+        nextSequence += 1;
+      }
+      this.sequence = nextSequence - 1;
+    }
   }
 
   cancelScheduledRetry(item) {

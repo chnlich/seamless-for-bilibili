@@ -118,11 +118,13 @@
     "bank.disabled",
     "bank.inventory",
     "live.stream.stitch",
+    "live.playurl_observed",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
     "extension.destroyed",
-    "log.persist.degraded"
+    "log.persist.degraded",
+    "log.error"
   ]);
   var EXACT_CODES = new Set(EVENT_CODES);
   var DATA_ALLOWLIST = Object.freeze({
@@ -205,9 +207,12 @@
       "durationMs",
       "slot",
       "ttfbMs",
+      "httpStatus",
       "priority",
       "result",
       "reason",
+      "errorName",
+      "pairMiss",
       "sessionGeneration",
       "storedBytes",
       "storedChunks",
@@ -224,10 +229,15 @@
       "streamPath",
       "bytesChecked",
       "mismatch",
-      "phase"
+      "phase",
+      "channel",
+      "groupCount",
+      "flvGroupCount",
+      "errorName"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
-    persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"])
+    persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),
+    log: Object.freeze(["errorName", "message", "code"])
   });
 
   // src/extension/bridge-contract.js

@@ -111,7 +111,7 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
               try {
                 bank.observeLivePlayurlText(this._native.responseText);
               } catch (error) {
-                console.error('[BilibiliBuffer] 直播 playurl 地址簿读取失败', error);
+                bank.reportLiveError('LIVE_PLAYURL', '直播 playurl 地址簿读取失败', error);
               }
             }
             if (event.type === 'loadstart' && this._suppressNativeLoadstart) {
@@ -407,7 +407,7 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
           signal: this._abortController.signal,
         });
       } catch (error) {
-        console.error('[BilibiliBuffer] 直播流前台接管失败', error);
+        bank.reportLiveError('LIVE_TAKEOVER', '直播流前台接管失败', error);
         this.finishError(error, generation);
         return undefined;
       }
@@ -450,7 +450,7 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
       takeover.onError = (error) => {
         if (this._done || generation !== this._generation) return;
         if (this._aborted || this._timedOut) return;
-        console.error('[BilibiliBuffer] 直播流前台接管失败', error);
+        bank.reportLiveError('LIVE_TAKEOVER', '直播流前台接管失败', error);
         this.finishError(error, generation);
       };
       void takeover.headersPromise.catch((error) => {
@@ -459,7 +459,7 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
           if (!this._aborted && !this._timedOut) this.finishError(error, generation);
           return;
         }
-        console.error('[BilibiliBuffer] 直播流前台接管失败', error);
+        bank.reportLiveError('LIVE_TAKEOVER', '直播流前台接管失败', error);
         this.finishError(error, generation);
       });
       return undefined;
