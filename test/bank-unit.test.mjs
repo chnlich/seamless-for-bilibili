@@ -3660,6 +3660,52 @@ test('hls fetch stall rule kills a silent leg after stallMs and the survivor ser
   bank.destroy();
 });
 
+test('hls fetch treats expired segment signatures as invalid addresses and fails when none remain', async () => {
+  const expiredSegment = `https://d1--ov-gotcha207.bilivideo.com${HLS_STREAM_DIR}423384050.m4s?expires=946684800&sign=old`;
+  const expiredPair = `https://d1--ov-gotcha105.bilivideo.com${HLS_STREAM_DIR}423384050.m4s?expires=946684800&sign=old105`;
+  const expiredBody = liveUrlInfoBody(
+    [liveUrlInfoEntry(expiredPair.replace('.m4s', '.m3u8')), liveUrlInfoEntry(
+      `https://d1--ov-gotcha105b.bilivideo.com${HLS_STREAM_DIR}index.m3u8?expires=946684800&sign=old105b`,
+    )],
+    `${HLS_STREAM_DIR}index.m3u8?`,
+  );
+  const { bank, windowObject } = createLiveBank({
+    playinfo: expiredBody,
+    nativeFetch: async () => new Response('x'),
+  });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    await assert.rejects(hlsFetchThrough(bank, expiredSegment), /直播分片地址签名到期且无可用地址/);
+  } finally {
+    console.error = originalError;
+  }
+  const expiredChunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk'
+    && message.data.result === 'address_expired');
+  assert.deepEqual(expiredChunks.map(({ data }) => [data.slot, data.chunkIndex]), [[0, 0], [1, 0]]);
+  const failedServe = windowObject.messages.find((message) => message.code === 'bank.serve'
+    && message.data.result === 'failed');
+  assert.equal(failedServe.data.reason, 'live_hls_segment_failed');
+  assert.equal(errors.length, 1);
+  bank.destroy();
+
+  // 播放器地址过期但配对地址有效时，仍由配对地址单腿接管。
+  const calls = [];
+  const mixed = createLiveBank({
+    playinfo: HLS_PLAYURL_BODY,
+    nativeFetch: async (url) => {
+      calls.push(url);
+      return segmentFeed(encoded('ABCD')).response;
+    },
+  });
+  const expiredPlayer = `https://d1--ov-gotcha207.bilivideo.com${HLS_STREAM_DIR}423384050.m4s?expires=946684800&sign=old`;
+  const response = await hlsFetchThrough(mixed.bank, expiredPlayer);
+  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [...encoded('ABCD')]);
+  assert.deepEqual(mixed.bank ? calls : [], [HLS_SEGMENT_PAIR_FOR_PLAYER]);
+  mixed.bank.destroy();
+});
+
 test('hls segment byte comparison treats length differences as mismatches', async () => {
   assert.equal(compareSegmentBytes(encoded('ABCD'), encoded('ABCD')), -1);
   assert.equal(compareSegmentBytes(encoded('ABCD'), encoded('ABCE')), 3);
