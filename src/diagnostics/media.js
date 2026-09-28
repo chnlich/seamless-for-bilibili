@@ -140,12 +140,6 @@ function finiteDelta(value, previous) {
   return Math.max(0, value - previous);
 }
 
-function rawMetric(value) {
-  if (value !== null && typeof value === 'object' && !Array.isArray(value)
-    && value.value === 0 && value.reportedBy === 'browser') return 0;
-  return value;
-}
-
 function qualityDelta(value, previous) {
   if (!Number.isFinite(value) || !Number.isFinite(previous)) return undefined;
   return value - previous;
@@ -158,31 +152,6 @@ function median(values) {
   return (ordered[middle - 1] + ordered[middle]) / 2;
 }
 
-export function classifyStall({
-  currentTime,
-  bufferedRanges,
-  totalDelta,
-  droppedDelta,
-  mediaStepMsMedian,
-  mediaStepMsMax,
-}) {
-  const hasBufferedData = Number.isFinite(currentTime)
-    && Array.isArray(bufferedRanges)
-    && bufferedRanges.some((range) => Number.isFinite(range?.start)
-      && Number.isFinite(range?.end)
-      && range.start <= currentTime
-      && range.end > currentTime);
-  if (!hasBufferedData) return '数据侧';
-  if (totalDelta === 0) return '帧未产出';
-  const mediaStepMedian = rawMetric(mediaStepMsMedian);
-  const mediaStepMax = rawMetric(mediaStepMsMax);
-  const mediaStepGap = Number.isFinite(mediaStepMedian)
-    && Number.isFinite(mediaStepMax)
-    && mediaStepMax > mediaStepMedian;
-  if (totalDelta > 0 && (droppedDelta > 0 || mediaStepGap)) return '帧未呈现';
-  return '未判定';
-}
-
 export class MediaEventRecorder {
   constructor({
     video,
@@ -192,7 +161,6 @@ export class MediaEventRecorder {
     onEvent = () => {},
     onFrame = () => {},
     now = () => runtimeNow(runtimeObject),
-    wallNow = () => Date.now(),
   }) {
     this.video = video;
     this.logger = logger || {
@@ -203,7 +171,6 @@ export class MediaEventRecorder {
     this.onEvent = onEvent;
     this.onFrame = onFrame;
     this.now = now;
-    this.wallNow = wallNow;
     this.listeners = [];
     this.sampleTimer = undefined;
     this.frameCallbackActive = false;
@@ -226,7 +193,6 @@ export class MediaEventRecorder {
     this.visibilityDocument = undefined;
     this.visibilityListener = undefined;
     this.visibilityState = UNKNOWN_VALUE;
-    this.lastStall = undefined;
   }
 
   start() {
@@ -263,25 +229,7 @@ export class MediaEventRecorder {
       facts = emptyMediaFacts(name);
     }
     const recordNow = this.now();
-    const {
-      data,
-      currentTime,
-      totalDelta,
-      droppedDelta,
-    } = this.mediaRecordData(facts, recordNow);
-    if (name === 'waiting') {
-      this.lastStall = {
-        atMs: this.wallNow(),
-        kind: classifyStall({
-          currentTime,
-          bufferedRanges: facts.bufferedRanges,
-          totalDelta,
-          droppedDelta,
-          mediaStepMsMedian: data.frameTiming.mediaStepMsMedian,
-          mediaStepMsMax: data.frameTiming.mediaStepMsMax,
-        }),
-      };
-    }
+    const { data } = this.mediaRecordData(facts, recordNow);
     try {
       this.writeLog(`media.${name}`, data, error);
     } finally {
@@ -458,10 +406,6 @@ export class MediaEventRecorder {
       },
     };
     return { data, currentTime, totalDelta, droppedDelta };
-  }
-
-  getLastStall() {
-    return this.lastStall === undefined ? undefined : { ...this.lastStall };
   }
 
   readUpdateEndMsMax(facts) {

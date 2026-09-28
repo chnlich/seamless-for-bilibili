@@ -6,7 +6,7 @@ import { ExtensionCoordinator } from '../src/extension/controller.js';
 import { computeForwardInventory } from '../src/vod/buffer.js';
 import { VodBufferController } from '../src/vod/controller.js';
 import { DiagnosticsClient, createRouteIdentity } from '../src/diagnostics/client.js';
-import { MediaEventRecorder, classifyStall, readMediaFacts } from '../src/diagnostics/media.js';
+import { MediaEventRecorder, readMediaFacts } from '../src/diagnostics/media.js';
 import { MEDIA_EVENT_NAMES, EVENT_CODES } from '../src/diagnostics/catalog.js';
 import {
   browserMetric,
@@ -578,7 +578,6 @@ test('video controller reports zero native buffer when current time has no cover
   await fixture.controller.reconcile();
   assert.equal(fixture.controller.readForwardBuffer(), 0);
   fixture.controller.updateStatus();
-  assert.equal(fixture.models.at(-1).buffered, '0.0 秒');
   fixture.controller.destroy();
 });
 
@@ -747,82 +746,7 @@ test('frame timing aggregates display lead and media steps in rounded millisecon
   fixture.recorder.destroy();
 });
 
-test('classifyStall short-circuits data and frame conditions in order', () => {
-  const bufferedRanges = [{ start: 0, end: 20 }];
-  const base = {
-    currentTime: 10,
-    bufferedRanges,
-    droppedDelta: 0,
-    mediaStepMsMedian: 33,
-    mediaStepMsMax: 33,
-  };
-  assert.equal(classifyStall({
-    ...base,
-    currentTime: 20,
-    totalDelta: 0,
-  }), '数据侧');
-  assert.equal(classifyStall({ ...base, totalDelta: 0 }), '帧未产出');
-  assert.equal(classifyStall({
-    ...base,
-    totalDelta: 4,
-    mediaStepMsMax: 66,
-  }), '帧未呈现');
-  assert.equal(classifyStall({ ...base, totalDelta: 4 }), '未判定');
-  assert.equal(classifyStall({ ...base, totalDelta: undefined, droppedDelta: undefined }), '未判定');
-  assert.equal(classifyStall({
-    ...base,
-    totalDelta: 4,
-    droppedDelta: 0,
-    mediaStepMsMedian: '未提供',
-    mediaStepMsMax: '未提供',
-  }), '未判定');
-});
-
-test('media waiting retains its classified last stall', () => {
-  const fixture = mediaRecorderFixture();
-  let quality = { total: 10, dropped: 0 };
-  fixture.video.getVideoPlaybackQuality = () => ({
-    totalVideoFrames: quality.total,
-    droppedVideoFrames: quality.dropped,
-    corruptedVideoFrames: 0,
-  });
-  fixture.recorder.start();
-  fixture.events.length = 0;
-
-  quality = { total: 11, dropped: 1 };
-  fixture.video.emit('waiting');
-
-  const lastStall = fixture.recorder.getLastStall();
-  assert.equal(lastStall.kind, '帧未呈现');
-  assert.equal(Number.isFinite(lastStall.atMs), true);
-  fixture.recorder.destroy();
-});
-
-test('media events other than waiting never set or replace the last stall', () => {
-  const fixture = mediaRecorderFixture();
-  let quality = { total: 10, dropped: 0 };
-  fixture.video.getVideoPlaybackQuality = () => ({
-    totalVideoFrames: quality.total,
-    droppedVideoFrames: quality.dropped,
-    corruptedVideoFrames: 0,
-  });
-  fixture.recorder.start();
-  fixture.events.length = 0;
-
-  fixture.video.emit('stalled');
-  assert.equal(fixture.recorder.getLastStall(), undefined);
-
-  quality = { total: 11, dropped: 1 };
-  fixture.video.emit('waiting');
-  assert.equal(fixture.recorder.getLastStall().kind, '帧未呈现');
-
-  quality = { total: 12, dropped: 2 };
-  fixture.video.emit('stalled');
-  assert.equal(fixture.recorder.getLastStall().kind, '帧未呈现');
-  fixture.recorder.destroy();
-});
-
-test('media waiting compares the rounded frame timing values for its stall kind', () => {
+test('media waiting logs rounded frame timing values', () => {
   const fixture = mediaRecorderFixture();
   let quality = { total: 10, dropped: 0 };
   fixture.video.getVideoPlaybackQuality = () => ({
@@ -842,7 +766,6 @@ test('media waiting compares the rounded frame timing values for its stall kind'
   const timing = fixture.events.at(-1).data.frameTiming;
   assert.equal(timing.mediaStepMsMedian, 34);
   assert.equal(timing.mediaStepMsMax, 34);
-  assert.equal(fixture.recorder.getLastStall().kind, '未判定');
   fixture.recorder.destroy();
 });
 
@@ -1236,6 +1159,58 @@ test('bank race diagnostic slot and ttfb fields survive allowlist sanitisation',
   });
 });
 
+test('CDN summary counts line failures per mirror', async () => {
+  const fixture = logsPageFixture();
+  try {
+    const logs = await fixture.importModule();
+    const summary = logs.aggregateCdnEvents([
+      {
+        code: 'bank.fetch.chunk',
+        data: {
+          source: 'https://cdn-a.example/media/seg.m4s',
+          mirror: 'cdn-a.example',
+          slot: 0,
+          chunkIndex: 0,
+          start: 0,
+          result: 'network_error',
+          bytes: 0,
+        },
+      },
+      {
+        code: 'bank.fetch.chunk',
+        data: {
+          source: 'https://cdn-b.example/media/seg.m4s',
+          mirror: 'cdn-b.example',
+          slot: 1,
+          chunkIndex: 0,
+          start: 0,
+          result: 'aborted',
+          bytes: 0,
+        },
+      },
+      {
+        code: 'bank.fetch.chunk',
+        data: {
+          source: 'https://cdn-b.example/media/seg.m4s',
+          mirror: 'cdn-b.example',
+          slot: 1,
+          chunkIndex: 1,
+          start: 16,
+          result: 'fetched',
+          bytes: 10,
+          ttfbMs: 30,
+        },
+      },
+    ]);
+    const byMirror = Object.fromEntries(summary.rows.map((row) => [row.mirror, row]));
+    assert.equal(byMirror['cdn-a.example'].failures, 1);
+    assert.equal(byMirror['cdn-b.example'].failures, 0);
+    assert.equal(byMirror['cdn-b.example'].ttfbP50, 30);
+  } finally {
+    await fixture.close?.();
+  }
+});
+
 test('CDN panel aggregates paired legs by source pathname and renders no media URL', async () => {
   const fixture = logsPageFixture();
   try {
@@ -1350,6 +1325,7 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
         ttfbP50: 20,
         ttfbP90: 28,
         stalled: 1,
+        failures: 0,
         bytesDelivered: 180,
       },
       {
@@ -1360,6 +1336,7 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
         ttfbP50: 30,
         ttfbP90: 38,
         stalled: 0,
+        failures: 0,
         bytesDelivered: 0,
       },
       {
@@ -1370,6 +1347,7 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
         ttfbP50: 50,
         ttfbP90: 50,
         stalled: 0,
+        failures: 0,
         bytesDelivered: 60,
       },
       {
@@ -1380,6 +1358,7 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
         ttfbP50: 5,
         ttfbP90: 5,
         stalled: 0,
+        failures: 0,
         bytesDelivered: 70,
       },
     ]);

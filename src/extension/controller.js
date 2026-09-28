@@ -1,7 +1,6 @@
 import { EXTENSION_PREFERENCES } from '../constants.js';
 import { DiagnosticsClient, createRouteIdentity } from '../diagnostics/client.js';
 import { PassiveMediaObserver } from '../diagnostics/passive-media-observer.js';
-import { sanitizeEventData } from '../diagnostics/privacy.js';
 import { VodBufferController } from '../vod/controller.js';
 import { fail, toBufferScriptError } from '../errors.js';
 import {
@@ -65,25 +64,13 @@ function logger() {
 export function installBankDiagnostics({
   windowObject = window,
   diagnostics,
-  onInventory = () => {},
-  now = Date.now,
 } = {}) {
-  let latestInventory;
   const listener = (event) => {
     if (event.source !== windowObject || !isBankDiagnosticMessage(event.data)) return;
-    const data = event.data.data || {};
-    diagnostics?.log(event.data.code, data);
-    if (event.data.code === 'bank.inventory') {
-      const sanitized = sanitizeEventData(event.data.code, data);
-      latestInventory = { data: sanitized, receivedAtMs: now() };
-      onInventory(latestInventory);
-    }
+    diagnostics?.log(event.data.code, event.data.data || {});
   };
   windowObject.addEventListener('message', listener);
   return {
-    latestInventory() {
-      return latestInventory;
-    },
     destroy() {
       windowObject.removeEventListener('message', listener);
     },
@@ -93,10 +80,8 @@ export function installBankDiagnostics({
 function setBootError(panel, error) {
   const normalized = toBufferScriptError(error, 'BOOT_FAILED', '扩展控制器启动失败');
   panel.setModel({
-    mode: '视频',
     state: 'FAILED',
-    error: `${normalized.code}: ${normalized.message}`,
-    target: '120 秒',
+    error: normalized.message,
   });
 }
 
@@ -171,8 +156,6 @@ export class ExtensionCoordinator {
     bridgeClient = new BridgeClient(documentObject, runtimeObject),
     diagnostics,
     loggerObject = logger(),
-    getBankInventory = () => undefined,
-    now = Date.now,
   } = {}) {
     this.documentObject = documentObject;
     this.windowObject = windowObject;
@@ -182,8 +165,6 @@ export class ExtensionCoordinator {
     this.diagnostics = diagnostics;
     this.bridgeClient.diagnostics = diagnostics;
     this.logger = loggerObject;
-    this.getBankInventory = getBankInventory;
-    this.now = now;
     this.preferences = undefined;
     this.active = undefined;
     this.routeKey = '';
@@ -201,15 +182,10 @@ export class ExtensionCoordinator {
 
   getReadouts() {
     const panel = this.active?.panel;
-    const recorder = this.active?.controller?.mediaRecorder
-      || this.active?.passiveObserver?.recorder;
     return buildReadouts({
       surfaceId: panel?.surfaceId || 'surface-unavailable',
       video: findLargestVideo(this.documentObject),
-      bankInventory: this.getBankInventory(),
-      lastStall: recorder?.getLastStall(),
       diagnostics: this.diagnostics?.getStatus(),
-      now: this.now(),
     });
   }
 
@@ -319,11 +295,8 @@ export class ExtensionCoordinator {
       this.windowObject.location.href === href &&
       modeForLocation(this.windowObject.location) === mode);
     panel.setModel({
-      mode: '视频',
       state: 'WAITING',
-      buffered: '未提供',
-      target: '120 秒',
-      error: '等待原生 video、媒体 source 和播放器内核',
+      error: '等待播放器和视频就绪',
     });
     this.diagnostics?.log('preference.changed', { name: EXTENSION_PREFERENCES.vodEnabled, enabled: true });
     const routeStillCurrent = () =>
@@ -425,13 +398,11 @@ export class ExtensionCoordinator {
 
 if (typeof chrome !== 'undefined' && typeof document !== 'undefined' && typeof window !== 'undefined') {
   const diagnostics = new DiagnosticsClient();
-  const bankDiagnostics = (window.location.hostname === 'www.bilibili.com'
-    || isLiveLocation(window.location))
-    ? installBankDiagnostics({ diagnostics })
-    : undefined;
+  if (window.location.hostname === 'www.bilibili.com' || isLiveLocation(window.location)) {
+    installBankDiagnostics({ diagnostics });
+  }
   const coordinator = new ExtensionCoordinator({
     diagnostics,
-    getBankInventory: () => bankDiagnostics?.latestInventory(),
   });
   installPopupMessageHandler(
     chrome.runtime,

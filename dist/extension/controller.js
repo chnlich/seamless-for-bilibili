@@ -603,7 +603,7 @@
   }
 
   // src/build-id.js
-  var BUILT_BUILD_ID = true ? "src-4280d4fee1db5bcb0bb3794f" : "source-build";
+  var BUILT_BUILD_ID = true ? "src-f355c81dbec59a007f7e4131" : "source-build";
   function readBuildId() {
     return BUILT_BUILD_ID;
   }
@@ -1074,6 +1074,7 @@
     getStatus() {
       return {
         sessionId: this.session?.sessionId || "未提供",
+        routeKind: this.session?.routeKind || "未提供",
         persistence: this.persistence
       };
     }
@@ -1221,10 +1222,6 @@
     if (!Number.isFinite(value) || !Number.isFinite(previous)) return 0;
     return Math.max(0, value - previous);
   }
-  function rawMetric(value) {
-    if (value !== null && typeof value === "object" && !Array.isArray(value) && value.value === 0 && value.reportedBy === "browser") return 0;
-    return value;
-  }
   function qualityDelta(value, previous) {
     if (!Number.isFinite(value) || !Number.isFinite(previous)) return void 0;
     return value - previous;
@@ -1234,23 +1231,6 @@
     const middle = Math.floor(ordered.length / 2);
     if (ordered.length % 2 === 1) return ordered[middle];
     return (ordered[middle - 1] + ordered[middle]) / 2;
-  }
-  function classifyStall({
-    currentTime,
-    bufferedRanges,
-    totalDelta,
-    droppedDelta,
-    mediaStepMsMedian,
-    mediaStepMsMax
-  }) {
-    const hasBufferedData = Number.isFinite(currentTime) && Array.isArray(bufferedRanges) && bufferedRanges.some((range) => Number.isFinite(range?.start) && Number.isFinite(range?.end) && range.start <= currentTime && range.end > currentTime);
-    if (!hasBufferedData) return "数据侧";
-    if (totalDelta === 0) return "帧未产出";
-    const mediaStepMedian = rawMetric(mediaStepMsMedian);
-    const mediaStepMax = rawMetric(mediaStepMsMax);
-    const mediaStepGap = Number.isFinite(mediaStepMedian) && Number.isFinite(mediaStepMax) && mediaStepMax > mediaStepMedian;
-    if (totalDelta > 0 && (droppedDelta > 0 || mediaStepGap)) return "帧未呈现";
-    return "未判定";
   }
   var MediaEventRecorder = class {
     constructor({
@@ -1262,8 +1242,7 @@
       },
       onFrame = () => {
       },
-      now = () => runtimeNow(runtimeObject),
-      wallNow = () => Date.now()
+      now = () => runtimeNow(runtimeObject)
     }) {
       this.video = video;
       this.logger = logger2 || {
@@ -1275,7 +1254,6 @@
       this.onEvent = onEvent;
       this.onFrame = onFrame;
       this.now = now;
-      this.wallNow = wallNow;
       this.listeners = [];
       this.sampleTimer = void 0;
       this.frameCallbackActive = false;
@@ -1298,7 +1276,6 @@
       this.visibilityDocument = void 0;
       this.visibilityListener = void 0;
       this.visibilityState = UNKNOWN_VALUE;
-      this.lastStall = void 0;
     }
     start() {
       if (this.destroyed) throw new Error("媒体日志 recorder 已销毁");
@@ -1332,25 +1309,7 @@
         facts = emptyMediaFacts(name);
       }
       const recordNow = this.now();
-      const {
-        data,
-        currentTime,
-        totalDelta,
-        droppedDelta
-      } = this.mediaRecordData(facts, recordNow);
-      if (name === "waiting") {
-        this.lastStall = {
-          atMs: this.wallNow(),
-          kind: classifyStall({
-            currentTime,
-            bufferedRanges: facts.bufferedRanges,
-            totalDelta,
-            droppedDelta,
-            mediaStepMsMedian: data.frameTiming.mediaStepMsMedian,
-            mediaStepMsMax: data.frameTiming.mediaStepMsMax
-          })
-        };
-      }
+      const { data } = this.mediaRecordData(facts, recordNow);
       try {
         this.writeLog(`media.${name}`, data, error);
       } finally {
@@ -1493,9 +1452,6 @@
         }
       };
       return { data, currentTime, totalDelta, droppedDelta };
-    }
-    getLastStall() {
-      return this.lastStall === void 0 ? void 0 : { ...this.lastStall };
     }
     readUpdateEndMsMax(facts) {
       if (!this.updateEndBaselineEstablished) {
@@ -1701,7 +1657,7 @@
   }
 
   // src/vod/controller.js
-  var WAITING_MESSAGE = "等待原生 video、媒体 source 和播放器内核";
+  var WAITING_MESSAGE = "等待播放器和视频就绪";
   function createLogger() {
     return {
       warn(...args) {
@@ -1761,7 +1717,6 @@
       this.statusTimer;
       this.bufferSamplerTimer;
       this.bufferSamples = [];
-      this.peakForwardSeconds = 0;
       this.started = false;
       this.destroyed = false;
     }
@@ -1867,7 +1822,7 @@
           const normalized = toBufferScriptError(error, "VOD_RECONCILE_FAILED", "视频播放器内核刷新失败");
           this.logger.error("视频播放器内核刷新失败", normalized);
           this.hintState = "WAITING";
-          this.message = `${normalized.code}: ${normalized.message}`;
+          this.message = normalized.message;
         }
       }
       this.updateStatus();
@@ -1877,7 +1832,7 @@
       try {
         if (core.supports("setStableBufferTime") !== true) {
           this.hintState = "UNSUPPORTED";
-          this.message = `当前内核不支持 ${this.config.stableBufferSeconds} 秒原生缓存提示`;
+          this.message = `当前播放器不支持 ${this.config.stableBufferSeconds} 秒缓存申请`;
           this.generationResult = { state: this.hintState, message: this.message };
           this.diagnostics?.log("video.buffer_hint.unsupported", {
             targetSeconds: this.config.stableBufferSeconds,
@@ -1916,7 +1871,7 @@
         const normalized = toBufferScriptError(error, "VOD_STABLE_BUFFER_FAILED", "原生缓存提示调用失败");
         this.logger.error("原生缓存提示调用失败", normalized);
         this.hintState = "FAILED";
-        this.message = `${normalized.code}: ${normalized.message}`;
+        this.message = normalized.message;
         this.diagnostics?.log("video.buffer_hint.failed", {
           targetSeconds: this.config.stableBufferSeconds,
           reason: normalized.code
@@ -1993,28 +1948,8 @@
       if (this.destroyed || !this.started) {
         return;
       }
-      let inventory = "未提供";
-      let effective = "未提供";
-      if (this.video !== void 0) {
-        const forward = this.readForwardBuffer();
-        inventory = `${forward.toFixed(1)} 秒`;
-        if (Number.isFinite(forward) && forward > this.peakForwardSeconds) this.peakForwardSeconds = forward;
-        if (this.hintState === "APPLIED") {
-          effective = `已应用(目标${this.config.stableBufferSeconds}s, 实测峰值${this.peakForwardSeconds.toFixed(0)}s)`;
-        } else if (this.hintState === "UNSUPPORTED") {
-          effective = "不支持(setStableBufferTime 不可用)";
-        } else if (this.hintState === "FAILED") {
-          effective = "失败";
-        } else {
-          effective = "等待生效";
-        }
-      }
       this.panel.setModel({
-        mode: "视频",
         state: this.hintState,
-        buffered: inventory,
-        target: `${this.config.stableBufferSeconds} 秒`,
-        effective,
         error: this.message
       });
     }
@@ -2044,13 +1979,8 @@
 
   // src/ui/panel.js
   var STATUS_MESSAGE_VERSION = 2;
-  var MODE_LABELS = Object.freeze({ video: "视频" });
   var VIDEO_FIELDS = Object.freeze([
-    "mode",
     "state",
-    "buffered",
-    "target",
-    "effective",
     "error"
   ]);
   var VIDEO_STATE_LABELS = Object.freeze({
@@ -2114,13 +2044,12 @@
       this.assertFresh();
       const model = Object.fromEntries(fieldsForMode(this.mode).map((field) => [
         field,
-        field === "state" && this.mode === "video" ? VIDEO_STATE_LABELS[this.model[field]] || displayValue(this.model[field]) : displayValue(this.model[field])
+        field === "state" ? VIDEO_STATE_LABELS[this.model[field]] || displayValue(this.model[field]) : displayValue(this.model[field])
       ]));
       return {
         version: STATUS_MESSAGE_VERSION,
         surfaceId: this.surfaceId,
-        ...model,
-        mode: MODE_LABELS[this.mode]
+        ...model
       };
     }
     destroy() {
@@ -2136,13 +2065,16 @@
     return currentSurface;
   }
   function createUnavailableStatusSnapshot(routeMode) {
-    const mode = routeMode === "video" || routeMode === "vod" ? "video" : void 0;
-    const fields = mode === void 0 ? ["mode"] : fieldsForMode(mode);
+    if (routeMode !== "video" && routeMode !== "vod") {
+      return {
+        version: STATUS_MESSAGE_VERSION,
+        surfaceId: "surface-unavailable"
+      };
+    }
     return {
       version: STATUS_MESSAGE_VERSION,
       surfaceId: "surface-unavailable",
-      ...Object.fromEntries(fields.map((field) => [field, "未提供"])),
-      ...mode === void 0 ? {} : { mode: MODE_LABELS[mode] }
+      ...Object.fromEntries(fieldsForMode("video").map((field) => [field, "未提供"]))
     };
   }
 
@@ -2480,112 +2412,26 @@
   }
 
   // src/extension/readouts.js
-  var OTHER_LIVE_MEDIA_SOURCES_FIELD = [
-    "otherLive",
-    String.fromCharCode(77, 101, 100, 105, 97),
-    "Sources"
-  ].join("");
-  function forwardSeconds(currentTime, ranges) {
-    if (!Number.isFinite(currentTime) || !Array.isArray(ranges)) return UNKNOWN_VALUE;
-    return computeForwardInventory(currentTime, [ranges]);
-  }
-  function trackReadout(currentTime, sourceBuffer) {
-    const ranges = Array.isArray(sourceBuffer.ranges) ? sourceBuffer.ranges : UNKNOWN_VALUE;
-    return {
-      track: sourceBuffer.track,
-      attached: sourceBuffer.attached === true,
-      forwardSeconds: forwardSeconds(currentTime, ranges),
-      ranges,
-      updating: sourceBuffer.updating,
-      pendingSinceMs: sourceBuffer.pendingSinceMs,
-      lastAppendAgoMs: sourceBuffer.lastAppendAgoMs,
-      appendErrors: sourceBuffer.appendErrors,
-      mediaSourceInstance: sourceBuffer.mediaSourceInstance,
-      mediaSourceState: sourceBuffer.mediaSourceState
-    };
-  }
-  function limiterTrack(tracks) {
-    const attached = tracks.filter((track) => track.attached === true);
-    if (attached.length <= 1 || attached.some((track) => !Number.isFinite(track.forwardSeconds))) {
-      return UNKNOWN_VALUE;
-    }
-    const minimum = Math.min(...attached.map((track) => track.forwardSeconds));
-    const limiting = attached.filter((track) => track.forwardSeconds === minimum);
-    return limiting.length === 1 ? limiting[0].track : UNKNOWN_VALUE;
-  }
-  function attachedSourceState(tracks) {
-    if (tracks.length === 0 || tracks.some((track) => !["closed", "open", "ended"].includes(track.mediaSourceState))) {
-      return UNKNOWN_VALUE;
-    }
-    const states = new Set(tracks.map((track) => track.mediaSourceState));
-    return states.size === 1 ? [...states][0] : UNKNOWN_VALUE;
-  }
-  function deriveMediaReadout(facts) {
+  var READOUTS_VERSION = 3;
+  function forwardSeconds(facts) {
     if (facts === UNKNOWN_VALUE) return UNKNOWN_VALUE;
-    const sourceBufferRanges = Array.isArray(facts.sourceBufferRanges) ? facts.sourceBufferRanges : [];
-    const tracks = sourceBufferRanges.map((sourceBuffer) => trackReadout(facts.currentTime, sourceBuffer));
-    const mediaSourceInstances = new Set(
-      tracks.map((track) => track.mediaSourceInstance).filter((instance) => Number.isInteger(instance) && instance > 0)
-    );
-    const attachedSourceInstances = new Set(
-      tracks.filter((track) => track.attached === true).map((track) => track.mediaSourceInstance).filter((instance) => Number.isInteger(instance) && instance > 0)
-    );
-    const attachmentResolved = attachedSourceInstances.size === 1;
-    const attachedTracks = attachmentResolved ? tracks.filter((track) => track.attached === true) : [];
-    return {
-      forwardSeconds: forwardSeconds(facts.currentTime, facts.bufferedRanges),
-      limiterTrack: attachmentResolved ? limiterTrack(attachedTracks) : UNKNOWN_VALUE,
-      tracks: attachedTracks.map(({ mediaSourceInstance: _ignoredInstance, mediaSourceState: _ignoredState, ...track }) => track),
-      mediaSourceState: attachedSourceState(attachedTracks),
-      [OTHER_LIVE_MEDIA_SOURCES_FIELD]: attachmentResolved ? mediaSourceInstances.size - attachedSourceInstances.size : UNKNOWN_VALUE,
-      element: {
-        readyState: facts.readyState,
-        networkState: facts.networkState,
-        currentTime: facts.currentTime,
-        duration: facts.duration,
-        playbackRate: facts.playbackRate,
-        resolution: facts.resolution,
-        videoQuality: facts.videoQuality,
-        paused: facts.paused,
-        ended: facts.ended
-      }
-    };
-  }
-  function estimateBankSeconds(inventory, duration) {
-    if (inventory === UNKNOWN_VALUE || !Array.isArray(inventory.resources)) return {};
-    return Object.fromEntries(inventory.resources.map((resource) => {
-      const estimate = Number.isFinite(resource.storedBytes) && Number.isFinite(resource.totalSize) && resource.totalSize > 0 && Number.isFinite(duration) && duration > 0 ? resource.storedBytes / (resource.totalSize / duration) : UNKNOWN_VALUE;
-      return [resource.pathname, estimate];
-    }));
+    const { currentTime, bufferedRanges } = facts;
+    if (!Number.isFinite(currentTime) || !Array.isArray(bufferedRanges)) return UNKNOWN_VALUE;
+    return computeForwardInventory(currentTime, [bufferedRanges]);
   }
   function buildReadouts({
     surfaceId,
     video,
-    bankInventory,
-    lastStall,
-    diagnostics,
-    now = Date.now()
+    diagnostics
   }) {
-    let media = UNKNOWN_VALUE;
-    if (video !== void 0) media = deriveMediaReadout(readMediaFacts(video, "readout"));
-    const mediaDuration = media === UNKNOWN_VALUE ? UNKNOWN_VALUE : media.element.duration;
-    const bank = bankInventory === void 0 ? UNKNOWN_VALUE : {
-      ...bankInventory.data,
-      ageMs: Math.max(0, now - bankInventory.receivedAtMs)
-    };
     return {
-      version: 2,
+      version: READOUTS_VERSION,
       surfaceId,
-      media,
-      lastStall: lastStall === void 0 ? UNKNOWN_VALUE : {
-        agoMs: Math.max(0, now - lastStall.atMs),
-        kind: lastStall.kind
-      },
-      bank,
-      bankSecondsEstimated: estimateBankSeconds(bank, mediaDuration),
+      forwardSeconds: forwardSeconds(readMediaFacts(video, "readout")),
+      // 内容侧自报路由：popup 没有 tabs 权限，看不到标签页地址。
+      routeKind: diagnostics?.routeKind || UNKNOWN_VALUE,
       diagnostics: {
-        sessionId: diagnostics?.sessionId || UNKNOWN_VALUE,
-        persistence: diagnostics?.persistence || UNKNOWN_VALUE
+        sessionId: diagnostics?.sessionId || UNKNOWN_VALUE
       }
     };
   }
@@ -2653,27 +2499,14 @@
   }
   function installBankDiagnostics({
     windowObject = window,
-    diagnostics,
-    onInventory = () => {
-    },
-    now = Date.now
+    diagnostics
   } = {}) {
-    let latestInventory;
     const listener = (event) => {
       if (event.source !== windowObject || !isBankDiagnosticMessage(event.data)) return;
-      const data = event.data.data || {};
-      diagnostics?.log(event.data.code, data);
-      if (event.data.code === "bank.inventory") {
-        const sanitized = sanitizeEventData(event.data.code, data);
-        latestInventory = { data: sanitized, receivedAtMs: now() };
-        onInventory(latestInventory);
-      }
+      diagnostics?.log(event.data.code, event.data.data || {});
     };
     windowObject.addEventListener("message", listener);
     return {
-      latestInventory() {
-        return latestInventory;
-      },
       destroy() {
         windowObject.removeEventListener("message", listener);
       }
@@ -2682,10 +2515,8 @@
   function setBootError(panel, error) {
     const normalized = toBufferScriptError(error, "BOOT_FAILED", "扩展控制器启动失败");
     panel.setModel({
-      mode: "视频",
       state: "FAILED",
-      error: `${normalized.code}: ${normalized.message}`,
-      target: "120 秒"
+      error: normalized.message
     });
   }
   function readPreferences(storage) {
@@ -2748,9 +2579,7 @@
       runtimeObject = globalThis,
       bridgeClient = new BridgeClient(documentObject, runtimeObject),
       diagnostics,
-      loggerObject = logger(),
-      getBankInventory = () => void 0,
-      now = Date.now
+      loggerObject = logger()
     } = {}) {
       this.documentObject = documentObject;
       this.windowObject = windowObject;
@@ -2760,8 +2589,6 @@
       this.diagnostics = diagnostics;
       this.bridgeClient.diagnostics = diagnostics;
       this.logger = loggerObject;
-      this.getBankInventory = getBankInventory;
-      this.now = now;
       this.preferences = void 0;
       this.active = void 0;
       this.routeKey = "";
@@ -2778,14 +2605,10 @@
     }
     getReadouts() {
       const panel = this.active?.panel;
-      const recorder = this.active?.controller?.mediaRecorder || this.active?.passiveObserver?.recorder;
       return buildReadouts({
         surfaceId: panel?.surfaceId || "surface-unavailable",
         video: findLargestVideo(this.documentObject),
-        bankInventory: this.getBankInventory(),
-        lastStall: recorder?.getLastStall(),
-        diagnostics: this.diagnostics?.getStatus(),
-        now: this.now()
+        diagnostics: this.diagnostics?.getStatus()
       });
     }
     async start() {
@@ -2884,11 +2707,8 @@
       };
       panel.setFreshnessCheck(() => generation === this.routeGeneration && !this.destroyed && !routeAbort.signal.aborted && this.active?.panel === panel && this.routeKey === href && this.windowObject.location.href === href && modeForLocation(this.windowObject.location) === mode);
       panel.setModel({
-        mode: "视频",
         state: "WAITING",
-        buffered: "未提供",
-        target: "120 秒",
-        error: "等待原生 video、媒体 source 和播放器内核"
+        error: "等待播放器和视频就绪"
       });
       this.diagnostics?.log("preference.changed", { name: EXTENSION_PREFERENCES.vodEnabled, enabled: true });
       const routeStillCurrent = () => generation === this.routeGeneration && !this.destroyed && !routeAbort.signal.aborted && href === this.windowObject.location.href && mode === modeForLocation(this.windowObject.location) && this.active?.panel === panel;
@@ -2979,10 +2799,11 @@
   };
   if (typeof chrome !== "undefined" && typeof document !== "undefined" && typeof window !== "undefined") {
     const diagnostics = new DiagnosticsClient();
-    const bankDiagnostics = window.location.hostname === "www.bilibili.com" || isLiveLocation(window.location) ? installBankDiagnostics({ diagnostics }) : void 0;
+    if (window.location.hostname === "www.bilibili.com" || isLiveLocation(window.location)) {
+      installBankDiagnostics({ diagnostics });
+    }
     const coordinator = new ExtensionCoordinator({
-      diagnostics,
-      getBankInventory: () => bankDiagnostics?.latestInventory()
+      diagnostics
     });
     installPopupMessageHandler(
       chrome.runtime,

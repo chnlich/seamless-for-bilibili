@@ -4,7 +4,7 @@ import { MediaEventRecorder } from '../diagnostics/media.js';
 import { UNKNOWN_VALUE } from '../diagnostics/privacy.js';
 import { computeForwardInventory, copyTimeRanges } from './buffer.js';
 
-const WAITING_MESSAGE = '等待原生 video、媒体 source 和播放器内核';
+const WAITING_MESSAGE = '等待播放器和视频就绪';
 
 function createLogger() {
   return {
@@ -68,7 +68,6 @@ export class VodBufferController {
     this.statusTimer;
     this.bufferSamplerTimer;
     this.bufferSamples = [];
-    this.peakForwardSeconds = 0;
     this.started = false;
     this.destroyed = false;
   }
@@ -176,7 +175,7 @@ export class VodBufferController {
         const normalized = toBufferScriptError(error, 'VOD_RECONCILE_FAILED', '视频播放器内核刷新失败');
         this.logger.error('视频播放器内核刷新失败', normalized);
         this.hintState = 'WAITING';
-        this.message = `${normalized.code}: ${normalized.message}`;
+        this.message = normalized.message;
       }
     }
     this.updateStatus();
@@ -187,7 +186,7 @@ export class VodBufferController {
     try {
       if (core.supports('setStableBufferTime') !== true) {
         this.hintState = 'UNSUPPORTED';
-        this.message = `当前内核不支持 ${this.config.stableBufferSeconds} 秒原生缓存提示`;
+        this.message = `当前播放器不支持 ${this.config.stableBufferSeconds} 秒缓存申请`;
         this.generationResult = { state: this.hintState, message: this.message };
         this.diagnostics?.log('video.buffer_hint.unsupported', {
           targetSeconds: this.config.stableBufferSeconds,
@@ -226,7 +225,7 @@ export class VodBufferController {
       const normalized = toBufferScriptError(error, 'VOD_STABLE_BUFFER_FAILED', '原生缓存提示调用失败');
       this.logger.error('原生缓存提示调用失败', normalized);
       this.hintState = 'FAILED';
-      this.message = `${normalized.code}: ${normalized.message}`;
+      this.message = normalized.message;
       this.diagnostics?.log('video.buffer_hint.failed', {
         targetSeconds: this.config.stableBufferSeconds,
         reason: normalized.code,
@@ -309,28 +308,8 @@ export class VodBufferController {
     if (this.destroyed || !this.started) {
       return;
     }
-    let inventory = '未提供';
-    let effective = '未提供';
-    if (this.video !== undefined) {
-      const forward = this.readForwardBuffer();
-      inventory = `${forward.toFixed(1)} 秒`;
-      if (Number.isFinite(forward) && forward > this.peakForwardSeconds) this.peakForwardSeconds = forward;
-      if (this.hintState === 'APPLIED') {
-        effective = `已应用(目标${this.config.stableBufferSeconds}s, 实测峰值${this.peakForwardSeconds.toFixed(0)}s)`;
-      } else if (this.hintState === 'UNSUPPORTED') {
-        effective = '不支持(setStableBufferTime 不可用)';
-      } else if (this.hintState === 'FAILED') {
-        effective = '失败';
-      } else {
-        effective = '等待生效';
-      }
-    }
     this.panel.setModel({
-      mode: '视频',
       state: this.hintState,
-      buffered: inventory,
-      target: `${this.config.stableBufferSeconds} 秒`,
-      effective,
       error: this.message,
     });
   }

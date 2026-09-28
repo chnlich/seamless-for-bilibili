@@ -411,20 +411,28 @@ assert.match(readme, /并发上限\s*4/);
 assert.match(readme, /前四个块/);
 assert.match(readme, /raceLegs=2|双腿竞速/);
 assert.match(readme, /window\.__playinfo__/);
-assert.match(readme, /popup 实时媒体读数/);
-assert.match(readme, /上次停顿/);
+assert.match(readme, /已缓冲 N 秒 \/ 目标 120 秒/);
+assert.match(readme, /下载线路/);
+assert.match(readme, /直播接管状态/);
+assert.match(readme, /没有 `tabs` 权限/);
 assert.match(readme, /frameTiming/);
 assert.match(readme, /库存只列出本次播放实际参与的分轨/);
 assert.match(readme, /CDN 竞速面板/);
 assert.match(readme, /live_non_flv/);
 assert.match(readme, /live\.stream\.stitch/);
 const readmeSourceAnchors = [
-  ['src/extension/popup.js', ['renderMediaReadout', 'lastStallText', 'renderRaceReadout']],
-  ['src/extension/readouts.js', ['buildReadouts']],
-  ['src/diagnostics/media.js', ['classifyStall', "name === 'waiting'", 'frameTiming']],
+  ['src/extension/popup.js', ['renderVideoPanel', 'renderRacePanel', 'renderLivePanel', "data-open-logs"]],
+  ['src/extension/popup-view.js', ['renderBuffer', 'renderCdnLines', 'liveTakeoverText', 'targetStateText']],
+  ['src/extension/popup-live.js', ['popupRouteForTabUrl', 'foldLiveEvents']],
+  ['src/extension/readouts.js', ['buildReadouts', 'routeKind']],
+  ['src/ui/panel.js', ['VIDEO_STATE_LABELS', 'createUnavailableStatusSnapshot']],
+  ['src/vod/controller.js', ['updateStatus']],
+  ['src/diagnostics/client.js', ['getStatus']],
+  ['src/diagnostics/media.js', ['frameTiming']],
   ['src/diagnostics/privacy.js', ['safeFrameTiming']],
   ['src/bank/inventory.js', ['storedByResource']],
   ['src/diagnostics/logs.js', ['renderCdnPanel']],
+  ['src/diagnostics/cdn.js', ['CDN_LINE_FAILURE_RESULTS']],
   ['src/diagnostics/worker.js', ['readCdnSummary']],
 ];
 for (const [file, anchors] of readmeSourceAnchors) {

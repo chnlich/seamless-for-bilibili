@@ -1,128 +1,61 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import {
-  buildReadouts,
-  deriveMediaReadout,
-  estimateBankSeconds,
-  inventoryStoppedPublishing,
-} from '../src/extension/readouts.js';
-import { INVENTORY_HEARTBEAT_FLOOR_MS } from '../src/bank/inventory.js';
+import { READOUTS_VERSION, buildReadouts } from '../src/extension/readouts.js';
 
-function facts(sourceBufferRanges, bufferedRanges = [{ start: 0, end: 60 }]) {
+function ranges(values) {
   return {
-    bufferedRanges,
-    currentTime: 10,
-    duration: 100,
-    sourceBufferRanges,
-    mediaSourceState: 'open',
-    readyState: 4,
-    networkState: 2,
-    playbackRate: 1,
-    resolution: { width: 1920, height: 1080 },
-    videoQuality: { total: 10, dropped: 0, corrupted: 0 },
-    paused: false,
-    ended: false,
+    length: values.length,
+    start(index) { return values[index][0]; },
+    end(index) { return values[index][1]; },
   };
 }
 
-function track({
-  track,
-  attached = true,
-  ranges = [{ start: 0, end: 30 }],
-  mediaSourceInstance = 1,
-  mediaSourceState = 'open',
-}) {
+function video({ currentTime = 10, buffered = [[0, 80]] } = {}) {
   return {
-    track,
-    attached,
-    ranges,
-    updating: false,
-    pendingSinceMs: null,
-    lastAppendAgoMs: 12,
-    appendErrors: {},
-    mediaSourceInstance,
-    mediaSourceState,
+    currentTime,
+    buffered: ranges(buffered),
+    seekable: ranges([[0, 120]]),
+    src: 'https://media.example/video-1.m3u8',
+    currentSrc: 'https://media.example/video-1.m3u8',
   };
 }
 
-test('panel media derivation computes per-track forward seconds and the unique limiter', () => {
-  const media = deriveMediaReadout(facts([
-    track({ track: 'video/mp4', ranges: [{ start: 0, end: 50 }] }),
-    track({ track: 'audio/mp4', ranges: [{ start: 0, end: 30 }] }),
-  ]));
-  assert.equal(media.forwardSeconds, 50);
-  assert.equal(media.tracks[0].forwardSeconds, 40);
-  assert.equal(media.tracks[1].forwardSeconds, 20);
-  assert.equal(media.limiterTrack, 'audio/mp4');
-  assert.equal(media.otherLiveMediaSources, 0);
-});
-
-test('panel derivation does not name a limiter for a tie, one track, or unresolved attachment', () => {
-  assert.equal(deriveMediaReadout(facts([
-    track({ track: 'video/mp4' }),
-    track({ track: 'audio/mp4' }),
-  ])).limiterTrack, '未提供');
-  assert.equal(deriveMediaReadout(facts([
-    track({ track: 'video/mp4' }),
-  ])).limiterTrack, '未提供');
-  const unresolved = deriveMediaReadout(facts([
-    track({ track: 'video/mp4', attached: false }),
-    track({ track: 'audio/mp4', attached: false, mediaSourceInstance: 2 }),
-  ]));
-  assert.equal(unresolved.limiterTrack, '未提供');
-  assert.equal(unresolved.otherLiveMediaSources, '未提供');
-});
-
-test('panel returns only tracks attached to the current MediaSource and counts the rest', () => {
-  const media = deriveMediaReadout(facts([
-    track({ track: 'video/mp4', mediaSourceInstance: 1, mediaSourceState: 'open' }),
-    track({ track: 'audio/mp4', mediaSourceInstance: 1, mediaSourceState: 'open' }),
-    track({ track: 'video/mp4', attached: false, mediaSourceInstance: 2, mediaSourceState: 'closed' }),
-  ]));
-  assert.deepEqual(media.tracks.map((entry) => entry.track), ['video/mp4', 'audio/mp4']);
-  assert.equal(media.mediaSourceState, 'open');
-  assert.equal(media.otherLiveMediaSources, 1);
-});
-
-test('bank seconds estimates stay unavailable when total size or duration is unavailable', () => {
-  const inventory = {
-    resources: [
-      { pathname: '/video/a.m4s', storedBytes: 50, totalSize: 100 },
-      { pathname: '/video/b.m4s', storedBytes: 50, totalSize: '未提供' },
-    ],
-  };
-  assert.deepEqual(estimateBankSeconds(inventory, 100), {
-    '/video/a.m4s': 50,
-    '/video/b.m4s': '未提供',
-  });
-  assert.equal(estimateBankSeconds(inventory, '未提供')['/video/a.m4s'], '未提供');
-});
-
-test('inventory age past the heartbeat floor is explicitly stale', () => {
-  assert.equal(inventoryStoppedPublishing(INVENTORY_HEARTBEAT_FLOOR_MS), false);
-  assert.equal(inventoryStoppedPublishing(INVENTORY_HEARTBEAT_FLOOR_MS + 1), true);
+test('readouts expose the continuous forward seconds against the current playhead', () => {
   const readouts = buildReadouts({
     surfaceId: 'surface-test',
-    video: undefined,
-    bankInventory: {
-      data: { resources: [], storedBytes: 0 },
-      receivedAtMs: 100,
-    },
-    lastStall: { atMs: 100, kind: '帧未呈现' },
-    diagnostics: { sessionId: 'session-test', persistence: 'PERSISTED' },
-    now: 100 + INVENTORY_HEARTBEAT_FLOOR_MS + 1,
+    video: video({ currentTime: 10, buffered: [[0, 80], [90, 120]] }),
+    diagnostics: { sessionId: 'session-test', routeKind: 'video' },
   });
-  assert.equal(readouts.bank.ageMs, INVENTORY_HEARTBEAT_FLOOR_MS + 1);
-  assert.equal(inventoryStoppedPublishing(readouts.bank.ageMs), true);
-  assert.deepEqual(readouts.lastStall, {
-    agoMs: INVENTORY_HEARTBEAT_FLOOR_MS + 1,
-    kind: '帧未呈现',
-  });
-  const withoutStall = buildReadouts({
+  assert.equal(readouts.version, READOUTS_VERSION);
+  assert.equal(readouts.forwardSeconds, 70);
+  assert.deepEqual(readouts.diagnostics, { sessionId: 'session-test' });
+  assert.equal(readouts.routeKind, 'video');
+});
+
+test('readouts keep going without a video element or without covering buffer', () => {
+  const withoutVideo = buildReadouts({
     surfaceId: 'surface-test',
     video: undefined,
-    diagnostics: { sessionId: 'session-test', persistence: 'PERSISTED' },
-    now: 100,
+    diagnostics: { sessionId: 'session-test', routeKind: 'other' },
   });
-  assert.equal(withoutStall.lastStall, '未提供');
+  assert.equal(withoutVideo.forwardSeconds, '未提供');
+  const emptyBuffer = buildReadouts({
+    surfaceId: 'surface-test',
+    video: video({ currentTime: 85, buffered: [[0, 80], [90, 120]] }),
+    diagnostics: { sessionId: 'session-test', routeKind: 'video' },
+  });
+  assert.equal(emptyBuffer.forwardSeconds, 0);
+});
+
+test('readouts carry the session id the popup needs for cdn summaries', () => {
+  const readouts = buildReadouts({
+    surfaceId: 'surface-test',
+    video: video(),
+    diagnostics: undefined,
+  });
+  assert.equal(readouts.diagnostics.sessionId, '未提供');
+  assert.equal(readouts.routeKind, '未提供');
+  assert.equal(Object.hasOwn(readouts, 'bank'), false);
+  assert.equal(Object.hasOwn(readouts, 'lastStall'), false);
+  assert.equal(Object.hasOwn(readouts, 'media'), false);
 });

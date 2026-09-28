@@ -1,252 +1,99 @@
-import { EXTENSION_PREFERENCES } from '../constants.js';
-import { CDN_RESULT_VALUES } from '../diagnostics/cdn.js';
+import { EXTENSION_PREFERENCES, VOD_CONFIG } from '../constants.js';
 import { logSessionFragment } from '../diagnostics/log-session.js';
-import { STATUS_MESSAGE_VERSION, VIDEO_FIELDS } from '../ui/panel.js';
+import { STATUS_MESSAGE_VERSION } from '../ui/panel.js';
 import {
   POPUP_ROUTE,
   applyPopupRoute,
   emptyLiveFacts,
   foldLiveEvents,
   popupRouteForTabUrl,
-  renderLiveFacts,
 } from './popup-live.js';
-import { inventoryStoppedPublishing } from './readouts.js';
+import {
+  NO_PAGE_MESSAGES,
+  applyPageAvailability,
+  cdnLinesView,
+  renderCdnLines,
+  renderLiveTakeover,
+  renderVideoPanel as renderVideoPanelView,
+} from './popup-view.js';
 
 const PREFERENCES = Object.freeze(Object.values(EXTENSION_PREFERENCES));
-const OTHER_LIVE_MEDIA_SOURCES_FIELD = [
-  'otherLive',
-  String.fromCharCode(77, 101, 100, 105, 97),
-  'Sources',
-].join('');
+const RECEIVER_MISSING = 'Could not establish connection. Receiving end does not exist.';
 
-const statusElement = document.querySelector('[data-status]');
+const mainElement = document.querySelector('main');
+const noticeElement = document.querySelector('[data-notice]');
+const errorLineElement = document.querySelector('[data-status-field="error"]');
+const cdnLinesElement = document.querySelector('[data-cdn-lines]');
+const liveTakeoverElement = document.querySelector('[data-live-takeover]');
+const bufferRefs = {
+  bar: document.querySelector('[data-buffer-bar]'),
+  fill: document.querySelector('[data-buffer-fill]'),
+  seconds: document.querySelector('[data-buffer-seconds]'),
+  goal: document.querySelector('[data-buffer-goal]'),
+  note: document.querySelector('[data-buffer-note]'),
+  targetLabel: document.querySelector('[data-buffer-target-label]'),
+  stateLine: document.querySelector('[data-status-field="state"]'),
+  errorLine: errorLineElement,
+};
+const liveRefs = {
+  takeover: liveTakeoverElement,
+};
 const inputs = new Map(
   PREFERENCES.map((name) => [name, document.querySelector(`input[data-preference="${name}"]`)]),
 );
-let latestStatusSnapshot;
+
+let popupRoute = POPUP_ROUTE.VIDEO;
+let enhancementEnabled = true;
 let latestReadouts;
+let latestSnapshot;
+let latestForwardSeconds;
+let sessionId;
 let raceSessionId;
 let raceSummary;
 let raceError;
 let raceQueryInFlight = false;
 let nextRaceQueryAt = 0;
-let popupRoute = POPUP_ROUTE.VIDEO;
 let liveSessionId;
 let liveFacts = emptyLiveFacts();
 let liveAfterEventId = 0;
 let liveError;
 let liveQueryInFlight = false;
 let nextLiveQueryAt = 0;
+let pageUnavailable = true;
 
-const livePanelBodyElement = document.querySelector('[data-live-panel-body]');
-const readoutMediaElement = document.querySelector('[data-readout-media]');
-const readoutBankElement = document.querySelector('[data-readout-bank]');
-const readoutBankTitle = document.querySelector('[data-readout-bank-title]');
-const readoutRaceElement = document.querySelector('[data-readout-race]');
-const readoutDiagnosticsElement = document.querySelector('[data-readout-diagnostics]');
-
-function displayValue(value) {
-  return value === undefined || value === null || value === '' ? '未提供' : String(value);
+function showNotice(text) {
+  noticeElement.textContent = text;
 }
 
-function fieldsForSnapshot(snapshot) {
-  return VIDEO_FIELDS;
+function renderVideoPanel() {
+  renderVideoPanelView(document, bufferRefs, {
+    forwardSeconds: latestForwardSeconds,
+    snapshot: latestSnapshot,
+    enhancementEnabled,
+    targetSeconds: VOD_CONFIG.stableBufferSeconds,
+  });
 }
 
-function textValue(value) {
-  return value === undefined || value === null || value === '' ? '未提供' : String(value);
+function renderRacePanel() {
+  renderCdnLines(document, cdnLinesElement, cdnLinesView(raceSummary, raceError, raceQueryInFlight));
 }
 
-function numberText(value, suffix = '') {
-  return Number.isFinite(value) ? `${value.toFixed(1)}${suffix}` : '未提供';
+function renderLivePanel() {
+  renderLiveTakeover(liveRefs, { facts: liveFacts, error: liveError });
 }
 
-function integerText(value, suffix = '') {
-  return Number.isSafeInteger(value) ? `${value}${suffix}` : '未提供';
+function renderAll() {
+  applyPageAvailability(document, !pageUnavailable);
+  renderVideoPanel();
+  renderRacePanel();
+  renderLivePanel();
 }
 
-function rangeText(ranges) {
-  if (!Array.isArray(ranges)) return '未提供';
-  return ranges.map((range) => `${numberText(range.start)}–${numberText(range.end)}`).join(', ') || '无';
-}
-
-function clearReadout(element) {
-  element.replaceChildren();
-}
-
-function appendRow(element, label, value, { estimate = false } = {}) {
-  const row = document.createElement('div');
-  row.className = 'readout-row';
-  const name = document.createElement('dt');
-  name.textContent = label;
-  const valueElement = document.createElement('dd');
-  valueElement.textContent = textValue(value);
-  if (estimate && value !== '未提供') {
-    const marker = document.createElement('span');
-    marker.className = 'estimate-marker';
-    marker.textContent = '估算';
-    valueElement.append(' ', marker);
-  }
-  row.append(name, valueElement);
-  element.append(row);
-}
-
-function appendHeading(element, text) {
-  const heading = document.createElement('h3');
-  heading.textContent = text;
-  element.append(heading);
-}
-
-function lastStallText(lastStall) {
-  if (lastStall === undefined || lastStall === '未提供') return '未提供';
-  return `${textValue(lastStall.kind)} · ${numberText(lastStall.agoMs, ' ms 前')}`;
-}
-
-function renderMediaReadout(media, lastStall) {
-  clearReadout(readoutMediaElement);
-  if (media === '未提供') {
-    appendRow(readoutMediaElement, '读数', '未提供');
-    appendRow(readoutMediaElement, '上次停顿', lastStallText(lastStall));
-    return;
-  }
-  appendRow(readoutMediaElement, '交集前向秒数', numberText(media.forwardSeconds, ' 秒'));
-  appendRow(readoutMediaElement, '短板轨', media.limiterTrack);
-  appendRow(readoutMediaElement, '媒体源状态', media.mediaSourceState);
-  appendRow(readoutMediaElement, '其他存活媒体源', integerText(media[OTHER_LIVE_MEDIA_SOURCES_FIELD]));
-  appendRow(readoutMediaElement, 'readyState', integerText(media.element.readyState));
-  appendRow(readoutMediaElement, 'networkState', integerText(media.element.networkState));
-  appendRow(readoutMediaElement, '当前时间', numberText(media.element.currentTime, ' 秒'));
-  appendRow(readoutMediaElement, '时长', numberText(media.element.duration, ' 秒'));
-  appendRow(readoutMediaElement, '倍速', numberText(media.element.playbackRate, '×'));
-  appendRow(readoutMediaElement, '分辨率', media.element.resolution === '未提供'
-    ? '未提供'
-    : `${textValue(media.element.resolution?.width)}×${textValue(media.element.resolution?.height)}`);
-  appendRow(readoutMediaElement, '暂停', media.element.paused);
-  appendRow(readoutMediaElement, '结束', media.element.ended);
-  appendRow(readoutMediaElement, '上次停顿', lastStallText(lastStall));
-  if (media.tracks.length === 0) {
-    appendRow(readoutMediaElement, '轨道', '未提供');
-    return;
-  }
-  for (const track of media.tracks) {
-    appendHeading(readoutMediaElement, `轨道 ${textValue(track.track)}`);
-    appendRow(readoutMediaElement, '附着', track.attached);
-    appendRow(readoutMediaElement, '前向秒数', numberText(track.forwardSeconds, ' 秒'));
-    appendRow(readoutMediaElement, 'ranges', rangeText(track.ranges));
-    appendRow(readoutMediaElement, '更新中', track.updating);
-    appendRow(readoutMediaElement, '等待追加', numberText(track.pendingSinceMs, ' ms'));
-    appendRow(readoutMediaElement, '最近追加', numberText(track.lastAppendAgoMs, ' ms 前'));
-    appendRow(readoutMediaElement, '追加错误', track.appendErrors);
-  }
-}
-
-function renderBankReadout(bank, bankSecondsEstimated) {
-  clearReadout(readoutBankElement);
-  const stopped = bank !== '未提供' && inventoryStoppedPublishing(bank.ageMs);
-  readoutBankTitle.textContent = stopped ? '下载层库存（已停止发布）' : '下载层库存';
-  readoutBankTitle.classList.toggle('stale-readout', stopped);
-  if (bank === '未提供') {
-    appendRow(readoutBankElement, '读数', '未提供');
-    return;
-  }
-  appendRow(readoutBankElement, '库存年龄', numberText(bank.ageMs, ' ms'));
-  appendRow(readoutBankElement, 'sessionGeneration', integerText(bank.sessionGeneration));
-  appendRow(readoutBankElement, '已存字节', integerText(bank.storedBytes));
-  appendRow(readoutBankElement, '已存块数', integerText(bank.storedChunks));
-  appendRow(readoutBankElement, '内存上限', integerText(bank.maxBankBytes));
-  appendRow(readoutBankElement, '队列', integerText(bank.queued));
-  appendRow(readoutBankElement, '在途', integerText(bank.inflight));
-  appendRow(readoutBankElement, '预取并发', integerText(bank.prefetchConcurrency));
-  appendRow(readoutBankElement, '已停用', bank.disabled);
-  appendRow(readoutBankElement, '视频路由', bank.routeActive);
-  appendRow(readoutBankElement, '有配对地址', bank.pairedAddressAvailable);
-  for (const resource of bank.resources) {
-    appendHeading(readoutBankElement, `${textValue(resource.label)} · ${textValue(resource.pathname)}`);
-    appendRow(readoutBankElement, '类型', resource.kind);
-    appendRow(readoutBankElement, '已存字节', integerText(resource.storedBytes));
-    appendRow(readoutBankElement, '已存块数', integerText(resource.storedChunks));
-    appendRow(readoutBankElement, '总长度', integerText(resource.totalSize));
-    appendRow(readoutBankElement, '前台结束', integerText(resource.lastForegroundEnd));
-    appendRow(readoutBankElement, '在途块', integerText(resource.outstanding));
-    appendRow(readoutBankElement, '重试块', integerText(resource.retrying));
-    appendRow(readoutBankElement, '活跃', resource.active);
-    appendRow(
-      readoutBankElement,
-      '库存秒数',
-      numberText(bankSecondsEstimated[resource.pathname], ' 秒'),
-      { estimate: true },
-    );
-  }
-}
-
-function renderRaceReadout(persistence) {
-  clearReadout(readoutRaceElement);
-  if (persistence === 'DEGRADED') {
-    appendRow(readoutRaceElement, '提示', '日志写入降级，成绩可能缺事件');
-  }
-  if (raceQueryInFlight) {
-    appendRow(readoutRaceElement, '成绩', '读取中');
-    return;
-  }
-  if (raceError !== undefined) {
-    appendRow(readoutRaceElement, '成绩', `读取失败: ${raceError}`);
-    return;
-  }
-  if (raceSummary === undefined) {
-    appendRow(
-      readoutRaceElement,
-      '成绩',
-      raceSessionId === undefined || raceSessionId === '未提供' ? '未提供' : '读取中',
-    );
-    return;
-  }
-  if (raceSummary.sampleCount === 0) {
-    appendRow(readoutRaceElement, '成绩', '尚无竞速事件');
-    return;
-  }
-  const summary = raceSummary.summary;
-  appendRow(readoutRaceElement, '样本数', raceSummary.sampleCount);
-  appendRow(readoutRaceElement, '读取截止', raceSummary.maxEventId);
-  appendRow(readoutRaceElement, '配对覆盖率', `${(summary.pairCoverage * 100).toFixed(1)}%`);
-  appendRow(readoutRaceElement, '浪费字节率', `${(summary.wastedByteRatio * 100).toFixed(1)}%`);
-  for (const row of summary.rows) {
-    appendHeading(readoutRaceElement, `镜像 ${textValue(row.mirror)}`);
-    appendRow(readoutRaceElement, '竞速进入', row.racesEntered);
-    appendRow(readoutRaceElement, '胜出', row.wins);
-    appendRow(readoutRaceElement, '胜率', `${(row.winRate * 100).toFixed(1)}%`);
-    appendRow(readoutRaceElement, 'TTFB P50', numberText(row.ttfbP50, ' ms'));
-    appendRow(readoutRaceElement, 'TTFB P90', numberText(row.ttfbP90, ' ms'));
-    appendRow(readoutRaceElement, '停滞', row.stalled);
-    appendRow(readoutRaceElement, '交付字节', row.bytesDelivered);
-  }
-  for (const result of CDN_RESULT_VALUES) {
-    if (summary.byResult[result] === 0) continue;
-    appendRow(readoutRaceElement, result, summary.byResult[result]);
-  }
-}
-
-function renderDiagnosticsReadout(diagnostics) {
-  clearReadout(readoutDiagnosticsElement);
-  appendRow(readoutDiagnosticsElement, 'sessionId', diagnostics?.sessionId);
-  appendRow(readoutDiagnosticsElement, '持久化', diagnostics?.persistence);
-}
-
-function renderReadouts(snapshot) {
-  const values = snapshot || {};
-  latestReadouts = snapshot;
-  renderMediaReadout(values.media || '未提供', values.lastStall || '未提供');
-  renderBankReadout(values.bank || '未提供', values.bankSecondsEstimated || {});
-  renderRaceReadout(values.diagnostics?.persistence);
-  renderDiagnosticsReadout(values.diagnostics);
-}
-
-function renderSnapshot(snapshot) {
-  const values = snapshot || {};
-  const fields = fieldsForSnapshot(values);
-  for (const field of VIDEO_FIELDS) {
-    const element = document.querySelector(`[data-status-field="${field}"]`);
-    if (element !== null) element.textContent = fields.includes(field) ? displayValue(values[field]) : '未提供';
-  }
+function resetPageData() {
+  latestReadouts = undefined;
+  latestSnapshot = undefined;
+  latestForwardSeconds = undefined;
+  sessionId = undefined;
 }
 
 async function activeTab() {
@@ -255,40 +102,31 @@ async function activeTab() {
   return tabs[0];
 }
 
-async function pollStatus() {
-  try {
-    const tab = await activeTab();
-    if (tab === undefined) {
-      latestStatusSnapshot = undefined;
-      renderSnapshot(undefined);
-      statusElement.textContent = '当前活动页面未提供扩展状态。';
-      return;
-    }
-    const response = await chrome.tabs.sendMessage(tab.id, {
-      version: STATUS_MESSAGE_VERSION,
-      type: 'status:get',
-    });
-    if (response?.ok === false) throw new Error(response.error?.message || '当前页面拒绝状态请求');
-    latestStatusSnapshot = response;
-    renderSnapshot(response);
-    statusElement.textContent = '状态每 500ms 刷新。';
-  } catch (error) {
-    latestStatusSnapshot = undefined;
-    renderSnapshot(undefined);
-    statusElement.textContent = `读取当前页面状态失败: ${displayValue(error?.message || error)}`;
-  }
+async function sendTabMessage(tabId, type) {
+  const response = await chrome.tabs.sendMessage(tabId, {
+    version: STATUS_MESSAGE_VERSION,
+    type,
+  });
+  if (response?.ok === false) throw new Error(response.error?.message || `当前页面拒绝 ${type} 请求`);
+  return response;
 }
 
-async function refreshRace(sessionId) {
-  if (sessionId === undefined || sessionId === '未提供') {
-    raceSessionId = sessionId;
+async function sendLogsRead(message) {
+  const response = await chrome.runtime.sendMessage({ version: 1, ...message });
+  if (response?.ok !== true) throw new Error(response?.error?.message || '日志读取请求失败');
+  return response;
+}
+
+async function refreshRace(sessionIdValue) {
+  if (sessionIdValue === undefined || sessionIdValue === '未提供') {
+    raceSessionId = sessionIdValue;
     raceSummary = undefined;
     raceError = undefined;
-    renderRaceReadout(latestReadouts?.diagnostics?.persistence);
+    renderRacePanel();
     return;
   }
-  if (raceSessionId !== sessionId) {
-    raceSessionId = sessionId;
+  if (raceSessionId !== sessionIdValue) {
+    raceSessionId = sessionIdValue;
     raceSummary = undefined;
     raceError = undefined;
     nextRaceQueryAt = 0;
@@ -296,51 +134,32 @@ async function refreshRace(sessionId) {
   if (raceQueryInFlight || Date.now() < nextRaceQueryAt) return;
   raceQueryInFlight = true;
   raceError = undefined;
-  renderRaceReadout(latestReadouts?.diagnostics?.persistence);
+  renderRacePanel();
   try {
-    const response = await chrome.runtime.sendMessage({
-      version: 1,
-      type: 'logs:cdn-summary',
-      sessionId,
-    });
-    if (response?.ok !== true) throw new Error(response?.error?.message || 'CDN summary 请求失败');
-    if (raceSessionId !== sessionId) return;
+    const response = await sendLogsRead({ type: 'logs:cdn-summary', sessionId: sessionIdValue });
+    if (raceSessionId !== sessionIdValue) return;
     raceSummary = response;
   } catch (error) {
-    if (raceSessionId === sessionId) raceError = textValue(error?.message || error);
+    if (raceSessionId === sessionIdValue) raceError = error?.message || String(error);
+    console.error('[BilibiliBuffer] 读取线路状态失败', error);
   } finally {
     raceQueryInFlight = false;
     nextRaceQueryAt = Date.now() + 1000;
-    renderRaceReadout(latestReadouts?.diagnostics?.persistence);
+    renderRacePanel();
   }
 }
 
-function renderLivePanel() {
-  renderLiveFacts(document, livePanelBodyElement, liveFacts, {
-    error: liveError,
-    inFlight: liveQueryInFlight,
-    hasSession: liveSessionId !== undefined && liveSessionId !== '未提供',
-  });
-}
-
-async function sendLogsRead(message) {
-  const response = await chrome.runtime.sendMessage({ version: 1, ...message });
-  if (response?.ok !== true) throw new Error(response?.error?.message || '日志服务拒绝请求');
-  return response;
-}
-
-async function refreshLivePanel(sessionId) {
-  if (popupRoute !== POPUP_ROUTE.LIVE) return;
-  if (sessionId === undefined || sessionId === '未提供') {
-    liveSessionId = sessionId;
+async function refreshLivePanel(sessionIdValue) {
+  if (sessionIdValue === undefined || sessionIdValue === '未提供') {
+    liveSessionId = sessionIdValue;
     liveFacts = emptyLiveFacts();
     liveAfterEventId = 0;
     liveError = undefined;
     renderLivePanel();
     return;
   }
-  if (liveSessionId !== sessionId) {
-    liveSessionId = sessionId;
+  if (liveSessionId !== sessionIdValue) {
+    liveSessionId = sessionIdValue;
     liveFacts = emptyLiveFacts();
     liveAfterEventId = 0;
     liveError = undefined;
@@ -350,7 +169,7 @@ async function refreshLivePanel(sessionId) {
   liveQueryInFlight = true;
   renderLivePanel();
   try {
-    const max = await sendLogsRead({ type: 'logs:max-event-id', sessionId });
+    const max = await sendLogsRead({ type: 'logs:max-event-id', sessionId: sessionIdValue });
     let afterEventId = liveAfterEventId;
     for (;;) {
       const page = await sendLogsRead({
@@ -358,9 +177,9 @@ async function refreshLivePanel(sessionId) {
         limit: 250,
         afterEventId,
         maxEventId: max.maxEventId,
-        sessionId,
+        sessionId: sessionIdValue,
       });
-      if (liveSessionId !== sessionId) return;
+      if (liveSessionId !== sessionIdValue) return;
       foldLiveEvents(liveFacts, page.events);
       if (!page.hasMore) {
         afterEventId = page.nextAfterEventId;
@@ -375,7 +194,8 @@ async function refreshLivePanel(sessionId) {
     liveAfterEventId = afterEventId;
     liveError = undefined;
   } catch (error) {
-    if (liveSessionId === sessionId) liveError = error?.message || String(error);
+    if (liveSessionId === sessionIdValue) liveError = error?.message || String(error);
+    console.error('[BilibiliBuffer] 读取直播状态失败', error);
   } finally {
     liveQueryInFlight = false;
     nextLiveQueryAt = Date.now() + 1000;
@@ -383,49 +203,75 @@ async function refreshLivePanel(sessionId) {
   }
 }
 
-async function pollReadouts() {
+// 路由优先用内容侧自报的 routeKind（popup 没有 tabs 权限，看不到标签页地址），
+// 内容侧不可用时退回标签页地址推断。
+function routeFor(readouts, tabUrl) {
+  if (readouts?.routeKind === 'live') return POPUP_ROUTE.LIVE;
+  if (readouts?.routeKind === 'video' || readouts?.routeKind === 'other') return POPUP_ROUTE.VIDEO;
+  return popupRouteForTabUrl(tabUrl);
+}
+
+async function refresh() {
+  const tab = await activeTab();
+  const route = routeFor(latestReadouts, tab?.url);
+  if (route !== popupRoute) {
+    popupRoute = route;
+    applyPopupRoute(document, route);
+  }
+  if (tab === undefined) {
+    pageUnavailable = true;
+    resetPageData();
+    renderAll();
+    showNotice(NO_PAGE_MESSAGES.noTab);
+    return;
+  }
   try {
-    const tab = await activeTab();
-    const route = popupRouteForTabUrl(tab?.url);
-    if (route !== popupRoute) {
-      popupRoute = route;
-      applyPopupRoute(document, popupRoute);
-    }
-    if (tab === undefined) {
-      renderReadouts(undefined);
+    const readouts = await sendTabMessage(tab.id, 'readouts:get');
+    latestReadouts = readouts;
+    latestForwardSeconds = Number.isFinite(readouts?.forwardSeconds) ? readouts.forwardSeconds : undefined;
+    sessionId = readouts?.diagnostics?.sessionId;
+    latestSnapshot = popupRoute === POPUP_ROUTE.VIDEO
+      ? await sendTabMessage(tab.id, 'status:get')
+      : undefined;
+  } catch (error) {
+    if (error?.message === RECEIVER_MISSING) {
+      pageUnavailable = true;
+      resetPageData();
       await refreshRace(undefined);
       if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(undefined);
+      renderAll();
+      showNotice(NO_PAGE_MESSAGES.noReceiver);
       return;
     }
-    const response = await chrome.tabs.sendMessage(tab.id, {
-      version: STATUS_MESSAGE_VERSION,
-      type: 'readouts:get',
-    });
-    if (response?.ok === false) throw new Error(response.error?.message || '当前页面拒绝实时读数请求');
-    renderReadouts(response);
-    await refreshRace(response?.diagnostics?.sessionId);
-    if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(response?.diagnostics?.sessionId);
-  } catch (error) {
-    renderReadouts(undefined);
+    resetPageData();
+    latestReadouts = undefined;
     await refreshRace(undefined);
     if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(undefined);
-    if (error?.message === 'Could not establish connection. Receiving end does not exist.') {
-      console.warn('[BilibiliBuffer] 当前活动页面没有实时面板接收端', error);
-    } else {
-      console.error('[BilibiliBuffer] 读取实时面板失败', error);
-    }
+    renderAll();
+    console.error('[BilibiliBuffer] 读取页面状态失败', error);
+    showNotice(NO_PAGE_MESSAGES.readFailed);
+    return;
   }
+  pageUnavailable = false;
+  showNotice('');
+  document.body.dataset.ready = 'true';
+  renderAll();
+  await refreshRace(sessionId);
+  if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(sessionId);
 }
 
 async function loadPreferences() {
   const values = await chrome.storage.local.get(PREFERENCES);
   for (const name of PREFERENCES) inputs.get(name).checked = values[name] !== false;
+  enhancementEnabled = inputs.get(EXTENSION_PREFERENCES.vodEnabled).checked;
 }
 
 for (const name of PREFERENCES) {
   inputs.get(name).addEventListener('change', async (event) => {
     await chrome.storage.local.set({ [name]: event.currentTarget.checked });
-    statusElement.textContent = '已保存；刷新页面后生效。';
+    enhancementEnabled = event.currentTarget.checked;
+    renderVideoPanel();
+    showNotice(NO_PAGE_MESSAGES.preferenceSaved);
   });
 }
 
@@ -435,11 +281,7 @@ document.querySelector('[data-open-logs]').addEventListener('click', () => {
     try {
       const tab = await activeTab();
       if (tab !== undefined) {
-        const response = await chrome.tabs.sendMessage(tab.id, {
-          version: STATUS_MESSAGE_VERSION,
-          type: 'diagnostics:session-id:get',
-        });
-        if (response?.ok !== true) throw new Error(response?.error?.message || '当前页面拒绝日志 session 请求');
+        const response = await sendTabMessage(tab.id, 'diagnostics:session-id:get');
         fragment = logSessionFragment(response.sessionId);
       }
       await chrome.tabs.create({ url: chrome.runtime.getURL(`logs.html${fragment}`) });
@@ -452,14 +294,12 @@ document.querySelector('[data-open-logs]').addEventListener('click', () => {
 
 void loadPreferences().catch((error) => {
   console.error('[BilibiliBuffer] Popup 读取设置失败', error);
-  statusElement.textContent = `读取设置失败: ${displayValue(error?.message || error)}`;
+  showNotice(NO_PAGE_MESSAGES.preferenceFailed);
 });
 
-renderReadouts(undefined);
-void pollStatus();
-void pollReadouts();
+renderAll();
+void refresh();
 const pollTimer = setInterval(() => {
-  void pollStatus();
-  void pollReadouts();
+  void refresh();
 }, 500);
 window.addEventListener('pagehide', () => clearInterval(pollTimer), { once: true });

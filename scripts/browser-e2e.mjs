@@ -94,17 +94,16 @@ const silentAndAuditInit = () => {
 const autoOpenPopupLogs = () => {
   if (location.protocol !== 'chrome-extension:' || location.pathname !== '/popup.html' ||
     location.search !== '?e2e-open-logs') return;
-  const clickWhenVideoStatusIsReady = () => {
-    const mode = document.querySelector('[data-status-field="mode"]');
+  const clickWhenPopupHasPageData = () => {
     const button = document.querySelector('[data-open-logs]');
-    if (mode?.textContent === '视频' && button instanceof HTMLButtonElement) {
+    if (document.body.dataset.ready === 'true' && button instanceof HTMLButtonElement) {
       window.__e2ePopupLogsClicked = true;
       button.click();
       return;
     }
-    window.setTimeout(clickWhenVideoStatusIsReady, 20);
+    window.setTimeout(clickWhenPopupHasPageData, 20);
   };
-  document.addEventListener('DOMContentLoaded', clickWhenVideoStatusIsReady, { once: true });
+  document.addEventListener('DOMContentLoaded', clickWhenPopupHasPageData, { once: true });
 };
 
 const INVENTORY_VIDEO_URL = 'https://e2e-video.bilivideo.com/e2e/video-active.m4s?signature=video';
@@ -555,7 +554,7 @@ try {
   assert.deepEqual(
     await popupPage.locator('[data-status-field]:visible').evaluateAll((elements) =>
       elements.map((element) => element.dataset.statusField)),
-    ['mode', 'state', 'buffered', 'target', 'effective', 'error'],
+    ['state'],
   );
   const videoSessionId = (await readStoredEvents(context, extensionId)).events
     .find((event) => event.code === 'route.session_started' && event.data?.pathname === '/video/BVpopup-fixture')?.sessionId;
@@ -619,14 +618,13 @@ try {
   });
   await popupVideoPage.bringToFront();
   const readouts = await extensionTabSend(popupLauncher, {
-    version: 2,
+    version: 3,
     type: 'readouts:get',
   });
-  assert.equal(readouts.version, 2);
+  assert.equal(readouts.version, 3);
   assert.equal(readouts.diagnostics.sessionId, videoSessionId);
-  assert.equal(Array.isArray(readouts.media.tracks), true);
-  assert.equal(readouts.media.tracks.length > 0, true);
-  assert.equal(readouts.media.tracks.every((track) => track.attached === true), true);
+  assert.equal(readouts.routeKind, 'video');
+  assert.equal(Number.isFinite(readouts.forwardSeconds), true);
   assert.doesNotMatch(JSON.stringify(readouts), /blob:|[?#]/);
   assert.equal(
     videoLogsPage.url(),

@@ -29,11 +29,13 @@
 
 ## 面板与日志页可见行为
 
-- popup 实时媒体读数展示当前 `video.buffered` 前向秒数、短板轨、媒体源状态、各轨 ranges 与追加等待等只读事实（`src/extension/popup.js:90-165`、`src/extension/readouts.js:110-144`）。
-- popup「上次停顿」行仅在 `waiting` 事件时按缓冲区与帧数据分类为「数据侧」「帧未产出」「帧未呈现」或「未判定」（`src/diagnostics/media.js:168-191`、`src/diagnostics/media.js:279-291`），并在 popup 中显示类别与距今毫秒数（`src/extension/popup.js:85-111`）。
-- 所有 `media.*` 事件都附带同一帧周期聚合的 `frameTiming`，包括 presentedTotal、maxFrameGapMs、processingMs、displayLead、mediaStep 与 append 相关指标（`src/diagnostics/media.js:445-466`、`src/diagnostics/privacy.js:195-212`）。
-- 下载层库存只列出本次播放实际参与的分轨（`resourceState` 或 `chunks` 中出现过的资源），不展示地址簿里的所有表示（`src/bank/inventory.js:103-107`）。
-- 日志页与 popup 均提供 CDN 竞速面板，按镜像统计竞速进入、胜出、TTFB P50/P90、停滞与交付字节，并给出配对覆盖率与浪费字节率（`src/diagnostics/logs.js:113-138`、`src/diagnostics/logs.js:187-202`、`src/extension/popup.js:167-211`、`src/diagnostics/worker.js:369-396`）。
+- popup 面向普通观众，只讲三件事：缓冲、下载线路、连接时间。视频页显示一条缓冲条和「已缓冲 N 秒 / 目标 120 秒」，数值是覆盖当前播放点的连续可播放前向秒数（`src/extension/popup.js:62-77`、`src/extension/popup-view.js`、`src/extension/readouts.js`）；下方一行报告向播放器申请 120 秒缓存的结果：已生效、等待生效、播放器不支持，或申请失败（`src/ui/panel.js`、`src/vod/controller.js` 的 `updateStatus`）。
+- popup 的「下载线路」卡片按镜像列出本次播放实际用到的每条 CDN 线路（通常两条），每条给一个健康状况词（正常、有停滞、有错误、尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，来自 `logs:cdn-summary` 的每镜像 TTFB P50/P90）（`src/extension/popup-view.js`、`src/diagnostics/cdn.js`、`src/diagnostics/worker.js`）。线路名是镜像主机名的可读短名。
+- 直播页（live.bilibili.com）同一风格：同样的「下载线路」卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（未找到备用线路）/ 接管请求失败 / 等待直播数据），由内容侧折叠 `bank.serve` 事件得出；直播不设缓冲目标，popup 不显示缓冲条（`src/extension/popup-live.js`、`src/extension/popup-view.js`）。popup 的路由判定优先使用内容侧自报的 `routeKind`，因为 popup 没有 `tabs` 权限、读不到标签页地址（`src/diagnostics/client.js` 的 `getStatus`、`src/extension/readouts.js`）。
+- popup 面板只读，不影响播放、不上传；内容侧错误只在存在时以一句人话显示，非 Bilibili 标签页或没有内容脚本的标签页只显示一句友好提示（`src/extension/popup.js`、`src/extension/popup-view.js`）。popup 底部保留「打开开发日志」入口，日志页本身不变。
+- 所有 `media.*` 事件都附带同一帧周期聚合的 `frameTiming`，包括 presentedTotal、maxFrameGapMs、processingMs、displayLead、mediaStep 与 append 相关指标（`src/diagnostics/media.js`、`src/diagnostics/privacy.js:195-212`）。这些细节只进开发日志；popup 不再展示 readyState、networkState、轨道 ranges、库存计数或持久化状态等开发读数。
+- 下载层库存只列出本次播放实际参与的分轨（`resourceState` 或 `chunks` 中出现过的资源），不展示地址簿里的所有表示（`src/bank/inventory.js:103-107`）；它作为 `bank.inventory` 诊断事件进入开发日志。
+- 日志页提供 CDN 竞速面板，按镜像统计竞速进入、胜出、TTFB P50/P90、停滞与交付字节，并给出配对覆盖率与浪费字节率（`src/diagnostics/logs.js`、`src/diagnostics/worker.js`）。
 
 ## 安装
 

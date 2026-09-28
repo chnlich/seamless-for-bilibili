@@ -2,13 +2,8 @@ import { fail } from '../errors.js';
 
 export const STATUS_MESSAGE_VERSION = 2;
 
-const MODE_LABELS = Object.freeze({ video: '视频' });
 const VIDEO_FIELDS = Object.freeze([
-  'mode',
   'state',
-  'buffered',
-  'target',
-  'effective',
   'error',
 ]);
 const VIDEO_STATE_LABELS = Object.freeze({
@@ -82,7 +77,7 @@ class StatusPanel {
     this.assertFresh();
     const model = Object.fromEntries(fieldsForMode(this.mode).map((field) => [
       field,
-      field === 'state' && this.mode === 'video'
+      field === 'state'
         ? VIDEO_STATE_LABELS[this.model[field]] || displayValue(this.model[field])
         : displayValue(this.model[field]),
     ]));
@@ -90,7 +85,6 @@ class StatusPanel {
       version: STATUS_MESSAGE_VERSION,
       surfaceId: this.surfaceId,
       ...model,
-      mode: MODE_LABELS[this.mode],
     };
   }
 
@@ -110,13 +104,16 @@ export function getCurrentStatusSurface() {
 }
 
 export function createUnavailableStatusSnapshot(routeMode) {
-  const mode = routeMode === 'video' || routeMode === 'vod' ? 'video' : undefined;
-  const fields = mode === undefined ? ['mode'] : fieldsForMode(mode);
+  if (routeMode !== 'video' && routeMode !== 'vod') {
+    return {
+      version: STATUS_MESSAGE_VERSION,
+      surfaceId: 'surface-unavailable',
+    };
+  }
   return {
     version: STATUS_MESSAGE_VERSION,
     surfaceId: 'surface-unavailable',
-    ...Object.fromEntries(fields.map((field) => [field, '未提供'])),
-    ...(mode === undefined ? {} : { mode: MODE_LABELS[mode] }),
+    ...Object.fromEntries(fieldsForMode('video').map((field) => [field, '未提供'])),
   };
 }
 

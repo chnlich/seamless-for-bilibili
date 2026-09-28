@@ -10,6 +10,9 @@ const CDN_RESULT_VALUES = Object.freeze([
   'gave_up',
 ]);
 
+// 视为该线路自身失败的结果；停滞单列，aborted/superseded 属于竞速被放弃而非线路故障。
+const CDN_LINE_FAILURE_RESULTS = Object.freeze(['network_error', 'http_error', 'invalid_response', 'gave_up']);
+
 function chunkGroupKey(data) {
   return JSON.stringify([new URL(data.source).pathname, data.chunkIndex, data.start]);
 }
@@ -38,6 +41,7 @@ function mirrorStatsFor(mirrors, mirror) {
       wins: 0,
       ttfbValues: [],
       stalled: 0,
+      failures: 0,
       bytesDelivered: 0,
     };
     mirrors.set(mirror, stats);
@@ -67,6 +71,7 @@ export function aggregateCdnEvents(events) {
     }
     if (data.result === 'lost_race') wastedBytes += bytes;
     if (data.result === 'stalled') stats.stalled += 1;
+    if (CDN_LINE_FAILURE_RESULTS.includes(data.result)) stats.failures += 1;
     if (Number.isFinite(data.ttfbMs)) stats.ttfbValues.push(data.ttfbMs);
     const key = chunkGroupKey(data);
     const legs = chunks.get(key) || [];
@@ -95,6 +100,7 @@ export function aggregateCdnEvents(events) {
       ttfbP50: percentile(stats.ttfbValues, 0.5),
       ttfbP90: percentile(stats.ttfbValues, 0.9),
       stalled: stats.stalled,
+      failures: stats.failures,
       bytesDelivered: stats.bytesDelivered,
     }));
   const totalChunks = chunks.size;

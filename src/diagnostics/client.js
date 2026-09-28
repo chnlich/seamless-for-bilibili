@@ -331,6 +331,7 @@ export class DiagnosticsClient {
   getStatus() {
     return {
       sessionId: this.session?.sessionId || '未提供',
+      routeKind: this.session?.routeKind || '未提供',
       persistence: this.persistence,
     };
   }

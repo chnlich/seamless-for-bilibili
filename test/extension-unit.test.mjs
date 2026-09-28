@@ -73,20 +73,20 @@ test('live pages stay outside the video mode while keeping extension presence', 
 
 test('status panel exposes only direct video facts and no playback or recovery actions', () => {
   const unavailable = createUnavailableStatusSnapshot('video');
-  assert.equal(unavailable.mode, '视频');
-  assert.equal(unavailable.target, '未提供');
+  assert.equal(unavailable.state, '未提供');
+  assert.equal(unavailable.error, '未提供');
   assert.equal(Object.hasOwn(unavailable, 'actions'), false);
+  assert.equal(Object.hasOwn(unavailable, 'mode'), false);
+  const offRoute = createUnavailableStatusSnapshot(undefined);
+  assert.equal(Object.hasOwn(offRoute, 'state'), false);
+  assert.equal(offRoute.surfaceId, 'surface-unavailable');
 });
 
 test('video status surface exposes exactly the approved snapshot fields', () => {
   const panel = createStatusPanel({}, 'video');
   panel.setModel({
-    mode: '视频',
     state: 'APPLIED',
-    buffered: '8.0 秒',
-    target: '120 秒',
-    effective: '已应用(目标120s, 实测峰值8s)',
-    error: '未提供',
+    error: '',
     recentEvent: 'playing',
     sessionId: 'unapproved-session',
     persistence: 'PERSISTED',
@@ -95,13 +95,11 @@ test('video status surface exposes exactly the approved snapshot fields', () => 
   assert.deepEqual(Object.keys(snapshot), [
     'version',
     'surfaceId',
-    'mode',
     'state',
-    'buffered',
-    'target',
-    'effective',
     'error',
   ]);
+  assert.equal(snapshot.state, '已应用');
+  assert.equal(snapshot.error, '未提供');
   assert.equal(Object.hasOwn(snapshot, 'recentEvent'), false);
   assert.equal(Object.hasOwn(snapshot, 'sessionId'), false);
   assert.equal(Object.hasOwn(snapshot, 'persistence'), false);
@@ -111,7 +109,7 @@ test('video status surface exposes exactly the approved snapshot fields', () => 
 test('tab-scoped popup status requests do not require a popup sender tab', async () => {
   let listener;
   const panel = createStatusPanel({}, 'video');
-  panel.setModel({ state: 'APPLIED', buffered: '12.0 秒', target: '120 秒' });
+  panel.setModel({ state: 'APPLIED' });
   installPopupMessageHandler({
     onMessage: {
       addListener(callback) {
@@ -123,7 +121,6 @@ test('tab-scoped popup status requests do not require a popup sender tab', async
     const result = listener({ version: STATUS_MESSAGE_VERSION, type: 'status:get' }, {}, resolve);
     assert.equal(result, true);
   });
-  assert.equal(response.mode, '视频');
   assert.equal(response.state, '已应用');
   panel.destroy();
 });
@@ -131,7 +128,7 @@ test('tab-scoped popup status requests do not require a popup sender tab', async
 test('popup diagnostics session request is a fixed narrow message and never expands video status', async () => {
   let listener;
   const panel = createStatusPanel({}, 'video');
-  panel.setModel({ state: 'APPLIED', buffered: '12.0 秒', target: '120 秒' });
+  panel.setModel({ state: 'APPLIED' });
   installPopupMessageHandler({
     onMessage: {
       addListener(callback) {
@@ -160,31 +157,29 @@ test('popup readouts:get is a separate structured message while status:get stays
       },
     },
   }, () => 'session-readout', () => ({
-    version: STATUS_MESSAGE_VERSION,
+    version: 3,
     surfaceId: 'surface-readout',
-    media: { forwardSeconds: 1, tracks: [] },
-    bank: '未提供',
-    bankSecondsEstimated: {},
-    diagnostics: { sessionId: 'session-readout', persistence: 'PERSISTED' },
+    forwardSeconds: 12,
+    routeKind: 'video',
+    diagnostics: { sessionId: 'session-readout' },
   }));
   const response = await new Promise((resolve) => {
     const result = listener({ version: STATUS_MESSAGE_VERSION, type: 'readouts:get' }, {}, resolve);
     assert.equal(result, true);
   });
-  assert.equal(response.version, STATUS_MESSAGE_VERSION);
+  assert.equal(response.version, 3);
   assert.equal(response.surfaceId, 'surface-readout');
-  assert.equal(Array.isArray(response.media.tracks), true);
+  assert.equal(response.forwardSeconds, 12);
   assert.deepEqual(Object.keys(response).sort(), [
-    'bank',
-    'bankSecondsEstimated',
     'diagnostics',
-    'media',
+    'forwardSeconds',
+    'routeKind',
     'surfaceId',
     'version',
   ]);
 });
 
-test('bank diagnostic listener retains a sanitized inventory for readouts', () => {
+test('bank diagnostic listener forwards bank events into the diagnostics log', () => {
   let listener;
   const messages = [];
   const windowObject = {
@@ -195,7 +190,7 @@ test('bank diagnostic listener retains a sanitized inventory for readouts', () =
     removeEventListener() {},
   };
   const diagnostics = { log(code, data) { messages.push({ code, data }); } };
-  const installed = installBankDiagnostics({ windowObject, diagnostics, now: () => 42 });
+  const installed = installBankDiagnostics({ windowObject, diagnostics });
   listener({
     source: windowObject,
     data: {
@@ -203,39 +198,23 @@ test('bank diagnostic listener retains a sanitized inventory for readouts', () =
       direction: 'event',
       type: 'diagnostic',
       code: 'bank.inventory',
-      data: {
-        sessionGeneration: 1,
-        storedBytes: 0,
-        storedChunks: 0,
-        maxBankBytes: 10,
-        queued: 0,
-        inflight: 0,
-        prefetchConcurrency: 2,
-        disabled: false,
-        routeActive: true,
-        pairedAddressAvailable: false,
-        resources: [{
-          pathname: '/video/segment.m4s?signature=secret#hash',
-          kind: 'video',
-          label: '720P',
-          height: 720,
-          codecs: 'avc1',
-          bandwidth: 10,
-          storedBytes: 0,
-          storedChunks: 0,
-          totalSize: '未提供',
-          lastForegroundEnd: '未提供',
-          outstanding: 0,
-          retrying: 0,
-          active: false,
-        }],
-      },
+      data: { sessionGeneration: 1, storedBytes: 0, disabled: false },
     },
   });
-  assert.equal(messages.length, 1);
-  assert.equal(installed.latestInventory().receivedAtMs, 42);
-  assert.equal(installed.latestInventory().data.resources[0].pathname, '/video/segment.m4s');
-  assert.doesNotMatch(JSON.stringify(installed.latestInventory()), /signature=secret|hash/);
+  listener({
+    source: windowObject,
+    data: {
+      namespace: 'bilibili-buffer:segment-bank-v1',
+      direction: 'event',
+      type: 'diagnostic',
+      code: 'bank.disabled',
+      data: { reason: 'preference' },
+    },
+  });
+  listener({ source: { windowObject }, data: { namespace: 'bilibili-buffer:segment-bank-v1' } });
+  listener({ source: windowObject, data: { namespace: 'other-namespace' } });
+  assert.deepEqual(messages.map((message) => message.code), ['bank.inventory', 'bank.disabled']);
+  assert.equal(messages[0].data.sessionGeneration, 1);
   installed.destroy();
 });
 

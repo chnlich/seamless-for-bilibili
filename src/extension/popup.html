@@ -8,46 +8,47 @@
   </head>
   <body>
     <main>
-      <h1>Bilibili 抗卡</h1>
-      <section class="preferences" aria-label="增强开关">
+      <header class="head">
+        <h1>Bilibili 抗卡</h1>
         <label class="switch-row">
           <span data-vod-toggle-label>视频增强</span>
           <input type="checkbox" data-preference="vodEnabled">
         </label>
-        <p class="hint">开关是刷新后的默认值；扩展不接管播放控制。</p>
+      </header>
+      <p class="hint">开关改动在刷新页面后生效。</p>
+
+      <section class="card" aria-label="缓冲" data-vod-only>
+        <h2>缓冲</h2>
+        <div class="buffer-bar" data-buffer-bar>
+          <div class="buffer-fill" data-buffer-fill></div>
+        </div>
+        <p class="buffer-line">
+          <strong class="buffer-seconds" data-buffer-seconds>—</strong>
+          <span class="buffer-goal" data-buffer-goal></span>
+        </p>
+        <p class="buffer-note" data-buffer-note hidden></p>
+        <p class="target-state">
+          <span class="target-label" data-buffer-target-label></span>
+          <span class="target-value" data-status-field="state"></span>
+        </p>
       </section>
-      <section class="readout-section" aria-label="直播接管" data-live-panel hidden>
+
+      <section class="card" aria-label="下载线路">
+        <h2>下载线路</h2>
+        <div data-cdn-lines></div>
+      </section>
+
+      <section class="card" aria-label="直播接管" data-live-panel hidden>
         <h2>直播接管</h2>
-        <div data-live-panel-body></div>
+        <p class="takeover" data-live-takeover></p>
       </section>
-      <section class="snapshot" aria-label="当前页面事实" data-vod-only>
-        <div class="title-row"><span>当前页面</span><strong data-status-field="mode">未提供</strong></div>
-        <dl>
-          <div><dt>增强状态</dt><dd data-status-field="state">未提供</dd></div>
-          <div><dt>连续可播放缓存</dt><dd data-status-field="buffered">未提供</dd></div>
-          <div><dt>原生缓存目标</dt><dd data-status-field="target">未提供</dd></div>
-          <div><dt>有效性</dt><dd data-status-field="effective">未提供</dd></div>
-          <div><dt>错误</dt><dd data-status-field="error">未提供</dd></div>
-        </dl>
-      </section>
-      <section class="readout-section" aria-label="媒体缓冲" data-vod-only>
-        <h2>媒体缓冲</h2>
-        <div data-readout-media></div>
-      </section>
-      <section class="readout-section" aria-label="下载层库存" data-vod-only>
-        <h2 data-readout-bank-title>下载层库存</h2>
-        <div data-readout-bank></div>
-      </section>
-      <section class="readout-section" aria-label="镜像竞速">
-        <h2>镜像竞速</h2>
-        <div data-readout-race></div>
-      </section>
-      <section class="readout-section" aria-label="诊断">
-        <h2>诊断</h2>
-        <div data-readout-diagnostics></div>
-      </section>
-      <button type="button" data-open-logs>打开开发日志</button>
-      <p class="status" data-status role="status">正在读取当前页面状态…</p>
+
+      <p class="error-line" data-status-field="error" hidden></p>
+      <p class="notice" data-notice role="status"></p>
+
+      <footer class="foot">
+        <button type="button" class="link-button" data-open-logs>打开开发日志</button>
+      </footer>
     </main>
     <script src="popup.js"></script>
   </body>
