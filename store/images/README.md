@@ -10,13 +10,13 @@
 | `screenshot-03-racing-diagram.png` | 1280×800 | 机制示意图：双镜像竞速、120 秒缓冲、流量代价 |
 | `promo-tile-440x280.png` | 440×280 | 小型宣传图（必需项） |
 | `marquee-1400x560.png` | 1400×560 | Marquee 宣传图（可选项） |
-| `popup-video.png` / `popup-live.png` | 688×676 | 弹窗特写原图（README 复用；2× 设备像素） |
+| `popup-video.png` / `popup-live.png` | 744×828 / 744×718 | 弹窗特写原图（README 复用；2× 设备像素，完整弹窗：标题行开关、全部卡片、日志链接都在画内） |
 
 ## 再生步骤
 
-1. 用捕获脚本得到原始截图到仓库根的 `store-images-raw/`（不提交：页面截图含第三方内容）：
+1. 用捕获脚本得到原始截图到仓库根的 `store-images-raw/`（不提交，已在仓库 .gitignore 中忽略：页面截图含第三方内容）：
    需要 `video-popup-light.png`、`live-popup-light.png`、`video-page.png`、`live-page.png` 与 `report.json`。
-2. `node store/images/src/compose.mjs` → 裁切弹窗特写并渲染上表全部 PNG。
+2. `node store/images/src/compose.mjs` → 弹窗特写按原始捕获的完整尺寸原样导出（不做裁切），并渲染上表全部 PNG。
 3. 文案修改直接改 `src/*.html`（截图说明语在 HTML 里；直播说明语按 `report.json` 的实际接管状态自动插值）。
 
 ## 捕获来源（2026-09-28）

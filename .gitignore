@@ -3,3 +3,4 @@ reports/
 *.log
 .cache/
 release/
+store-images-raw/

@@ -13,8 +13,8 @@
     transform: scale(1.04);
   }
   .page-tint { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(10,14,22,.55), rgba(10,14,22,.72)); }
-  .caption { position: absolute; left: 56px; top: 64px; color: #fff; text-shadow: 0 2px 14px rgba(0,0,0,.55); max-width: 620px; }
-  .caption h1 { margin: 0 0 14px; font-size: 44px; font-weight: 700; letter-spacing: 1px; }
+  .caption { position: absolute; left: 56px; top: 50%; transform: translateY(-50%); color: #fff; text-shadow: 0 2px 14px rgba(0,0,0,.55); max-width: 560px; }
+  .caption h1 { margin: 0 0 14px; font-size: 40px; font-weight: 700; letter-spacing: 1px; }
   .caption p { margin: 0; font-size: 22px; line-height: 1.6; color: rgba(255,255,255,.92); }
   .caption .pill {
     display: inline-block; margin-top: 22px; padding: 8px 16px; border-radius: 999px;
@@ -22,9 +22,9 @@
     font-size: 18px; color: #fff;
   }
   .popup {
-    position: absolute; right: 64px; top: 74px;
-    width: 460px;
-    border-radius: 14px;
+    position: absolute; right: 64px; top: 50%; transform: translateY(-50%);
+    width: 540px;
+    border-radius: 16px;
     box-shadow: 0 24px 70px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.18);
     overflow: hidden;
   }

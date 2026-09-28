@@ -20,30 +20,30 @@ if (executablePath === undefined) {
   throw new Error('set BILIBILI_E2E_CHROME to the Chrome executable; no silent fallback');
 }
 
-// Raw popup captures are 2x device pixels; the popup body is 340 CSS px wide and the
-// content (cards + footer) ends at 338 CSS px tall. Crop keeps exactly the popup visual.
-const POPUP_CSS_WIDTH = 344;
-const POPUP_CSS_HEIGHT = 338;
-
-async function cropPopup(browser, rawName, outName) {
-  const page = await browser.newPage({ viewport: { width: POPUP_CSS_WIDTH, height: POPUP_CSS_HEIGHT }, deviceScaleFactor: 2 });
-  // The crop page lives beside the raw images: a data:/about:blank document cannot
-  // load file:// subresources.
-  const cropPage = path.join(rawDir, `__crop-${outName}.html`);
+// The raw popup captures are 2x device pixels of the whole popup page (the capture
+// clips exactly the popup document's scrollWidth x scrollHeight), so the close-up is
+// the capture itself: every edge, the toggle and the log link are complete by
+// construction. No hard-coded crop box.
+async function pngSize(file) {
+  const handle = await fs.open(file, 'r');
   try {
-    await fs.writeFile(cropPage, `<body style="margin:0"><img src="./${rawName}" style="display:block;width:372px"></body>`);
-    await page.goto(`file:///${cropPage.replaceAll(path.sep, '/')}`);
-    await page.waitForFunction(() => {
-      const image = document.querySelector('img');
-      return image !== null && image.complete && image.naturalWidth > 0;
-    }, { timeout: 15000 });
-    const target = path.join(imagesDir, outName);
-    await page.screenshot({ path: target, type: 'png' });
-    return target;
+    const header = Buffer.alloc(24);
+    await handle.read(header, 0, 24, 0);
+    const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    if (!header.subarray(0, 8).equals(signature)) {
+      throw new Error(`${file} is not a PNG`);
+    }
+    return { width: header.readUInt32BE(16), height: header.readUInt32BE(20) };
   } finally {
-    await page.close();
-    await fs.rm(cropPage, { force: true });
+    await handle.close();
   }
+}
+
+async function exportPopupCloseup(rawName, outName) {
+  const target = path.join(imagesDir, outName);
+  await fs.copyFile(path.join(rawDir, rawName), target);
+  const { width, height } = await pngSize(target);
+  console.log('exported', target, `${width}x${height}`);
 }
 
 const SIZES = {
@@ -53,6 +53,58 @@ const SIZES = {
   'tile.html': [440, 280, 'promo-tile-440x280.png'],
   'marquee.html': [1400, 560, 'marquee-1400x560.png'],
 };
+
+// Layout self-check, run in each page before the screenshot: the store upload uses
+// these pixels as-is, so the render fails loudly when a subject (popup, caption, tile
+// text block) is clipped by the canvas, when the caption overlaps the popup, or when
+// a heading line wraps mid-word. Decorative bleed (scaled background, glows) is
+// intentional and checked only through the subjects above.
+async function assertLayout(page, htmlName) {
+  const check = await page.evaluate(() => {
+    const rectOf = (selector) => {
+      const element = document.querySelector(selector);
+      return element === null ? null : element.getBoundingClientRect().toJSON();
+    };
+    const heading = document.querySelector('h1');
+    const namedLines = heading === null ? [] : [...heading.childNodes]
+      .filter((node) => node.nodeType === Node.TEXT_NODE && node.textContent.trim() !== '')
+      .map((node) => {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        return [...range.getClientRects()].filter((rect) => rect.width > 1);
+      });
+    return {
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      popup: rectOf('.popup img'),
+      caption: rectOf('.caption'),
+      textBlock: rectOf('.text'),
+      namedLines,
+      headingRight: heading === null ? Infinity : heading.getBoundingClientRect().right,
+    };
+  });
+  const inside = (name, rect) => {
+    if (rect.left < 0 || rect.top < 0 || rect.right > check.innerWidth || rect.bottom > check.innerHeight) {
+      throw new Error(`${htmlName}: ${name} is clipped by the canvas (${JSON.stringify(rect)})`);
+    }
+  };
+  if (check.popup !== null) {
+    inside('the popup', check.popup);
+    if (check.caption !== null && check.caption.right > check.popup.left - 16) {
+      throw new Error(`${htmlName}: the caption overlaps the popup (caption right ${check.caption.right}, popup left ${check.popup.left})`);
+    }
+  }
+  if (check.caption !== null) inside('the caption', check.caption);
+  if (check.textBlock !== null) inside('the text block', check.textBlock);
+  for (const rects of check.namedLines) {
+    if (rects.length !== 1) {
+      throw new Error(`${htmlName}: a heading line wraps (${rects.length} line boxes); break only at a word boundary or fit it on one line`);
+    }
+    if (rects[0].right > check.headingRight + 0.5) {
+      throw new Error(`${htmlName}: a heading line overflows its box`);
+    }
+  }
+}
 
 // Honest live caption: replace the LIVE_NOTE comment based on what was actually captured.
 async function adjustLiveCaption(report) {
@@ -74,13 +126,14 @@ try {
   const report = await fs.readFile(path.join(rawDir, 'report.json'), 'utf8').then(JSON.parse).catch(() => undefined);
   const note = await adjustLiveCaption(report);
   console.log('live caption note:', note);
-  await cropPopup(browser, 'video-popup-light.png', 'popup-video.png');
-  await cropPopup(browser, 'live-popup-light.png', 'popup-live.png');
+  await exportPopupCloseup('video-popup-light.png', 'popup-video.png');
+  await exportPopupCloseup('live-popup-light.png', 'popup-live.png');
   for (const [htmlName, [width, height, outName]] of Object.entries(SIZES)) {
     const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
     try {
       await page.goto(`file://${path.join(srcDir, htmlName)}`, { waitUntil: 'networkidle' });
       await page.waitForTimeout(250);
+      await assertLayout(page, htmlName);
       const target = path.join(imagesDir, outName);
       await page.screenshot({ path: target, clip: { x: 0, y: 0, width, height }, type: 'png' });
       console.log('rendered', target);
