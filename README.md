@@ -1,6 +1,110 @@
 # Bilibili 桌面网页抗卡
 
-长期产品约束见 [GOAL.md](GOAL.md)。视频由 Bilibili 原生下载器在每次出现新的播放器或媒体内容时请求一次 120 秒缓存目标。
+缓解 Bilibili 视频与直播卡顿的 Chrome 扩展。独立第三方工具，与 Bilibili 无隶属或合作关系；Bilibili 及相关名称归其权利人所有。
+
+**简体中文**（本文件） | **English**：[README.en.md](README.en.md)
+
+长期产品约束见 [GOAL.md](GOAL.md)，隐私政策见 [PRIVACY.md](PRIVACY.md)，上架材料在 [store/](store/README.md)。
+
+## 这是什么、给谁用
+
+你在 Bilibili 看视频或直播时经常卡一下，而自己的测速并不慢——本扩展为这种场景设计。它接管播放器的媒体下载：同一份内容同时从 Bilibili 自带的两个镜像地址下载，先到先用；视频页另向原生播放器申请 120 秒缓冲。视频与直播都支持。
+
+它不接管播放：播放、暂停、拖动、倍速、画质、音量与音视频轨的选择仍由你和 Bilibili 播放器决定，扩展不改写、不替换任何 Bilibili 地址。
+
+## 前提假设与局限
+
+三个前提：
+
+1. 卡顿常来自 Bilibili 个别 CDN 节点慢或不稳定，而不是你自己的网络；
+2. Bilibili 自己的播放信息（playurl）已经为同一份内容给出主备多个镜像地址；
+3. 你的带宽高于视频码率，有余量同时下载两份。
+
+它救「慢节点」，救不了「慢线路」：家庭带宽本身不足时帮不上忙，缓冲持续变浅、最终停顿，这种停顿它无法消除。浏览器解码侧造成的卡顿（缓冲已满仍然卡住，例如硬件解码断供）也不在它的能力范围内。
+
+标签页转入后台后 Chrome 停掉视频解码、只留音频，这是浏览器省电行为，扩展不改变也不绕过（见下方[浏览器后台行为](#浏览器后台行为)）。
+
+## 怎么工作
+
+**视频页**（`/video/*` 与 `/list/watchlater*`，两个路由同一套增强）：接管播放器的媒体分片下载（`fetch` 与 XHR 两条通道）。每个 1 MiB 分片同时向 Bilibili 提供的两个镜像地址请求，先完整到达的存入内存并回应播放器，另一路取消；向前预取（窗口最多 48 个分片、并发上限 4）；分片只存内存（每个标签页上限 512 MiB），离开视频路由或关闭页面即释放，不落盘；每次出现新的播放器或媒体内容时，向原生播放器请求一次 120 秒稳定缓冲。
+
+**直播页**（live.bilibili.com）：接管播放器的 FLV 直播流。只配对同一集群的主备两路地址（如 07 对 07b），先比对两路开头的字节一致，再两路同时下载、先到的字节先交给播放器；查无配对或比对不一致时退回播放器原地址单路接管。直播不预取、不设缓冲目标。
+
+两者的下载层失败都会显式报告，不静默退回原生下载。权威行为规格（中文）见下方[下载层](#下载层)；产品约束见 [GOAL.md](GOAL.md)。
+
+## 代价：流量是第一位的
+
+按流量套餐衡量再决定装不装：
+
+- **视频竞速浪费**：竞速中落败一路已下载的字节被丢弃。一次实测稳态浪费约 12.6%（每场播放不同；日志页的 CDN 竞速面板显示当场实际浪费率）。
+- **直播接近两倍流量**：配对后两路一直同时下载，流量接近单路的两倍。
+- **提前下载**：120 秒缓冲目标与预取会把还没看到的数据先下载；提前离开视频页，这些字节就白下了。
+- **内存**：每个标签页的媒体缓存最多约 512 MiB。
+- **磁盘**：本地诊断日志按设计不轮转、不设上限，随使用持续增长（开发者自用浏览器实测：视频页每打开 1 小时约 7 MB）；卸载扩展即全部删除。
+- **开关**：弹窗里的「视频增强」开关只作用于视频页（刷新后生效）；直播页的接管今天没有单独开关——不想承担直播的双倍流量，请在 chrome://extensions 停用本扩展。
+
+![视频页弹窗截图](store/images/screenshot-01-popup-video.png)
+
+## 弹窗（popup）怎么读
+
+弹窗只读、只显示观测事实，不影响播放、不上传：
+
+- **缓冲**：一条缓冲条和「已缓冲 N 秒 / 目标 120 秒」。数值是覆盖当前播放点的连续可播放前向秒数，不是整段视频的缓冲；条到头（120 秒）变绿。
+- **120 秒申请状态**：向播放器申请 120 秒缓存的结果——已生效 / 等待生效 / 播放器不支持 / 申请失败。
+- **下载线路**：本次播放实际用到的每条 CDN 线路（通常两条），每条一个健康词（正常 / 有停滞 / 有错误 / 尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，分别是该线路首字节耗时的 P50 与 P90）。
+- **直播页**同一风格：同样的下载线路卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（未找到备用线路）/ 接管请求失败 / 等待直播数据）；直播没有缓冲条。
+- 不是正在播放的页面：卡片收起，只留一句友好提示。
+
+![弹窗特写](store/images/popup-video.png)
+
+## 安装
+
+**Chrome Web Store**：上架准备中；完成后这里会放商店链接，在那之前请勿相信任何冒称本扩展的安装页。
+
+**从源码加载（未打包）**：需要 Node.js 20+ 与 Chrome/Chromium 120+。
+
+```sh
+npm ci
+npm run build
+```
+
+在 `chrome://extensions` 开启开发者模式，选择 `dist/extension` 加载。仓库已提交可直接加载的 `dist/extension`；源码更新后重新构建并在扩展页点「重新加载」，再刷新已打开的 Bilibili 页面。
+
+## 隐私
+
+数据不离开本机：媒体分片只在内存中转，诊断日志只存在扩展自己的本地数据库，没有上传、遥测或任何外部端点。扩展只申请 `storage` 与 `unlimitedStorage` 两个权限，没有 `tabs`、`downloads` 或 host permission。完整政策见 [PRIVACY.md](PRIVACY.md)（双语）。
+
+## 常见问题
+
+**装了就一定不卡吗？**
+不是。它针对「个别 CDN 节点慢」这一类卡顿；自家带宽不足或浏览器解码跟不上时无能为力（见[前提假设与局限](#前提假设与局限)）。
+
+**为什么后台标签页音频还在放、画面不动？**
+Chrome 对后台标签页停止视频解码（background video track optimization）。切回前台时是页面自己重建播放器，帧计数重新从零开始、缓冲余量塌落后重新回填。这是浏览器行为，扩展不改变也不绕过；详见下方[浏览器后台行为](#浏览器后台行为)。
+
+**缓冲条一直到不了 120 秒？**
+说明带宽跟不上当前码率。扩展能做的是把带宽花在玩家真正需要的下载上，它不能让缓冲在慢线路上停止流失。
+
+**直播能单独关掉吗？**
+今天没有直播单独开关。不想承担直播双倍流量，请在 chrome://extensions 停用整个扩展。
+
+**会动我的播放操作吗？**
+不会。播放、暂停、拖动、倍速、画质、音量与轨道选择仍由你和播放器决定；弹窗只读。
+
+**会上传什么数据？**
+什么都不上传。详见 [PRIVACY.md](PRIVACY.md)。
+
+## 反馈
+
+问题与建议请到 GitHub Issues：https://github.com/chnlich/smooth-bilibili-chrome-plugin/issues
+
+## 许可证
+
+[MIT](LICENSE)。
+
+---
+
+以下为开发者文档。面向用户的内容到此为止；技术规格（下载层、面板行为、后台行为）以本文件中文版为权威来源，[README.en.md](README.en.md) 只作英文概述并链接到此处。
 
 ## 当前行为
 
@@ -37,7 +141,7 @@
 - 下载层库存只列出本次播放实际参与的分轨（`resourceState` 或 `chunks` 中出现过的资源），不展示地址簿里的所有表示（`src/bank/inventory.js:103-107`）；它作为 `bank.inventory` 诊断事件进入开发日志。
 - 日志页提供 CDN 竞速面板，按镜像统计竞速进入、胜出、TTFB P50/P90、停滞与交付字节，并给出配对覆盖率与浪费字节率（`src/diagnostics/logs.js`、`src/diagnostics/worker.js`）。
 
-## 安装
+## 构建
 
 需要 Node.js 20+ 与 Chrome/Chromium 120+：
 
@@ -46,28 +150,18 @@ npm ci
 npm run build
 ```
 
-Windows 上运行真实 Chrome 测试时，从 Windows checkout 执行以下安装和构建命令。它使用系统 Chrome，不下载 Playwright Chromium：
+在 Windows 上运行真实 Chrome 测试时，在 Windows 侧的检出里安装依赖并构建（使用系统 Chrome，不下载 Playwright Chromium）：
 
 ```bat
-cd /d E:\workspace\smooth-bilibili-chrome-plugin
+cd /d <Windows 检出路径>
 set "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1"
-E:\tools\node\npm.cmd install
-E:\tools\node\npm.cmd run build
+npm.cmd install
+npm.cmd run build
 ```
 
-在 `chrome://extensions` 开启开发者模式，选择 `dist/extension` 加载未打包扩展。源代码或构建产物更新后，在扩展页手动点击“重新加载”，再刷新已经打开的 Bilibili 页面。本仓库已提交可直接加载的 `dist/extension`，包括 MV3 service worker、页面桥接、控制器、popup、开发日志页和外部 source map。
+构建保持未压缩，并为每个 JavaScript bundle 生成外部 source map。`buildId` 由 `src` 内容确定性生成；源码不变时连续构建的文件内容、文件列表和 build id 相同。
 
-扩展只申请 `storage` 与 `unlimitedStorage`，没有 `tabs`、`downloads` 或宽泛 host permission。内容脚本会覆盖 `www.bilibili.com` 以便记录无关路由诊断，但视频增强只在批准的两个视频路由启动。
-
-## 偏好与开发日志
-
-popup 的“视频增强”是刷新后的默认开关；关闭后仍会建立 session 并记录诊断，只是不启动视频增强。popup 的“打开开发日志”使用 `chrome.runtime.getURL('logs.html')` 打开扩展页，不需要新增权限。
-
-日志页可选“当前 session”或“全部 session”。点击导出后先固定最大 `eventId`，由用户在 File System Access 对话框选择文件；JSONL 先写 `recordType: "session"`，再分页写 `recordType: "event"`，逐行等待写入，不一次性加载全部日志。取消或写入失败会明确显示并中止文件句柄。
-
-日志记录包括独立记录身份、连续编号、播放器和媒体来源的更换记录、所有实际触发的标准媒体事件（包括 `volumechange`）、每秒完整 buffered/seekable ranges、120 秒提示、桥接错误、生命周期和保存失败/降级结果。下载层事件还记录媒体镜像主机与命中耗时。日志不上传，不保存 Cookie、账号、页面文字、聊天、API body、签名 query、媒体字节、帧或截图。
-
-## 构建与验证
+## 测试与验证
 
 ```sh
 npm test
@@ -76,9 +170,9 @@ npm audit --json
 npm audit --omit=dev --json
 ```
 
-构建保持未压缩，并为每个 JavaScript bundle 生成外部 source map。`buildId` 由 `src` 内容确定性生成；源码不变时连续构建的文件内容、文件列表和 build id 相同。现有确定性浏览器测试仍使用新建的临时 profile。所有自动化浏览器都保持 `--mute-audio` 和 document-start 静音 guard；真实 Bilibili 页面受环境阻挡时只报告 `BLOCKED`，不伪造通过。
+现有确定性浏览器测试仍使用新建的临时 profile。所有自动化浏览器都保持 `--mute-audio` 和 document-start 静音 guard；真实 Bilibili 页面受环境阻挡时只报告 `BLOCKED`，不伪造通过。
 
-浏览器脚本明确使用系统 Chrome，不回退到 Playwright Chromium。默认路径是 `C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`，也可以用 `BILIBILI_E2E_CHROME` 覆盖。`npm run test:e2e` 使用临时 profile；真实播放验收使用 `npm run verify:browser -- --profile <专用登录 profile> --bv <BV号>`。验证输出目录包含 `events.json`、`console.json`、`network.json` 和 `summary.json`；`summary.json` 会记录 commit sha、buildId，以及 `pass`、`fail` 或 `INCONCLUSIVE` 和失败项。
+浏览器脚本明确使用系统 Chrome（可执行文件可用 `BILIBILI_E2E_CHROME` 环境变量指定，默认取系统安装路径），不回退到 Playwright Chromium。`npm run test:e2e` 使用临时 profile；真实播放验收使用 `npm run verify:browser -- --profile <专用登录 profile> --bv <BV号>`。验证输出目录包含 `events.json`、`console.json`、`network.json` 和 `summary.json`；`summary.json` 会记录 commit sha、buildId，以及 `pass`、`fail` 或 `INCONCLUSIVE` 和失败项。
 
 Playwright 启动的 Chrome 无法产生后台标签页：同窗口切换标签页、以及用 `Browser.setWindowBounds` 最小化窗口（已确认生效），页面都仍报 `visibilityState: 'visible'`，页面自身也收不到 `visibilitychange`；去掉 Playwright 默认传入的 `--disable-backgrounding-occluded-windows`、`--disable-renderer-backgrounding`、`--disable-background-timer-throttling` 三个参数亦无效。需要验证后台相关行为时，自行启动 Chrome 并用原生 CDP 驱动，通过 DevTools HTTP 端点的 `/json/activate/<targetId>` 切换标签页，并在每个阶段断言 `document.hidden`。
 
