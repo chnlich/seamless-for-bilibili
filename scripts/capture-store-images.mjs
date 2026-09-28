@@ -28,6 +28,7 @@ import { chromium } from 'playwright';
 import { findAvailablePort } from './browser-runtime.mjs';
 import { readStoredEvents } from './extension-log-pull.mjs';
 import { installUnpackedExtension } from './install-unpacked-extension.mjs';
+import { assertInkPainted, decodePngFile } from './png-pixels.mjs';
 import { readProvenance } from './provenance.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -105,6 +106,24 @@ function popupReadout() {
     notice: text('[data-notice]'),
     bodyReady: document.body?.dataset?.ready ?? null,
     lines,
+  };
+}
+
+// Layout facts for the capture self-check, read in the popup target. The footer link is
+// the element the 63950b9 captures silently dropped, so its rect is recorded in
+// report.json and verified against the written PNG's pixels.
+function popupGeometry() {
+  const link = document.querySelector('[data-open-logs]');
+  const rect = link?.getBoundingClientRect()?.toJSON() ?? null;
+  return {
+    scrollWidth: document.documentElement.scrollWidth,
+    scrollHeight: document.documentElement.scrollHeight,
+    clientWidth: document.documentElement.clientWidth,
+    clientHeight: document.documentElement.clientHeight,
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    devicePixelRatio: window.devicePixelRatio,
+    linkRect: rect,
   };
 }
 
@@ -270,14 +289,40 @@ async function withPopup(raw, extensionId, wakerTarget, scenarioBudget, run) {
   }
 }
 
+// Captures the whole popup document, then proves on the written PNG that the footer log
+// link actually carries ink. The clip alone proves nothing: the capture clips the
+// document's scrollWidth x scrollHeight, and when the popup window's viewport is smaller
+// than its document, the strip below the viewport is never painted - Page.captureScreenshot
+// returns it as flat background (the 63950b9 video popup shipped exactly that, with the
+// link region blank). Chrome renders nothing beyond a popup's surface: measured on Chrome
+// 154, captureBeyondViewport is ignored on the popup target, Emulation.setDeviceMetricsOverride
+// is rejected ("Target does not support metrics override") and the popup has no
+// Browser window handle to resize. The painted area IS the popup viewport, so the run
+// only continues when the whole document, footer link included, lies inside the viewport;
+// the ink check on the written image is the final evidence.
 async function popupScreenshot({ raw, sessionId }, target) {
-  const { result } = await raw.send('Runtime.evaluate', {
-    expression: 'JSON.stringify({w: document.documentElement.scrollWidth, h: document.documentElement.scrollHeight})',
-    returnByValue: true,
-  }, sessionId);
-  const { w, h } = JSON.parse(result.value);
+  const geometry = await popupEvaluate({ raw, sessionId }, popupGeometry);
+  const { w, h } = { w: geometry.scrollWidth, h: geometry.scrollHeight };
   if (!Number.isFinite(w) || !Number.isFinite(h) || w < 300 || h < 300) {
     throw new Error(`popup document has no real size (${w}x${h}); refusing to capture an empty popup`);
+  }
+  if (geometry.linkRect === null || geometry.linkRect.width <= 0 || geometry.linkRect.height <= 0) {
+    throw new Error(`popup footer log link has no box: ${JSON.stringify(geometry.linkRect)}; the footer is missing from the document`);
+  }
+  if (geometry.linkRect.bottom > h + 0.5 || geometry.linkRect.top < -0.5) {
+    throw new Error(`popup footer log link lies outside the document: link ${JSON.stringify(geometry.linkRect)}, document height ${h}`);
+  }
+  if (geometry.clientWidth < w || geometry.clientHeight < h) {
+    throw new Error(
+      `the popup viewport (${geometry.clientWidth}x${geometry.clientHeight}) is smaller than`
+      + ` the document (${w}x${h}); the strip below the viewport would be captured unpainted`
+      + ` (inner ${geometry.innerWidth}x${geometry.innerHeight}, devicePixelRatio ${geometry.devicePixelRatio}).`
+      + ' The popup window is clamped by the screen edge: move the browser window up or free screen space,'
+      + ' never ship the clipped capture',
+    );
+  }
+  if (geometry.linkRect.bottom > geometry.clientHeight + 0.5) {
+    throw new Error(`the footer log link (${JSON.stringify(geometry.linkRect)}) sits below the popup viewport (${geometry.clientHeight}); it would be captured unpainted`);
   }
   const capture = await raw.send('Page.captureScreenshot', {
     format: 'png',
@@ -290,7 +335,10 @@ async function popupScreenshot({ raw, sessionId }, target) {
   if (size.width !== w * 2 || size.height !== h * 2) {
     throw new Error(`popup capture ${written} is ${size.width}x${size.height}, expected 2x device pixels of the ${w}x${h} document`);
   }
-  return { path: written, ...size };
+  const scale = size.width / w;
+  const ink = assertInkPainted({ png: await decodePngFile(written), rect: geometry.linkRect, scale });
+  log('ink check', path.basename(target), JSON.stringify({ linkRect: geometry.linkRect, ...ink }));
+  return { path: written, ...size, geometry, ink };
 }
 
 async function popupEvaluate({ raw, sessionId }, fn) {
@@ -431,7 +479,13 @@ const chromeArguments = [
   '--lang=zh-CN',
   '--force-device-scale-factor=2',
   '--window-size=1320,880',
-  '--window-position=40,40',
+  // The popup must fit below the toolbar without being clamped by the screen edge:
+  // --force-device-scale-factor=2 halves Chrome's perceived screen (1920x1080 reads as
+  // 960x540 with 516 available), and at window y=40 the popup anchor sits at ~116, so
+  // Chrome clamped the popup window to 396 CSS px while the document is 435 and the
+  // footer link (y 400.5-423) fell below the painted surface - the 63950b9 defect.
+  // y=0 lifts the anchor to ~76 and leaves 440 CSS px of room.
+  '--window-position=0,0',
   '--no-first-run',
   '--no-default-browser-check',
   `--user-data-dir=${profileDirectory}`,
@@ -532,7 +586,9 @@ try {
     readout: video.readout,
     darkReadout: video.darkReadout,
     lightPath: video.light.path,
+    lightGeometry: video.light.geometry,
     darkPath: video.dark.path,
+    darkGeometry: video.dark.geometry,
     pagePath: video.pagePath,
     sessionId: videoSessionId,
     takeoverActive: videoEvents.some((event) => event.code === 'bank.serve' && event.data?.result === 'hit'),
@@ -575,7 +631,9 @@ try {
     readout: live.readout,
     darkReadout: live.darkReadout,
     lightPath: live.light.path,
+    lightGeometry: live.light.geometry,
     darkPath: live.dark.path,
+    darkGeometry: live.dark.geometry,
     pagePath: live.pagePath,
     sessionId: liveSessionId,
     takeoverActive: liveOwn.some((event) => event.code === 'bank.serve' && event.data?.result === 'hit'),
