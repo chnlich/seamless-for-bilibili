@@ -32,6 +32,7 @@ const bufferRefs = {
   goal: document.querySelector('[data-buffer-goal]'),
   note: document.querySelector('[data-buffer-note]'),
   targetLabel: document.querySelector('[data-buffer-target-label]'),
+  targetValue: document.querySelector('[data-target-value]'),
   stateLine: document.querySelector('[data-status-field="state"]'),
   errorLine: errorLineElement,
 };
@@ -297,6 +298,7 @@ void loadPreferences().catch((error) => {
   showNotice(NO_PAGE_MESSAGES.preferenceFailed);
 });
 
+showNotice(NO_PAGE_MESSAGES.loading);
 renderAll();
 void refresh();
 const pollTimer = setInterval(() => {

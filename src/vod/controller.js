@@ -4,8 +4,6 @@ import { MediaEventRecorder } from '../diagnostics/media.js';
 import { UNKNOWN_VALUE } from '../diagnostics/privacy.js';
 import { computeForwardInventory, copyTimeRanges } from './buffer.js';
 
-const WAITING_MESSAGE = '等待播放器和视频就绪';
-
 function createLogger() {
   return {
     warn(...args) {
@@ -63,7 +61,7 @@ export class VodBufferController {
     this.coreInstance = 0;
     this.mediaRecorder = undefined;
     this.hintState = 'WAITING';
-    this.message = WAITING_MESSAGE;
+    this.message = '';
     this.reconcileTimer;
     this.statusTimer;
     this.bufferSamplerTimer;
@@ -111,7 +109,7 @@ export class VodBufferController {
     const source = currentVideoSource(this.video);
     if (source === '') {
       this.hintState = 'WAITING';
-      this.message = WAITING_MESSAGE;
+      this.message = '';
       this.updateStatus();
       return;
     }
@@ -129,7 +127,7 @@ export class VodBufferController {
       const currentSource = currentVideoSource(this.video);
       if (currentSource === '' || currentSource !== core.snapshot.source) {
         this.hintState = 'WAITING';
-        this.message = WAITING_MESSAGE;
+        this.message = '';
         this.updateStatus();
         return;
       }
@@ -170,7 +168,7 @@ export class VodBufferController {
       }
       if (isWaitingForBridge(error)) {
         this.hintState = 'WAITING';
-        this.message = WAITING_MESSAGE;
+        this.message = '';
       } else {
         const normalized = toBufferScriptError(error, 'VOD_RECONCILE_FAILED', '视频播放器内核刷新失败');
         this.logger.error('视频播放器内核刷新失败', normalized);
@@ -219,7 +217,7 @@ export class VodBufferController {
         this.currentCore = undefined;
         this.currentSource = '';
         this.hintState = 'WAITING';
-        this.message = WAITING_MESSAGE;
+        this.message = '';
         return;
       }
       const normalized = toBufferScriptError(error, 'VOD_STABLE_BUFFER_FAILED', '原生缓存提示调用失败');

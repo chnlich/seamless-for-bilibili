@@ -43,6 +43,7 @@ function popupRefs(document) {
     goal: document.querySelector('[data-buffer-goal]'),
     note: document.querySelector('[data-buffer-note]'),
     targetLabel: document.querySelector('[data-buffer-target-label]'),
+    targetValue: document.querySelector('[data-target-value]'),
     stateLine: document.querySelector('[data-status-field="state"]'),
     errorLine: document.querySelector('[data-status-field="error"]'),
   };
@@ -152,7 +153,8 @@ test('buffer renders seconds ahead against the 120-second target on a bar', () =
   assert.equal(refs.fill.style.width, '67%');
   assert.equal(refs.bar.classList.contains('reached'), false);
   assert.equal(refs.note.hidden, true);
-  assert.equal(refs.stateLine.textContent, '已生效');
+  assert.equal(refs.targetValue.textContent, '已生效');
+  assert.equal(refs.stateLine.hidden, false);
   assert.equal(refs.targetLabel.textContent, '已向播放器申请 120 秒缓存');
 });
 

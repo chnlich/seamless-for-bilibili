@@ -296,7 +296,7 @@ export class ExtensionCoordinator {
       modeForLocation(this.windowObject.location) === mode);
     panel.setModel({
       state: 'WAITING',
-      error: '等待播放器和视频就绪',
+      error: '',
     });
     this.diagnostics?.log('preference.changed', { name: EXTENSION_PREFERENCES.vodEnabled, enabled: true });
     const routeStillCurrent = () =>

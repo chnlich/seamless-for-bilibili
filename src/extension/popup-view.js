@@ -3,6 +3,7 @@
 // 这里不做任何网络请求，也不影响播放。
 
 export const NO_PAGE_MESSAGES = Object.freeze({
+  loading: '正在读取页面状态…',
   noTab: '请先打开一个 Bilibili 页面，再打开本面板。',
   noReceiver: '这个页面没有运行 Bilibili 增强。请打开 Bilibili 的视频或直播页面。',
   readFailed: '读取页面状态失败，请稍后重开面板。',
@@ -118,7 +119,7 @@ export function renderBuffer(
     refs.note.textContent = '当前页面没有在播放的视频';
   }
   refs.targetLabel.textContent = targetLabel;
-  refs.stateLine.textContent = stateText;
+  refs.targetValue.textContent = stateText;
   refs.stateLine.hidden = stateText === undefined || stateText === '';
 }
 

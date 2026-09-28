@@ -603,7 +603,7 @@
   }
 
   // src/build-id.js
-  var BUILT_BUILD_ID = true ? "src-f355c81dbec59a007f7e4131" : "source-build";
+  var BUILT_BUILD_ID = true ? "src-a1ea83a5d9d7962c5693421f" : "source-build";
   function readBuildId() {
     return BUILT_BUILD_ID;
   }
@@ -1657,7 +1657,6 @@
   }
 
   // src/vod/controller.js
-  var WAITING_MESSAGE = "等待播放器和视频就绪";
   function createLogger() {
     return {
       warn(...args) {
@@ -1712,7 +1711,7 @@
       this.coreInstance = 0;
       this.mediaRecorder = void 0;
       this.hintState = "WAITING";
-      this.message = WAITING_MESSAGE;
+      this.message = "";
       this.reconcileTimer;
       this.statusTimer;
       this.bufferSamplerTimer;
@@ -1758,7 +1757,7 @@
       const source = currentVideoSource(this.video);
       if (source === "") {
         this.hintState = "WAITING";
-        this.message = WAITING_MESSAGE;
+        this.message = "";
         this.updateStatus();
         return;
       }
@@ -1776,7 +1775,7 @@
         const currentSource2 = currentVideoSource(this.video);
         if (currentSource2 === "" || currentSource2 !== core.snapshot.source) {
           this.hintState = "WAITING";
-          this.message = WAITING_MESSAGE;
+          this.message = "";
           this.updateStatus();
           return;
         }
@@ -1817,7 +1816,7 @@
         }
         if (isWaitingForBridge(error)) {
           this.hintState = "WAITING";
-          this.message = WAITING_MESSAGE;
+          this.message = "";
         } else {
           const normalized = toBufferScriptError(error, "VOD_RECONCILE_FAILED", "视频播放器内核刷新失败");
           this.logger.error("视频播放器内核刷新失败", normalized);
@@ -1865,7 +1864,7 @@
           this.currentCore = void 0;
           this.currentSource = "";
           this.hintState = "WAITING";
-          this.message = WAITING_MESSAGE;
+          this.message = "";
           return;
         }
         const normalized = toBufferScriptError(error, "VOD_STABLE_BUFFER_FAILED", "原生缓存提示调用失败");
@@ -2708,7 +2707,7 @@
       panel.setFreshnessCheck(() => generation === this.routeGeneration && !this.destroyed && !routeAbort.signal.aborted && this.active?.panel === panel && this.routeKey === href && this.windowObject.location.href === href && modeForLocation(this.windowObject.location) === mode);
       panel.setModel({
         state: "WAITING",
-        error: "等待播放器和视频就绪"
+        error: ""
       });
       this.diagnostics?.log("preference.changed", { name: EXTENSION_PREFERENCES.vodEnabled, enabled: true });
       const routeStillCurrent = () => generation === this.routeGeneration && !this.destroyed && !routeAbort.signal.aborted && href === this.windowObject.location.href && mode === modeForLocation(this.windowObject.location) && this.active?.panel === panel;

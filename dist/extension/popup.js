@@ -93,6 +93,7 @@
 
   // src/extension/popup-view.js
   var NO_PAGE_MESSAGES = Object.freeze({
+    loading: "正在读取页面状态…",
     noTab: "请先打开一个 Bilibili 页面，再打开本面板。",
     noReceiver: "这个页面没有运行 Bilibili 增强。请打开 Bilibili 的视频或直播页面。",
     readFailed: "读取页面状态失败，请稍后重开面板。",
@@ -185,7 +186,7 @@
       refs.note.textContent = "当前页面没有在播放的视频";
     }
     refs.targetLabel.textContent = targetLabel;
-    refs.stateLine.textContent = stateText;
+    refs.targetValue.textContent = stateText;
     refs.stateLine.hidden = stateText === void 0 || stateText === "";
   }
   function renderCdnLines(documentObject, container, { rows, message } = {}) {
@@ -240,6 +241,7 @@
     goal: document.querySelector("[data-buffer-goal]"),
     note: document.querySelector("[data-buffer-note]"),
     targetLabel: document.querySelector("[data-buffer-target-label]"),
+    targetValue: document.querySelector("[data-target-value]"),
     stateLine: document.querySelector('[data-status-field="state"]'),
     errorLine: errorLineElement
   };
@@ -482,6 +484,7 @@
     console.error("[BilibiliBuffer] Popup 读取设置失败", error);
     showNotice(NO_PAGE_MESSAGES.preferenceFailed);
   });
+  showNotice(NO_PAGE_MESSAGES.loading);
   renderAll();
   void refresh();
   var pollTimer = setInterval(() => {
