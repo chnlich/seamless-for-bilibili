@@ -37,7 +37,8 @@ const extensionDirectory = path.join(root, 'dist', 'extension');
 const outDir = path.join(root, 'store-images-raw');
 await fs.mkdir(outDir, { recursive: true });
 
-const chromeExecutablePath = process.env.BILIBILI_E2E_CHROME;
+// cmd.exe's `set VAR=value && next` keeps the space before && in the value; trim it.
+const chromeExecutablePath = process.env.BILIBILI_E2E_CHROME?.trim();
 if (chromeExecutablePath === undefined || chromeExecutablePath.length === 0) {
   throw new Error('set BILIBILI_E2E_CHROME to the Chrome executable; no silent fallback');
 }
@@ -406,7 +407,7 @@ const provenance = await readProvenance({
 const profileDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'bilibili-store-shots-profile-'));
 const report = {
   provenance: {
-    commitSha: process.env.BILIBILI_E2E_COMMIT_SHA ?? provenance.commitSha,
+    commitSha: process.env.BILIBILI_E2E_COMMIT_SHA?.trim() ?? provenance.commitSha,
     commitShaReason: provenance.commitShaReason,
     buildId: provenance.buildId,
     profileDirectory,
