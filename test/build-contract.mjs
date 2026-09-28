@@ -167,6 +167,10 @@ assert.deepEqual(manifest.content_scripts, [
 assert.equal(manifest.permissions.includes('tabs'), false);
 assert.equal(manifest.permissions.includes('downloads'), false);
 assert.equal(manifest.action.default_popup, 'popup.html');
+const EXPECTED_ICONS = { 16: 'icon16.png', 32: 'icon32.png', 48: 'icon48.png', 128: 'icon128.png' };
+assert.deepEqual(manifest.icons, EXPECTED_ICONS);
+assert.deepEqual(manifest.action.default_icon, EXPECTED_ICONS);
+assert.match(manifest.description, /^.{1,132}$/u);
 const buildId = extractBuildId([controller, worker]);
 assert.equal(buildId, secondBuild.buildId);
 
@@ -175,6 +179,10 @@ const expectedFiles = [
   'bank.js.map',
   'controller.js',
   'controller.js.map',
+  'icon128.png',
+  'icon16.png',
+  'icon32.png',
+  'icon48.png',
   'logs.css',
   'logs.html',
   'logs.js',
@@ -192,6 +200,11 @@ const expectedFiles = [
   'worker.js.map',
 ];
 assert.deepEqual((await fs.readdir(extensionDirectory)).sort(), expectedFiles);
+for (const [name, size] of Object.entries({ 'icon16.png': 16, 'icon32.png': 32, 'icon48.png': 48, 'icon128.png': 128 })) {
+  const png = await fs.readFile(path.join(extensionDirectory, name));
+  assert.equal(png.readUInt32BE(16), size, `${name} 宽度应为 ${size}`);
+  assert.equal(png.readUInt32BE(20), size, `${name} 高度应为 ${size}`);
+}
 for (const bundle of ['bank.js', 'controller.js', 'main-bridge.js', 'source-buffer-shim.js', 'popup.js', 'worker.js', 'logs.js']) {
   assert.match(await fs.readFile(path.join(extensionDirectory, `${bundle}.map`), 'utf8'), /"sources"/);
   assert.match(await fs.readFile(path.join(extensionDirectory, bundle), 'utf8'), /sourceMappingURL/);

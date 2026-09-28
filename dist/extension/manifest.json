@@ -2,16 +2,28 @@
   "manifest_version": 3,
   "name": "Bilibili 桌面网页抗卡",
   "version": "1.0.0",
-  "description": "视频原生 120 秒缓存提示增强",
+  "description": "接管 Bilibili 视频页的媒体分片下载，向播放器请求 120 秒缓冲来减少卡顿；全部在本机内存完成，不改动播放控制。",
   "minimum_chrome_version": "120",
   "permissions": [
     "storage",
     "unlimitedStorage"
   ],
   "host_permissions": [],
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
   "action": {
     "default_title": "Bilibili 抗卡设置",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "32": "icon32.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
   },
   "background": {
     "service_worker": "worker.js"

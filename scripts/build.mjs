@@ -85,6 +85,10 @@ for (const asset of ['popup.html', 'popup.css', 'logs.html', 'logs.css']) {
   await fs.copyFile(path.join(sourceDirectory, 'extension', asset), path.join(extensionDirectory, asset));
 }
 
+for (const icon of ['icon16.png', 'icon32.png', 'icon48.png', 'icon128.png']) {
+  await fs.copyFile(path.join(sourceDirectory, 'extension', 'icons', icon), path.join(extensionDirectory, icon));
+}
+
 await fs.writeFile(
   path.join(extensionDirectory, 'manifest.json'),
   `${JSON.stringify(createManifest(), null, 2)}\n`,

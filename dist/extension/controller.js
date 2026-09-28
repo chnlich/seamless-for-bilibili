@@ -603,7 +603,7 @@
   }
 
   // src/build-id.js
-  var BUILT_BUILD_ID = true ? "src-a1ea83a5d9d7962c5693421f" : "source-build";
+  var BUILT_BUILD_ID = true ? "src-70c8b47fafdc70739c324f04" : "source-build";
   function readBuildId() {
     return BUILT_BUILD_ID;
   }

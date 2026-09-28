@@ -35,6 +35,9 @@ test('manifest is MV3 with only storage permissions, unlimited diagnostic storag
   assert.equal(manifest.options_page, undefined);
   assert.equal(manifest.permissions.includes('tabs'), false);
   assert.equal(manifest.permissions.includes('downloads'), false);
+  assert.deepEqual(manifest.icons, { 16: 'icon16.png', 32: 'icon32.png', 48: 'icon48.png', 128: 'icon128.png' });
+  assert.deepEqual(manifest.action.default_icon, manifest.icons);
+  assert.ok([...manifest.description].length <= 132);
 });
 
 test('video route selection has one behavior for video and Watch Later only', () => {

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!--
+    Original icon for the Bilibili anti-stutter extension (this repository).
+    Deliberately NOT derived from any Bilibili logo, mascot, or brand mark:
+    a violet-indigo badge, a white play triangle, and a mostly-full buffer bar.
+    Artwork occupies the central 96x96 box; 16px transparent padding per the
+    Chrome Web Store icon guidance (developer.chrome.com/docs/webstore/images).
+  -->
+  <defs>
+    <linearGradient id="bg" x1="24" y1="16" x2="104" y2="112" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7C3AED"/>
+      <stop offset="1" stop-color="#4F46E5"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="96" height="96" rx="26" fill="url(#bg)"/>
+  <path d="M53 40 L53 74 L82 57 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="10" stroke-linejoin="round"/>
+  <rect x="42" y="84" width="48" height="10" rx="5" fill="#FFFFFF" opacity="0.45"/>
+  <rect x="42" y="84" width="34" height="10" rx="5" fill="#FFFFFF"/>
+</svg>

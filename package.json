@@ -6,6 +6,8 @@
   "description": "Bilibili native video buffering Manifest V3 extension",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "icons": "node scripts/generate-icons.mjs",
+    "package": "npm run build && npm run test:contract && node scripts/package.mjs",
     "test:unit": "node --test test/unit.test.mjs test/extension-unit.test.mjs test/idb-unit.test.mjs test/source-buffer-shim-unit.test.mjs test/bank-unit.test.mjs test/browser-harness-unit.test.mjs test/inventory-unit.test.mjs test/readouts-unit.test.mjs test/popup-unit.test.mjs",
     "test:contract": "node test/build-contract.mjs",
     "test:e2e": "node scripts/browser-e2e.mjs",
@@ -13,8 +15,9 @@
     "verify:browser": "node scripts/verify.mjs",
     "test": "npm run build && npm run test:unit && npm run test:contract && npm run test:e2e"
   },
-  "dependencies": {},
   "devDependencies": {
+    "@resvg/resvg-js": "2.6.2",
+    "adm-zip": "0.6.1",
     "esbuild": "0.25.9",
     "jsdom": "30.0.1",
     "playwright": "1.55.1"
