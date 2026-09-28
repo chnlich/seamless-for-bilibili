@@ -156,11 +156,12 @@ export function renderCdnLines(documentObject, container, { rows, message } = {}
 
 export function liveTakeoverText(facts) {
   if (!facts || facts.serveCount === 0) return '等待直播数据';
-  const latest = facts.latestServe;
-  if (latest?.klass === 'engaged') {
-    return latest.pairedAddressAvailable === true ? '正在按两条线路竞速下载' : '单路接管（未找到备用线路）';
+  if (facts.engagedCount > 0) {
+    if (facts.pairedAddressAvailable && !facts.pairRejected) return '正在按两条线路竞速下载';
+    // 未配到备用线路，或备用线路前缀比对不一致被撤销，都只剩播放器所名的一路。
+    return '单路接管（无可用备用线路）';
   }
-  if (latest?.klass === 'failed') return '接管请求失败';
-  // 放行事件（例如播放器未用 FLV 流）不能谎报成接管。
+  if (facts.failedCount > 0) return '接管请求失败';
+  // 只有放行事件（例如播放器未用 FLV 流）时，接管从未介入，不能谎报成接管。
   return '未接管（未发现 FLV 直播流）';
 }

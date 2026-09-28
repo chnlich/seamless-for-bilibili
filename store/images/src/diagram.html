@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
+<style>
+  body { width: 1280px; height: 800px; overflow: hidden; background: #f8fafc; padding: 0; }
+  .wrap { padding: 48px 64px 0; }
+  h1 { margin: 0 0 8px; font-size: 38px; font-weight: 700; }
+  .sub { margin: 0 0 28px; color: #5b6472; font-size: 19px; }
+  .flow { display: flex; align-items: stretch; gap: 0; margin-bottom: 26px; }
+  .node {
+    border-radius: 14px; padding: 18px 20px; min-width: 210px;
+    background: #fff; border: 1px solid #dfe4ea; box-shadow: 0 6px 18px rgba(31,41,51,.06);
+  }
+  .node h2 { margin: 0 0 6px; font-size: 21px; }
+  .node p { margin: 0; color: #5b6472; font-size: 15px; line-height: 1.55; }
+  .node.player { border-top: 4px solid #3b82f6; }
+  .node.bank { border-top: 4px solid #7c3aed; min-width: 260px; }
+  .arrows { display: flex; flex-direction: column; justify-content: center; gap: 34px; padding: 0 14px; }
+  .arrow { display: flex; align-items: center; gap: 8px; font-size: 15px; color: #39424e; white-space: nowrap; }
+  .arrow .shaft { width: 54px; height: 0; border-top: 3px solid #9aa6b2; position: relative; }
+  .arrow .shaft::after {
+    content: ''; position: absolute; right: -2px; top: -7px;
+    border-left: 12px solid #9aa6b2; border-top: 6px solid transparent; border-bottom: 6px solid transparent;
+  }
+  .mirrors { display: flex; flex-direction: column; gap: 16px; justify-content: center; }
+  .mirror { border-radius: 12px; padding: 14px 18px; border: 1px solid #dfe4ea; background: #fff; }
+  .mirror.win { border-color: #16a34a; background: #f0fdf4; }
+  .mirror.lose { border-color: #e5e7eb; background: #f8f8f8; color: #6b7280; }
+  .mirror h3 { margin: 0 0 4px; font-size: 18px; }
+  .mirror p { margin: 0; font-size: 14px; color: #5b6472; }
+  .buffer {
+    margin: 0 64px 22px; border-radius: 14px; background: #fff; border: 1px solid #dfe4ea;
+    padding: 16px 20px; box-shadow: 0 6px 18px rgba(31,41,51,.06);
+  }
+  .buffer h2 { margin: 0 0 10px; font-size: 20px; }
+  .bar { height: 18px; border-radius: 999px; background: #e3e6ea; overflow: hidden; position: relative; }
+  .bar .fill { height: 100%; width: 96%; background: #16a34a; border-radius: 999px; }
+  .bar .scale {
+    position: absolute; top: -5px; bottom: -5px; left: 96%; width: 3px; background: #1f2933; border-radius: 2px;
+  }
+  .bar-row { display: flex; justify-content: space-between; margin-top: 8px; color: #5b6472; font-size: 15px; }
+  .costs { display: flex; gap: 18px; margin: 0 64px; }
+  .cost {
+    flex: 1; border-radius: 12px; border: 1px solid #f0d9d9; background: #fdf7f7;
+    padding: 14px 18px; font-size: 15px; line-height: 1.6; color: #4b3a3a;
+  }
+  .cost b { display: block; font-size: 16px; margin-bottom: 4px; color: #7a2e2e; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>它是怎么工作的</h1>
+    <p class="sub">扩展只接管下载：同一分片同时向 Bilibili 自带的两个镜像请求，先完整到达的交给播放器。</p>
+    <div class="flow">
+      <div class="node player">
+        <h2>Bilibili 原生播放器</h2>
+        <p>播放、画质、倍速等一切操作保持不变</p>
+      </div>
+      <div class="arrows">
+        <div class="arrow"><span>请求分片</span><span class="shaft"></span></div>
+        <div class="arrow"><span>字节供给</span><span class="shaft" style="transform: scaleX(-1);"></span></div>
+      </div>
+      <div class="node bank">
+        <h2>扩展下载层</h2>
+        <p>内存分片库（每标签页 ≤ 512 MiB，不落盘）</p>
+      </div>
+      <div class="arrows">
+        <div class="arrow"><span>同时请求</span><span class="shaft"></span></div>
+      </div>
+      <div class="mirrors">
+        <div class="mirror win">
+          <h3>镜像 A（先到）</h3>
+          <p>完整到达 → 交给播放器 ✓</p>
+        </div>
+        <div class="mirror lose">
+          <h3>镜像 B（落败）</h3>
+          <p>已读字节丢弃 —— 竞速的流量代价（一次实测稳态约 12.6%）</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="buffer">
+    <h2>120 秒缓冲目标（视频页）</h2>
+    <div class="bar"><div class="fill"></div><div class="scale"></div></div>
+    <div class="bar-row"><span>已缓冲</span><span>目标 120 秒 · 到达后缓冲条变绿</span></div>
+  </div>
+  <div class="costs">
+    <div class="cost"><b>流量代价（装前必读）</b>竞速落败一路的字节被丢弃；直播配对后两路同下，接近两倍流量。</div>
+    <div class="cost"><b>提前下载</b>120 秒缓冲与预取会先下载未观看的数据；提前离开页面这些字节不退回。</div>
+    <div class="cost"><b>本地日志</b>诊断日志只存本机、不轮转（实测视频页每小时约 7 MB），卸载即删除。</div>
+  </div>
+</body>
+</html>

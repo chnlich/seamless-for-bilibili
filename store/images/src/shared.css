@@ -1,0 +1,20 @@
+/* Shared palette/typography for the store image sources (matches src/extension/popup.css). */
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --text: #1f2933;
+  --muted: #66727f;
+  --line: #e3e6ea;
+  --fill: #3b82f6;
+  --fill-reached: #16a34a;
+  --brand-a: #7c3aed;
+  --brand-b: #4f46e5;
+  --ok: #15803d;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}

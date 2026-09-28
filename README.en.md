@@ -54,7 +54,7 @@ The popup is read-only: it shows observed facts, affects no playback, and upload
 - **Buffer**: a bar and the line "已缓冲 N 秒 / 目标 120 秒" (N seconds buffered / 120-second target). The number is the continuous playable forward range covering the current playhead, not the whole video's buffer; the bar turns green when the 120-second target is reached.
 - **120-second request state**: the result of asking the player for the 120-second buffer — 已生效 (applied) / 等待生效 (waiting) / 播放器不支持 (player does not support it) / 申请失败 (request failed).
 - **Download lines**: every CDN line this playback actually used (usually two), each with a health word (正常 normal / 有停滞 stalled / 有错误 errors / 尚无数据 no data yet) and connection times ("通常 X 毫秒 · 慢时 Y 毫秒" — the line's first-byte latency P50 and P90).
-- **Live pages** use the same layout: the same download-lines card plus one live-takeover line (正在按两条线路竞速下载 racing on two lines / 单路接管（未找到备用线路） single leg, no backup found / 接管请求失败 takeover request failed / 未接管（未发现 FLV 直播流） not taken over, no FLV live stream found / 等待直播数据 waiting for live data). Live has no buffer bar.
+- **Live pages** use the same layout: the same download-lines card plus one live-takeover line (正在按两条线路竞速下载 racing on two lines / 单路接管（无可用备用线路） single leg, no backup found / 接管请求失败 takeover request failed / 未接管（未发现 FLV 直播流） not taken over, no FLV live stream found / 等待直播数据 waiting for live data). Live has no buffer bar.
 - On a page that is not playing, the cards fold away and a single friendly hint remains.
 
 ![Popup close-up](store/images/popup-video.png)

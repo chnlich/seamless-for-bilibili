@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
+<style>
+  body {
+    width: 1400px; height: 560px; overflow: hidden; position: relative; color: #fff;
+    background: linear-gradient(135deg, #6d28d9 0%, #4f46e5 55%, #4338ca 100%);
+  }
+  .glow1 { position: absolute; width: 900px; height: 900px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,255,255,.14), transparent 60%); right: -220px; top: -320px; }
+  .glow2 { position: absolute; width: 700px; height: 700px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,255,255,.08), transparent 60%); left: -200px; bottom: -320px; }
+  .row { position: absolute; inset: 0; display: flex; align-items: center; gap: 46px; padding: 0 90px; }
+  .icon { width: 200px; height: 200px; flex: none; filter: drop-shadow(0 14px 34px rgba(0,0,0,.4)); }
+  .text h1 { margin: 0 0 18px; font-size: 64px; font-weight: 700; letter-spacing: 1px; }
+  .text .tag { margin: 0 0 26px; font-size: 26px; color: rgba(255,255,255,.92); }
+  .chips { display: flex; gap: 16px; }
+  .chip {
+    padding: 12px 22px; border-radius: 999px; font-size: 22px;
+    background: rgba(255,255,255,.13); border: 1px solid rgba(255,255,255,.4);
+  }
+  .fine { position: absolute; left: 90px; bottom: 44px; font-size: 18px; color: rgba(255,255,255,.82); }
+</style>
+</head>
+<body>
+  <div class="glow1"></div><div class="glow2"></div>
+  <div class="row">
+    <svg class="icon" viewBox="0 0 128 128"><rect x="16" y="16" width="96" height="96" rx="26" fill="rgba(255,255,255,.14)" stroke="rgba(255,255,255,.65)" stroke-width="3"/><path d="M53 40 L53 74 L82 57 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="10" stroke-linejoin="round"/><rect x="42" y="84" width="48" height="10" rx="5" fill="#FFFFFF" opacity="0.45"/><rect x="42" y="84" width="34" height="10" rx="5" fill="#FFFFFF"/></svg>
+    <div class="text">
+      <h1>Bilibili 桌面网页抗卡</h1>
+      <p class="tag">卡顿常来自个别 CDN 节点——那就别只用一个节点</p>
+      <div class="chips">
+        <span class="chip">双镜像竞速下载</span>
+        <span class="chip">120 秒缓冲目标</span>
+        <span class="chip">视频 · 直播</span>
+        <span class="chip">数据不离开本机</span>
+      </div>
+    </div>
+  </div>
+  <div class="fine">代价如实相告：竞速与直播双路会多用流量（直播接近两倍）；详见商店说明与 README。</div>
+</body>
+</html>

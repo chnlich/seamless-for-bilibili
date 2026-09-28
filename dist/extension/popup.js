@@ -73,7 +73,11 @@
   function emptyLiveFacts() {
     return {
       serveCount: 0,
-      latestServe: void 0
+      engagedCount: 0,
+      failedCount: 0,
+      passCount: 0,
+      pairedAddressAvailable: false,
+      pairRejected: false
     };
   }
   function liveServeClass(result) {
@@ -82,13 +86,22 @@
     return "pass";
   }
   function foldLiveEvent(facts, event) {
+    if (event?.code === "live.stream.stitch") {
+      if (event?.data?.mismatch === true) facts.pairRejected = true;
+      return facts;
+    }
     if (event?.code !== "bank.serve") return facts;
     const data = event?.data !== null && typeof event?.data === "object" ? event.data : {};
     facts.serveCount += 1;
-    facts.latestServe = {
-      klass: liveServeClass(data.result),
-      pairedAddressAvailable: data.pairedAddressAvailable
-    };
+    const klass = liveServeClass(data.result);
+    if (klass === "engaged") {
+      facts.engagedCount += 1;
+      if (data.pairedAddressAvailable === true) facts.pairedAddressAvailable = true;
+    } else if (klass === "failed") {
+      facts.failedCount += 1;
+    } else {
+      facts.passCount += 1;
+    }
     return facts;
   }
   function foldLiveEvents(facts, events) {
@@ -226,11 +239,11 @@
   }
   function liveTakeoverText(facts) {
     if (!facts || facts.serveCount === 0) return "等待直播数据";
-    const latest = facts.latestServe;
-    if (latest?.klass === "engaged") {
-      return latest.pairedAddressAvailable === true ? "正在按两条线路竞速下载" : "单路接管（未找到备用线路）";
+    if (facts.engagedCount > 0) {
+      if (facts.pairedAddressAvailable && !facts.pairRejected) return "正在按两条线路竞速下载";
+      return "单路接管（无可用备用线路）";
     }
-    if (latest?.klass === "failed") return "接管请求失败";
+    if (facts.failedCount > 0) return "接管请求失败";
     return "未接管（未发现 FLV 直播流）";
   }
 

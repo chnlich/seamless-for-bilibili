@@ -227,7 +227,8 @@ test('live facts fold serve events into the takeover state only', () => {
     { code: 'bank.fetch.chunk', data: { result: 'fetched' } },
   ]);
   assert.equal(facts.serveCount, 1);
-  assert.deepEqual(facts.latestServe, { klass: 'engaged', pairedAddressAvailable: true });
+  assert.equal(facts.engagedCount, 1);
+  assert.equal(facts.pairedAddressAvailable, true);
 });
 
 test('serve classification separates engaged takeovers from passes', () => {
@@ -244,30 +245,40 @@ test('a passed-through live stream never reads as a takeover', () => {
     { code: 'bank.serve', data: { result: 'pass', reason: 'live_non_flv' } },
   ]);
   assert.equal(facts.serveCount, 2);
-  assert.deepEqual(facts.latestServe, { klass: 'pass', pairedAddressAvailable: undefined });
+  assert.equal(facts.passCount, 2);
   assert.equal(liveTakeoverText(facts), '未接管（未发现 FLV 直播流）');
 });
 
-test('the takeover line follows the latest serve event', () => {
-  const engaged = emptyLiveFacts();
-  foldLiveEvents(engaged, [
-    { code: 'bank.serve', data: { result: 'pass', reason: 'live_non_flv' } },
+test('an engaged takeover stays engaged even when other requests pass through', () => {
+  const facts = emptyLiveFacts();
+  foldLiveEvents(facts, [
     { code: 'bank.serve', data: { result: 'hit', reason: 'live_stream', pairedAddressAvailable: true } },
-  ]);
-  assert.equal(liveTakeoverText(engaged), '正在按两条线路竞速下载');
-  const degraded = emptyLiveFacts();
-  foldLiveEvents(degraded, [
-    { code: 'bank.serve', data: { result: 'hit', reason: 'live_stream', pairedAddressAvailable: true } },
+    { code: 'bank.serve', data: { result: 'pass', reason: 'non_media_host' } },
     { code: 'bank.serve', data: { result: 'pass', reason: 'live_non_flv' } },
   ]);
-  assert.equal(liveTakeoverText(degraded), '未接管（未发现 FLV 直播流）');
+  assert.equal(liveTakeoverText(facts), '正在按两条线路竞速下载');
+});
+
+test('a prefix mismatch withdraws the racing claim down to single leg', () => {
+  const facts = emptyLiveFacts();
+  foldLiveEvents(facts, [
+    { code: 'bank.serve', data: { result: 'hit', reason: 'live_stream', pairedAddressAvailable: true } },
+    { code: 'live.stream.stitch', data: { mismatch: true, phase: 'prefix' } },
+  ]);
+  assert.equal(liveTakeoverText(facts), '单路接管（无可用备用线路）');
+  const cleanPair = emptyLiveFacts();
+  foldLiveEvents(cleanPair, [
+    { code: 'bank.serve', data: { result: 'hit', reason: 'live_stream', pairedAddressAvailable: true } },
+    { code: 'live.stream.stitch', data: { mismatch: false, phase: 'prefix' } },
+  ]);
+  assert.equal(liveTakeoverText(cleanPair), '正在按两条线路竞速下载');
 });
 
 test('live takeover wording covers racing, single line, failure, pass-through, and waiting', () => {
-  assert.equal(liveTakeoverText({ serveCount: 2, latestServe: { klass: 'engaged', pairedAddressAvailable: true } }), '正在按两条线路竞速下载');
-  assert.equal(liveTakeoverText({ serveCount: 2, latestServe: { klass: 'engaged', pairedAddressAvailable: false } }), '单路接管（未找到备用线路）');
-  assert.equal(liveTakeoverText({ serveCount: 3, latestServe: { klass: 'failed' } }), '接管请求失败');
-  assert.equal(liveTakeoverText({ serveCount: 3, latestServe: { klass: 'pass' } }), '未接管（未发现 FLV 直播流）');
+  assert.equal(liveTakeoverText({ serveCount: 2, engagedCount: 1, pairedAddressAvailable: true }), '正在按两条线路竞速下载');
+  assert.equal(liveTakeoverText({ serveCount: 2, engagedCount: 1, pairedAddressAvailable: false }), '单路接管（无可用备用线路）');
+  assert.equal(liveTakeoverText({ serveCount: 3, failedCount: 1 }), '接管请求失败');
+  assert.equal(liveTakeoverText({ serveCount: 3, passCount: 3 }), '未接管（未发现 FLV 直播流）');
   assert.equal(liveTakeoverText(emptyLiveFacts()), '等待直播数据');
   assert.equal(liveTakeoverText(undefined), '等待直播数据');
 });
@@ -275,7 +286,7 @@ test('live takeover wording covers racing, single line, failure, pass-through, a
 test('live takeover renders the plain line and degrades on read errors', () => {
   const document = popupDocument();
   const refs = { takeover: document.querySelector('[data-live-takeover]') };
-  renderLiveTakeover(refs, { facts: { serveCount: 1, latestServe: { klass: 'engaged', pairedAddressAvailable: true } } });
+  renderLiveTakeover(refs, { facts: { serveCount: 1, engagedCount: 1, pairedAddressAvailable: true } });
   assert.equal(refs.takeover.textContent, '正在按两条线路竞速下载');
   renderLiveTakeover(refs, { facts: emptyLiveFacts(), error: '日志分页没有向前推进' });
   assert.equal(refs.takeover.textContent, '直播状态读取失败');
