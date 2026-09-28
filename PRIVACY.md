@@ -9,7 +9,7 @@ Applies to: Seamless for Bilibili (Chrome extension, version 1.0.0).
 
 ### 扩展做什么
 
-本扩展在 Bilibili 的视频页与直播页接管播放器的媒体下载。视频页：播放器请求一个媒体分片（音频/视频字节段）时，由扩展用内存中的缓存回应；未命中时由扩展同时向两个地址发出同样的 Range 请求（播放器自己请求的地址，以及 Bilibili 播放信息为同一文件给出的另一个镜像地址），先完整到达的一份存入内存后回应播放器，并向前预取后续分片；同时向原生播放器请求 120 秒稳定缓冲。直播页：接管播放器的 FLV 流，配对同一集群的主备两路地址，比对两路前缀一致后并发竞速、先到的字节先供给，查无配对或前缀不一致时退回播放器原地址单路供给；直播不预取、不设缓冲目标。无论在视频页还是直播页，扩展都不接管播放：不改变播放、暂停、拖动、倍速、画质、音量与音视频轨的任何决定。
+本扩展在 Bilibili 的视频页与直播页接管播放器的媒体下载。视频页：播放器请求一个媒体分片（音频/视频字节段）时，由扩展用内存中的缓存回应；未命中时由扩展同时向两个地址发出同样的 Range 请求（播放器自己请求的地址，以及 Bilibili 播放信息为同一文件给出的另一个镜像地址），先完整到达的一份存入内存后回应播放器，并向前预取后续分片；同时向原生播放器请求 120 秒稳定缓冲。直播页：接管播放器的直播媒体下载（FLV 流与 HLS 分片），配对同一集群的主备两路地址，比对两路字节一致后并发竞速、先到的字节先供给（FLV 比对流开头的前缀，HLS 完整比对首个竞速分片对），查无配对或比对不一致时退回播放器原地址单路供给；直播不预取、不设缓冲目标。无论在视频页还是直播页，扩展都不接管播放：不改变播放、暂停、拖动、倍速、画质、音量与音视频轨的任何决定。
 
 ### 处理哪些数据、放在哪里
 
@@ -43,7 +43,7 @@ GitHub Issues：https://github.com/chnlich/seamless-for-bilibili/issues
 
 ### What the extension does
 
-On Bilibili video pages and live pages, the extension takes over the player's media downloads. Video pages: a segment request from the player is answered from an in-memory cache; on a miss, the extension issues the same Range request to two addresses at once (the address the player itself requested, and another mirror address that Bilibili's playback info lists for the same file), stores the first complete response in memory, answers the player, and prefetches further segments; it also asks the native player to keep a 120-second stable buffer. Live pages: the extension takes over the player's FLV stream, pairs the primary/backup addresses of the same cluster, checks that their common prefix matches, then delivers whichever bytes arrive first; with no pair or a prefix mismatch it falls back to a single leg on the player's own URL. Live has no prefetch and no buffer target. On neither page type does the extension take over playback: it never changes play, pause, seeking, playback rate, quality, volume, or audio/video track decisions.
+On Bilibili video pages and live pages, the extension takes over the player's media downloads. Video pages: a segment request from the player is answered from an in-memory cache; on a miss, the extension issues the same Range request to two addresses at once (the address the player itself requested, and another mirror address that Bilibili's playback info lists for the same file), stores the first complete response in memory, answers the player, and prefetches further segments; it also asks the native player to keep a 120-second stable buffer. Live pages: the extension takes over the player's live media downloads (the FLV stream and HLS segments), pairs the primary/backup addresses of the same cluster, checks that the two legs serve identical bytes, then delivers whichever bytes arrive first (for FLV the comparison covers the stream's leading prefix; for HLS the first raced segment pair is compared in full); with no pair or a mismatch it falls back to a single leg on the player's own URL. Live has no prefetch and no buffer target. On neither page type does the extension take over playback: it never changes play, pause, seeking, playback rate, quality, volume, or audio/video track decisions.
 
 ### What data is handled, and where it stays
 

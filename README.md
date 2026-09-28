@@ -28,7 +28,7 @@ Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome �
 
 **视频页**（`/video/*` 与 `/list/watchlater*`，两个路由同一套增强）：接管播放器的媒体分片下载（`fetch` 与 XHR 两条通道）。每个 1 MiB 分片同时向 Bilibili 提供的两个镜像地址请求，先完整到达的存入内存并回应播放器，另一路取消；向前预取（窗口最多 48 个分片、并发上限 4）；分片只存内存（每个标签页上限 512 MiB），离开视频路由或关闭页面即释放，不落盘；每次出现新的播放器或媒体内容时，向原生播放器请求一次 120 秒稳定缓冲。
 
-**直播页**（live.bilibili.com）：接管播放器的 FLV 直播流。只配对同一集群的主备两路地址（如 07 对 07b），先比对两路开头的字节一致，再两路同时下载、先到的字节先交给播放器；查无配对或比对不一致时退回播放器原地址单路接管。直播不预取、不设缓冲目标。
+**直播页**（live.bilibili.com）：接管播放器的 FLV 直播流与 HLS 直播分片（`.m4s` 与 `.ts`，含 init 分片；`.m3u8` 播放列表照常放行给播放器）。地址只配对同一集群的主备两路（如 07 对 07b），不合成、不猜地址：FLV 流先比对两路开头的字节一致，再两路同时下载、先到的字节先交给播放器；HLS 分片先完整比对首个竞速分片对，一致后每个分片两路同时下载、先完成的交给播放器并取消另一路。查无配对或比对不一致时退回播放器原地址单路接管。直播不预取、不设缓冲目标。
 
 两者的下载层失败都会显式报告，不静默退回原生下载。权威行为规格（中文）见下方[下载层](#下载层)；产品约束见 [GOAL.md](GOAL.md)。
 
@@ -37,7 +37,7 @@ Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome �
 按流量套餐衡量再决定装不装：
 
 - **视频竞速浪费**：竞速中落败一路已下载的字节被丢弃。一次实测稳态浪费约 12.6%（每场播放不同；日志页的 CDN 竞速面板显示当场实际浪费率）。
-- **直播接近两倍流量**：配对后两路一直同时下载，流量接近单路的两倍。
+- **直播流量**：FLV 配对后两路一直同时下载，流量接近单路的两倍；HLS 分片按分片取舍，一次实测（11 分钟直播，668 个分片）竞速浪费约 28%，即总流量约为单路的 1.3 倍（日志页的 CDN 竞速面板显示当场实际浪费率）。
 - **提前下载**：120 秒缓冲目标与预取会把还没看到的数据先下载；提前离开视频页，这些字节就白下了。
 - **内存**：每个标签页的媒体缓存最多约 512 MiB。
 - **磁盘**：本地诊断日志只保留最近 3 天（72 小时），超期记录自动删除；实测视频页每打开 1 小时约产生 7 MB，因此占用大致以最近 3 天的用量为上界；卸载扩展即全部删除。
@@ -52,7 +52,7 @@ Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome �
 - **缓冲**：一条缓冲条和「已缓冲 N 秒 / 目标 120 秒」。数值是覆盖当前播放点的连续可播放前向秒数，不是整段视频的缓冲；条到头（120 秒）变绿。
 - **120 秒申请状态**：向播放器申请 120 秒缓存的结果，分为已生效 / 等待生效 / 播放器不支持 / 申请失败四种。
 - **下载线路**：本次播放实际用到的每条 CDN 线路（通常两条），每条一个健康词（正常 / 有停滞 / 有错误 / 尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，分别是该线路首字节耗时的 P50 与 P90）。
-- **直播页**同一风格：同样的下载线路卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现 FLV 直播流）/ 等待直播数据）；直播没有缓冲条。
+- **直播页**同一风格：同样的下载线路卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现直播媒体流）/ 等待直播数据）；直播没有缓冲条。
 - 不是正在播放的页面：卡片收起，只留一句友好提示。
 
 ![弹窗特写](store/images/popup-video.png)
@@ -125,8 +125,9 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 ## 下载层
 
 - 接管受弹窗开关控制：www.bilibili.com 的分片接管只看「视频增强」，live.bilibili.com 的流接管只看「直播增强」，改动在刷新页面后生效。下载层默认让路：页面加载后到内容脚本读到开关值并写入接管标记之前，任何媒体请求都不接管；开关关闭时永远停在让路。让路中的媒体请求由播放器原生下载，不竞速、不缓存，也不产生 `bank.serve`/`bank.fetch.chunk` 记录；页面与开关状态照常进入诊断日志。因此开关开启时，加载最初几毫秒内的个别请求可能由播放器原生下载，这是关闭「先读开关再接管」窗口的代价。
-- 识别为媒体分片且带闭合单段 `Range` 的请求一律由下载层拦截。命中时从内存中的完整分片切片回应，未命中时由扩展用同一 URL 和凭据取回覆盖范围的完整分片，入库后再回应播放器的原始 Range；播放器不会为这类媒体分片另行发起网络请求。非媒体请求、缺少 `Range`、非闭合 `Range`、同步 XHR、直播页非 FLV 媒体请求（`live_non_flv`），以及下载层自身的 `internal_fallback`/`internal_error` 路径仍按原样放行，并由 `bank.serve` 记录 `pass` 和原因（包括 `range_missing`、`range_not_closed`、`sync_xhr`、`live_non_flv`）。`bank.serve` 的命中事件记录 `mirror` 与 `durationMs`，`bank.fetch.chunk` 记录 `mirror`。
-- 直播页（`live.bilibili.com`）只做下载接管与双路竞速，不做预拉、不设缓存目标。播放器在直播页发起的 `.flv` 长连接请求由扩展接管：首个此类请求到达时按需同步解析页面内嵌 `playurl_info`，并观察播放器自身的直播 `getRoomPlayInfo` 流量补充地址簿；只配同 cluster 主备两路（如 07 对 07b），跨 cluster 不配，地址不合成、不猜，URL 签名 `expires` 到期按地址失效处理。双腿 reader 并发累积，拼接窗口与前缀门窗口同按 `BANK_CONFIG.chunkBytes`（1 MiB）分窗：共同前缀比对一致才进入竞速交付，先达字节供给，败腿已读字节按既有浪费口径记录；竞速中重叠窗口持续比对，晚到不一致保领先腿、撤销另一腿；门期备腿停滞按单腿死处理，单腿死后余腿独跑、不重连。查无配对或前缀不一致时永久降级为播放器所名 URL 单腿接管（不制造播放故障）。双腿全灭、或签名到期且无新地址时显式失败，不静默退回原生。直播流事件按偏移分窗复用 `bank.fetch.chunk`（`chunkIndex` 为偏移对 `chunkBytes` 下取整，`slot` 标腿）与 `bank.serve`（`result`/`reason` 增 `live_stream`、`live_stream_unpaired`、`live_non_flv`），拼接裁决记 `live.stream.stitch`（`streamPath` 为去 query 的流路径、`bytesChecked` 为累计比对字节数、`mismatch`、`phase` 为 `prefix` 或 `stream`）。
+- 识别为媒体分片且带闭合单段 `Range` 的请求一律由下载层拦截。命中时从内存中的完整分片切片回应，未命中时由扩展用同一 URL 和凭据取回覆盖范围的完整分片，入库后再回应播放器的原始 Range；播放器不会为这类媒体分片另行发起网络请求。非媒体请求、缺少 `Range`、非闭合 `Range`、同步 XHR、直播页的 `.m3u8` 播放列表（`live_hls_playlist`）与其余未识别的直播媒体请求（`live_other_media`），以及下载层自身的 `internal_fallback`/`internal_error` 路径仍按原样放行，并由 `bank.serve` 记录 `pass` 和原因（包括 `range_missing`、`range_not_closed`、`sync_xhr`、`live_hls_playlist`、`live_other_media`）。`bank.serve` 的命中事件记录 `mirror` 与 `durationMs`，`bank.fetch.chunk` 记录 `mirror`。
+- 直播页（`live.bilibili.com`）只做下载接管与双路竞速，不做预拉、不设缓存目标。播放器在直播页发起的 `.flv` 长连接请求由扩展接管：首个此类请求到达时按需同步解析页面内嵌 `playurl_info`，并观察播放器自身的直播 `getRoomPlayInfo` 流量补充地址簿；只配同 cluster 主备两路（如 07 对 07b），跨 cluster 不配，地址不合成、不猜，URL 签名 `expires` 到期按地址失效处理。双腿 reader 并发累积，拼接窗口与前缀门窗口同按 `BANK_CONFIG.chunkBytes`（1 MiB）分窗：共同前缀比对一致才进入竞速交付，先达字节供给，败腿已读字节按既有浪费口径记录；竞速中重叠窗口持续比对，晚到不一致保领先腿、撤销另一腿；门期备腿停滞按单腿死处理，单腿死后余腿独跑、不重连。查无配对或前缀不一致时永久降级为播放器所名 URL 单腿接管（不制造播放故障）。双腿全灭、或签名到期且无新地址时显式失败，不静默退回原生。直播流事件按偏移分窗复用 `bank.fetch.chunk`（`chunkIndex` 为偏移对 `chunkBytes` 下取整，`slot` 标腿）与 `bank.serve`（`result`/`reason` 增 `live_stream`、`live_stream_unpaired`、`live_hls_playlist`、`live_other_media`），拼接裁决记 `live.stream.stitch`（`streamPath` 为去 query 的流路径、`bytesChecked` 为累计比对字节数、`mismatch`、`phase` 为 `prefix` 或 `stream`）。
+- 直播页 HLS 房间（播放器以 `.m4s`/`.ts` 分片拉流，`.m3u8` 播放列表放行）：每个媒体分片请求由扩展接管并按视频页分片同形双腿竞速，先完整到达且有效的响应交给播放器，败腿取消，其已读字节按既有浪费口径记录。实测分片 URL 自带整段签名 query（与播放列表同一签名）；配对规则与 FLV 同源，只配同一流目录的 `.m3u8` 地址簿条目（内嵌 `playurl_info` 与播放器自身 `getRoomPlayInfo` 流量），配对分片 URL 由该条目的主机加播放器分片的流路径与分片名组成，携带该条目自己的签名 query，不搬播放器的签名、不合成主机；播放器分片不带 query 的流同样不带。竞速只在两路字节确认一致后开放：流身份门取该流首个竞速分片对，双腿收齐后整段比对（连长度一起），一致记 `live.stream.stitch`（`phase` 为 `segment`、`mismatch` 为 false）并开放竞速；不一致永久降级为播放器所名地址单腿。门期一腿死亡（含 10 秒无字节停滞）时存活腿供数当次分片，门期记一次无法完整比对的尝试，连续 `maxChunkAttempts`（3）次后视为无法验证，永久降级单腿。查无配对、条目过期或身份已降级时分片单腿接管播放器所名地址。双腿全灭、或签名到期且无新地址时显式失败（`live_hls_segment_failed`），不静默退回原生。分片事件复用 `bank.fetch.chunk`（`chunkIndex` 为 0、`slot` 标腿、`ttfbMs` 记首字节）与 `bank.serve`（命中 `result`/`reason` 增 `live_hls_segment` 与 `live_hls_segment_unpaired`）。
 - 预取窗口按媒体资源分别锚定在仍未供数完成的播放器请求所需的最小块号；没有在途请求时使用最近一次播放器请求的起始块。窗口最多覆盖 48 个块，并发上限 4，只选择窗口内尚未入库且连续失败未达 3 次的前四个块。失败块下一轮自然重新进入窗口，达到上限后向需要它的播放器请求报告错误。
 - 每个块的扩展取数按 `raceLegs=2` 同时向 Bilibili 返回的主/备媒体地址发起双腿竞速，first-finish 的完整响应入库并返回播放器，败选腿已读字节是竞速固有成本；配对地址簿来自网络 playurl 响应，未配对时会按需读取页面内联 `window.__playinfo__`。
 - 前台取数失败和下载层无法供数的异常会向 `console.error` 报告；预取失败由下一轮重试吸收并保留 `bank.fetch.chunk`，不输出 console；正常的停滞取消也不输出 console。
@@ -137,7 +138,7 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 
 - popup 面向普通观众，只讲三件事：缓冲、下载线路、连接时间。视频页显示一条缓冲条和「已缓冲 N 秒 / 目标 120 秒」，数值是覆盖当前播放点的连续可播放前向秒数（`src/extension/popup.js:62-77`、`src/extension/popup-view.js`、`src/extension/readouts.js`）；下方一行报告向播放器申请 120 秒缓存的结果：已生效、等待生效、播放器不支持，或申请失败（`src/ui/panel.js`、`src/vod/controller.js` 的 `updateStatus`）。
 - popup 的「下载线路」卡片按镜像列出本次播放实际用到的每条 CDN 线路（通常两条），每条给一个健康状况词（正常、有停滞、有错误、尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，来自 `logs:cdn-summary` 的每镜像 TTFB P50/P90）（`src/extension/popup-view.js`、`src/diagnostics/cdn.js`、`src/diagnostics/worker.js`）。线路名是镜像主机名的可读短名。
-- 直播页（live.bilibili.com）同一风格：同样的「下载线路」卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现 FLV 直播流）/ 等待直播数据），由内容侧折叠 `bank.serve` 事件得出；直播不设缓冲目标，popup 不显示缓冲条（`src/extension/popup-live.js`、`src/extension/popup-view.js`）。popup 的路由判定优先使用内容侧自报的 `routeKind`，因为 popup 没有 `tabs` 权限、读不到标签页地址（`src/diagnostics/client.js` 的 `getStatus`、`src/extension/readouts.js`）。
+- 直播页（live.bilibili.com）同一风格：同样的「下载线路」卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现直播媒体流）/ 等待直播数据），由内容侧折叠 `bank.serve` 事件得出；直播不设缓冲目标，popup 不显示缓冲条（`src/extension/popup-live.js`、`src/extension/popup-view.js`）。popup 的路由判定优先使用内容侧自报的 `routeKind`，因为 popup 没有 `tabs` 权限、读不到标签页地址（`src/diagnostics/client.js` 的 `getStatus`、`src/extension/readouts.js`）。
 - popup 面板只读，不影响播放、不上传；内容侧错误只在存在时以一句人话显示，非 Bilibili 标签页或没有内容脚本的标签页只显示一句友好提示（`src/extension/popup.js`、`src/extension/popup-view.js`）。popup 底部保留「打开开发日志」入口。日志页开头写明保留期限：日志只保留最近 3 天（72 小时），更早的记录自动删除。
 - 所有 `media.*` 事件都附带同一帧周期聚合的 `frameTiming`，包括 presentedTotal、maxFrameGapMs、processingMs、displayLead、mediaStep 与 append 相关指标（`src/diagnostics/media.js`、`src/diagnostics/privacy.js:195-212`）。这些细节只进开发日志；popup 不再展示 readyState、networkState、轨道 ranges、库存计数或持久化状态等开发读数。
 - 下载层库存只列出本次播放实际参与的分轨（`resourceState` 或 `chunks` 中出现过的资源），不展示地址簿里的所有表示（`src/bank/inventory.js:103-107`）；它作为 `bank.inventory` 诊断事件进入开发日志。
