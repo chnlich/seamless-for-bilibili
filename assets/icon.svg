@@ -5,6 +5,8 @@
     a violet-indigo badge, a white play triangle, and a mostly-full buffer bar.
     Artwork occupies the central 96x96 box; 16px transparent padding per the
     Chrome Web Store icon guidance (developer.chrome.com/docs/webstore/images).
+    scripts/generate-icons.mjs keeps that padding for the 128 store icon and
+    crops to the artwork box for the 16/32/48 toolbar and extensions-page icons.
   -->
   <defs>
     <linearGradient id="bg" x1="24" y1="16" x2="104" y2="112" gradientUnits="userSpaceOnUse">
