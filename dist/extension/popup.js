@@ -76,12 +76,17 @@
       latestServe: void 0
     };
   }
+  function liveServeClass(result) {
+    if (result === "hit") return "engaged";
+    if (result === "failed") return "failed";
+    return "pass";
+  }
   function foldLiveEvent(facts, event) {
     if (event?.code !== "bank.serve") return facts;
     const data = event?.data !== null && typeof event?.data === "object" ? event.data : {};
     facts.serveCount += 1;
     facts.latestServe = {
-      result: data.result,
+      klass: liveServeClass(data.result),
       pairedAddressAvailable: data.pairedAddressAvailable
     };
     return facts;
@@ -221,9 +226,12 @@
   }
   function liveTakeoverText(facts) {
     if (!facts || facts.serveCount === 0) return "等待直播数据";
-    if (facts.latestServe?.result === "failed") return "接管请求失败";
-    if (facts.latestServe?.pairedAddressAvailable === true) return "正在按两条线路竞速下载";
-    return "单路接管（未找到备用线路）";
+    const latest = facts.latestServe;
+    if (latest?.klass === "engaged") {
+      return latest.pairedAddressAvailable === true ? "正在按两条线路竞速下载" : "单路接管（未找到备用线路）";
+    }
+    if (latest?.klass === "failed") return "接管请求失败";
+    return "未接管（未发现 FLV 直播流）";
   }
 
   // src/extension/popup.js

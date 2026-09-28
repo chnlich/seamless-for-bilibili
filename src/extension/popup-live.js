@@ -38,12 +38,20 @@ export function emptyLiveFacts() {
   };
 }
 
+// 直播页 bank.serve 三类结果：hit=接管已供数，failed=接管尝试失败，pass=按原样放行
+// （含 live_non_flv：播放器未使用 FLV 流，接管从未介入）。
+export function liveServeClass(result) {
+  if (result === 'hit') return 'engaged';
+  if (result === 'failed') return 'failed';
+  return 'pass';
+}
+
 export function foldLiveEvent(facts, event) {
   if (event?.code !== 'bank.serve') return facts;
   const data = event?.data !== null && typeof event?.data === 'object' ? event.data : {};
   facts.serveCount += 1;
   facts.latestServe = {
-    result: data.result,
+    klass: liveServeClass(data.result),
     pairedAddressAvailable: data.pairedAddressAvailable,
   };
   return facts;

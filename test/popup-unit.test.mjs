@@ -9,6 +9,7 @@ import {
   applyPopupRoute,
   emptyLiveFacts,
   foldLiveEvents,
+  liveServeClass,
   popupRouteForTabUrl,
   popupToggleLabel,
 } from '../src/extension/popup-live.js';
@@ -226,13 +227,47 @@ test('live facts fold serve events into the takeover state only', () => {
     { code: 'bank.fetch.chunk', data: { result: 'fetched' } },
   ]);
   assert.equal(facts.serveCount, 1);
-  assert.deepEqual(facts.latestServe, { result: 'hit', pairedAddressAvailable: true });
+  assert.deepEqual(facts.latestServe, { klass: 'engaged', pairedAddressAvailable: true });
 });
 
-test('live takeover wording covers racing, single line, failure, and waiting', () => {
-  assert.equal(liveTakeoverText({ serveCount: 2, latestServe: { result: 'hit', pairedAddressAvailable: true } }), '正在按两条线路竞速下载');
-  assert.equal(liveTakeoverText({ serveCount: 2, latestServe: { result: 'hit', pairedAddressAvailable: false } }), '单路接管（未找到备用线路）');
-  assert.equal(liveTakeoverText({ serveCount: 3, latestServe: { result: 'failed' } }), '接管请求失败');
+test('serve classification separates engaged takeovers from passes', () => {
+  assert.equal(liveServeClass('hit'), 'engaged');
+  assert.equal(liveServeClass('failed'), 'failed');
+  assert.equal(liveServeClass('pass'), 'pass');
+  assert.equal(liveServeClass(undefined), 'pass');
+});
+
+test('a passed-through live stream never reads as a takeover', () => {
+  const facts = emptyLiveFacts();
+  foldLiveEvents(facts, [
+    { code: 'bank.serve', data: { result: 'pass', reason: 'non_media_host' } },
+    { code: 'bank.serve', data: { result: 'pass', reason: 'live_non_flv' } },
+  ]);
+  assert.equal(facts.serveCount, 2);
+  assert.deepEqual(facts.latestServe, { klass: 'pass', pairedAddressAvailable: undefined });
+  assert.equal(liveTakeoverText(facts), '未接管（未发现 FLV 直播流）');
+});
+
+test('the takeover line follows the latest serve event', () => {
+  const engaged = emptyLiveFacts();
+  foldLiveEvents(engaged, [
+    { code: 'bank.serve', data: { result: 'pass', reason: 'live_non_flv' } },
+    { code: 'bank.serve', data: { result: 'hit', reason: 'live_stream', pairedAddressAvailable: true } },
+  ]);
+  assert.equal(liveTakeoverText(engaged), '正在按两条线路竞速下载');
+  const degraded = emptyLiveFacts();
+  foldLiveEvents(degraded, [
+    { code: 'bank.serve', data: { result: 'hit', reason: 'live_stream', pairedAddressAvailable: true } },
+    { code: 'bank.serve', data: { result: 'pass', reason: 'live_non_flv' } },
+  ]);
+  assert.equal(liveTakeoverText(degraded), '未接管（未发现 FLV 直播流）');
+});
+
+test('live takeover wording covers racing, single line, failure, pass-through, and waiting', () => {
+  assert.equal(liveTakeoverText({ serveCount: 2, latestServe: { klass: 'engaged', pairedAddressAvailable: true } }), '正在按两条线路竞速下载');
+  assert.equal(liveTakeoverText({ serveCount: 2, latestServe: { klass: 'engaged', pairedAddressAvailable: false } }), '单路接管（未找到备用线路）');
+  assert.equal(liveTakeoverText({ serveCount: 3, latestServe: { klass: 'failed' } }), '接管请求失败');
+  assert.equal(liveTakeoverText({ serveCount: 3, latestServe: { klass: 'pass' } }), '未接管（未发现 FLV 直播流）');
   assert.equal(liveTakeoverText(emptyLiveFacts()), '等待直播数据');
   assert.equal(liveTakeoverText(undefined), '等待直播数据');
 });
@@ -240,7 +275,7 @@ test('live takeover wording covers racing, single line, failure, and waiting', (
 test('live takeover renders the plain line and degrades on read errors', () => {
   const document = popupDocument();
   const refs = { takeover: document.querySelector('[data-live-takeover]') };
-  renderLiveTakeover(refs, { facts: { serveCount: 1, latestServe: { result: 'hit', pairedAddressAvailable: true } } });
+  renderLiveTakeover(refs, { facts: { serveCount: 1, latestServe: { klass: 'engaged', pairedAddressAvailable: true } } });
   assert.equal(refs.takeover.textContent, '正在按两条线路竞速下载');
   renderLiveTakeover(refs, { facts: emptyLiveFacts(), error: '日志分页没有向前推进' });
   assert.equal(refs.takeover.textContent, '直播状态读取失败');
