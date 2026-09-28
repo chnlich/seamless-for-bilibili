@@ -18,7 +18,7 @@ It does not take over playback. Play, pause, seeking, playback speed, quality, v
 
 The design rests on three assumptions:
 
-1. Stutter usually comes from an individual Bilibili CDN host being slow or unstable — not from the viewer's own connection;
+1. Stutter often comes from an individual Bilibili CDN host being slow or unstable — not from the viewer's own connection;
 2. Bilibili's own playback info (playurl) already lists primary and backup mirror addresses for the same content;
 3. Your bandwidth is above the video bitrate, with headroom to download two copies at once.
 
