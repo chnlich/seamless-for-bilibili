@@ -403,6 +403,7 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
       try {
         takeover = bank.serveLive({
           url,
+          classification,
           credentials: this.withCredentials ? 'include' : 'same-origin',
           signal: this._abortController.signal,
         });

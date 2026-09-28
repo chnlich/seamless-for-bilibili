@@ -290,11 +290,11 @@ test('a passed-through live stream never reads as a takeover', () => {
   const facts = emptyLiveFacts();
   foldLiveEvents(facts, [
     { code: 'bank.serve', data: { result: 'pass', reason: 'non_media_host' } },
-    { code: 'bank.serve', data: { result: 'pass', reason: 'live_non_flv' } },
+    { code: 'bank.serve', data: { result: 'pass', reason: 'live_hls_playlist' } },
   ]);
   assert.equal(facts.serveCount, 2);
   assert.equal(facts.engagement, undefined);
-  assert.equal(liveTakeoverText(facts), '未接管（未发现 FLV 直播流）');
+  assert.equal(liveTakeoverText(facts), '未接管（未发现直播媒体流）');
 });
 
 test('an engaged takeover stays engaged even when other requests pass through', () => {
@@ -302,7 +302,7 @@ test('an engaged takeover stays engaged even when other requests pass through', 
   foldLiveEvents(facts, [
     { code: 'bank.serve', data: { result: 'hit', reason: 'live_stream', pairedAddressAvailable: true } },
     { code: 'bank.serve', data: { result: 'pass', reason: 'non_media_host' } },
-    { code: 'bank.serve', data: { result: 'pass', reason: 'live_non_flv' } },
+    { code: 'bank.serve', data: { result: 'pass', reason: 'live_hls_playlist' } },
   ]);
   assert.equal(liveTakeoverText(facts), '正在按两条线路竞速下载');
 });
@@ -338,7 +338,7 @@ test('a retried takeover resets the state to the new takeover facts', () => {
     { code: 'live.stream.stitch', data: { mismatch: true, phase: 'prefix' } },
     { code: 'bank.serve', data: { result: 'failed', reason: 'live_stream_failed' } },
     { code: 'bank.serve', data: { result: 'hit', reason: 'live_stream' } },
-    { code: 'bank.serve', data: { result: 'pass', reason: 'live_non_flv' } },
+    { code: 'bank.serve', data: { result: 'pass', reason: 'live_hls_playlist' } },
   ]);
   assert.equal(facts.pairedAddressAvailable, false);
   assert.equal(facts.pairRejected, false);
@@ -349,9 +349,46 @@ test('live takeover wording covers racing, single line, failure, pass-through, a
   assert.equal(liveTakeoverText({ serveCount: 2, engagement: 'engaged', pairedAddressAvailable: true }), '正在按两条线路竞速下载');
   assert.equal(liveTakeoverText({ serveCount: 2, engagement: 'engaged', pairedAddressAvailable: false }), '单路接管（无可用备用线路）');
   assert.equal(liveTakeoverText({ serveCount: 3, engagement: 'failed' }), '接管请求失败');
-  assert.equal(liveTakeoverText({ serveCount: 3 }), '未接管（未发现 FLV 直播流）');
+  assert.equal(liveTakeoverText({ serveCount: 3 }), '未接管（未发现直播媒体流）');
   assert.equal(liveTakeoverText(emptyLiveFacts()), '等待直播数据');
   assert.equal(liveTakeoverText(undefined), '等待直播数据');
+});
+
+test('hls segment takeover folds through the same live facts as the flv stream', () => {
+  const racing = emptyLiveFacts();
+  foldLiveEvents(racing, [
+    { code: 'bank.serve', data: { result: 'hit', reason: 'live_hls_segment', pairedAddressAvailable: true } },
+    { code: 'live.stream.stitch', data: { mismatch: false, phase: 'segment' } },
+  ]);
+  assert.equal(liveTakeoverText(racing), '正在按两条线路竞速下载');
+
+  const mismatched = emptyLiveFacts();
+  foldLiveEvents(mismatched, [
+    { code: 'bank.serve', data: { result: 'hit', reason: 'live_hls_segment', pairedAddressAvailable: true } },
+    { code: 'live.stream.stitch', data: { streamPath: '/live-bvc/791488/live_x/', bytesChecked: 4, mismatch: true, phase: 'segment' } },
+  ]);
+  assert.equal(mismatched.pairRejected, true);
+  assert.equal(liveTakeoverText(mismatched), '单路接管（无可用备用线路）');
+
+  const single = emptyLiveFacts();
+  foldLiveEvents(single, [
+    { code: 'bank.serve', data: { result: 'hit', reason: 'live_hls_segment_unpaired', pairMiss: 'no_book_entry' } },
+  ]);
+  assert.equal(single.pairedAddressAvailable, false);
+  assert.equal(liveTakeoverText(single), '单路接管（无可用备用线路）');
+
+  const failed = emptyLiveFacts();
+  foldLiveEvents(failed, [
+    { code: 'bank.serve', data: { result: 'failed', reason: 'live_hls_segment_failed' } },
+  ]);
+  assert.equal(liveTakeoverText(failed), '接管请求失败');
+
+  const playlistOnly = emptyLiveFacts();
+  foldLiveEvents(playlistOnly, [
+    { code: 'bank.serve', data: { result: 'pass', reason: 'live_hls_playlist' } },
+  ]);
+  assert.equal(playlistOnly.engagement, undefined);
+  assert.equal(liveTakeoverText(playlistOnly), '未接管（未发现直播媒体流）');
 });
 
 test('live takeover renders the plain line and degrades on read errors', () => {

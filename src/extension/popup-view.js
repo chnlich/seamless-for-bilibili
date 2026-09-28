@@ -162,6 +162,6 @@ export function liveTakeoverText(facts) {
     return '单路接管（无可用备用线路）';
   }
   if (facts.engagement === 'failed') return '接管请求失败';
-  // 只有放行事件（例如播放器未用 FLV 流）时，接管从未介入，不能谎报成接管。
-  return '未接管（未发现 FLV 直播流）';
+  // 只有放行事件（例如播放器未使用直播媒体流）时，接管从未介入，不能谎报成接管。
+  return '未接管（未发现直播媒体流）';
 }

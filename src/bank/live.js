@@ -14,8 +14,45 @@ export function classifyLiveRequest({ url, enabled = true, locationObject }) {
   if (enabled !== true) return { intercepted: false };
   const parsed = new URL(url, locationObject?.href);
   if (!isMediaHost(parsed.hostname)) return { intercepted: false, reason: 'non_media_host' };
-  if (!parsed.pathname.endsWith('.flv')) return { intercepted: false, reason: 'live_non_flv' };
-  return { intercepted: true, url: parsed.href };
+  if (parsed.pathname.endsWith('.flv')) {
+    return { intercepted: true, url: parsed.href, kind: 'flv_stream' };
+  }
+  if (parsed.pathname.endsWith('.m3u8')) return { intercepted: false, reason: 'live_hls_playlist' };
+  if (parsed.pathname.endsWith('.m4s') || parsed.pathname.endsWith('.ts')) {
+    return { intercepted: true, url: parsed.href, kind: 'hls_segment' };
+  }
+  return { intercepted: false, reason: 'live_other_media' };
+}
+
+// HLS 直播分片的流身份 = 去掉分片名的目录（带结尾斜杠），同目录即同一条流。
+export function hlsStreamPathOf(pathname) {
+  if (typeof pathname !== 'string' || pathname.length === 0 || !pathname.startsWith('/')) {
+    throw new Error('HLS 分片路径无效');
+  }
+  const cut = pathname.lastIndexOf('/');
+  return pathname.slice(0, cut + 1);
+}
+
+// 整段分片比对：长度不同即不一致（FLV 的前缀比对只在固定窗口内，分片必须连长度一起比）。
+export function compareSegmentBytes(left, right) {
+  if (left.byteLength !== right.byteLength) {
+    const common = Math.min(left.byteLength, right.byteLength);
+    for (let index = 0; index < common; index += 1) {
+      if (left[index] !== right[index]) return index;
+    }
+    return common;
+  }
+  return compareByteRegions(left, right);
+}
+
+// 配对分片 URL：配对地址簿条目的主机 + 播放器分片的流路径与分片名。
+// 播放器分片带签名 query 时携带该条目自己的签名 query（不搬播放器的签名）；
+// 播放器分片不带 query（该流不需要签名）时同样不带。
+export function hlsSegmentPairUrl(playerUrl, candidateUrl) {
+  const streamPath = hlsStreamPathOf(playerUrl.pathname);
+  const segmentName = playerUrl.pathname.slice(streamPath.length);
+  const search = playerUrl.search !== '' ? candidateUrl.search : '';
+  return `${candidateUrl.origin}${streamPath}${segmentName}${search}`;
 }
 
 export function liveUrlExpiresAt(url) {

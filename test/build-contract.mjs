@@ -444,7 +444,9 @@ assert.match(readme, /没有 `tabs` 权限/);
 assert.match(readme, /frameTiming/);
 assert.match(readme, /库存只列出本次播放实际参与的分轨/);
 assert.match(readme, /CDN 竞速面板/);
-assert.match(readme, /live_non_flv/);
+assert.match(readme, /live_hls_playlist/);
+assert.match(readme, /live_hls_segment/);
+assert.match(readme, /live_other_media/);
 assert.match(readme, /live\.stream\.stitch/);
 const readmeSourceAnchors = [
   ['src/extension/popup.js', ['renderVideoPanel', 'renderRacePanel', 'renderLivePanel', "data-open-logs"]],

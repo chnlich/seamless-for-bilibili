@@ -55,9 +55,9 @@ export function emptyLiveFacts() {
 }
 
 // 直播页 bank.serve 三类结果：hit=接管已供数，failed=接管尝试失败，pass=按原样放行
-// （含 live_non_flv：播放器未使用 FLV 流，接管从未介入）。放行事件（心跳、非 FLV
-// 附属请求）不改变接管事实，所以状态取最近一条接管类（hit/failed）结果，而非最近
-// 一条 serve：供数后双腿全灭要显示失败，失败后播放器重试成功要回到接管。
+// （含 live_hls_playlist：播放器拉的是 HLS 播放列表，接管从未介入该请求）。放行事件
+// （心跳、播放列表等附属请求）不改变接管事实，所以状态取最近一条接管类（hit/failed）
+// 结果，而非最近一条 serve：供数后双腿全灭要显示失败，失败后播放器重试成功要回到接管。
 export function liveServeClass(result) {
   if (result === 'hit') return 'engaged';
   if (result === 'failed') return 'failed';

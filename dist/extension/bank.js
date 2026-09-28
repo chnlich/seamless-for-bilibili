@@ -711,8 +711,37 @@
     if (enabled !== true) return { intercepted: false };
     const parsed = new URL(url, locationObject?.href);
     if (!isMediaHost(parsed.hostname)) return { intercepted: false, reason: "non_media_host" };
-    if (!parsed.pathname.endsWith(".flv")) return { intercepted: false, reason: "live_non_flv" };
-    return { intercepted: true, url: parsed.href };
+    if (parsed.pathname.endsWith(".flv")) {
+      return { intercepted: true, url: parsed.href, kind: "flv_stream" };
+    }
+    if (parsed.pathname.endsWith(".m3u8")) return { intercepted: false, reason: "live_hls_playlist" };
+    if (parsed.pathname.endsWith(".m4s") || parsed.pathname.endsWith(".ts")) {
+      return { intercepted: true, url: parsed.href, kind: "hls_segment" };
+    }
+    return { intercepted: false, reason: "live_other_media" };
+  }
+  function hlsStreamPathOf(pathname) {
+    if (typeof pathname !== "string" || pathname.length === 0 || !pathname.startsWith("/")) {
+      throw new Error("HLS 分片路径无效");
+    }
+    const cut = pathname.lastIndexOf("/");
+    return pathname.slice(0, cut + 1);
+  }
+  function compareSegmentBytes(left, right) {
+    if (left.byteLength !== right.byteLength) {
+      const common = Math.min(left.byteLength, right.byteLength);
+      for (let index = 0; index < common; index += 1) {
+        if (left[index] !== right[index]) return index;
+      }
+      return common;
+    }
+    return compareByteRegions(left, right);
+  }
+  function hlsSegmentPairUrl(playerUrl, candidateUrl) {
+    const streamPath = hlsStreamPathOf(playerUrl.pathname);
+    const segmentName = playerUrl.pathname.slice(streamPath.length);
+    const search = playerUrl.search !== "" ? candidateUrl.search : "";
+    return `${candidateUrl.origin}${streamPath}${segmentName}${search}`;
   }
   function liveUrlExpiresAt(url) {
     const raw = new URL(url).searchParams.get("expires");
@@ -1503,6 +1532,7 @@
         try {
           takeover = bank.serveLive({
             url,
+            classification,
             credentials: this.withCredentials ? "include" : "same-origin",
             signal: this._abortController.signal
           });
@@ -1793,6 +1823,7 @@
       this.sessionGeneration = 0;
       this.resourceState = /* @__PURE__ */ new Map();
       this.recentResourceKeys = [];
+      this.liveSegmentIdentity = /* @__PURE__ */ new Map();
       this.addressBook = /* @__PURE__ */ new Map();
       this.lastInventoryPayload = void 0;
       this.lastInventoryPublishedAt = void 0;
@@ -2064,6 +2095,43 @@
     evaluateLivePair(url) {
       return this.pairDecisionFor(url);
     }
+    // HLS 分片配对：地址簿里同流目录的 .m3u8 条目（同 cluster 主备由 Bilibili 自带，
+    // 与 FLV 路径同一规则），配对 URL 由该条目的主机与它自己的签名 query 组成，
+    // 不合成、不猜主机；条目过期或跨流目录不配。
+    pairSegmentDecisionFor(playerUrl) {
+      const streamPath = hlsStreamPathOf(playerUrl.pathname);
+      let entry;
+      for (const [pathname, candidate] of this.addressBook) {
+        if (!pathname.endsWith(".m3u8")) continue;
+        if (hlsStreamPathOf(pathname) !== streamPath) continue;
+        entry = candidate;
+        break;
+      }
+      if (entry === void 0) return { pairUrl: void 0, miss: "no_book_entry" };
+      if (this.now() - entry.observedAt > this.config.pairFreshnessMs) {
+        return { pairUrl: void 0, miss: "stale" };
+      }
+      for (const candidateUrl of entry.urls) {
+        const candidate = new URL(candidateUrl);
+        if (candidate.hostname === playerUrl.hostname) continue;
+        return { pairUrl: hlsSegmentPairUrl(playerUrl, candidate) };
+      }
+      return { pairUrl: void 0, miss: "no_alt_host" };
+    }
+    // 流身份门状态：pending（首个竞速分片对尚未完整比对）、verified（已一致，开放竞速）、
+    // rejected（比对不一致或门期反复无法完整比对，永久单腿）。
+    liveSegmentIdentityFor(streamPath) {
+      let state = this.liveSegmentIdentity.get(streamPath);
+      if (state === void 0) {
+        state = { verdict: "pending", attempts: 0 };
+        this.liveSegmentIdentity.set(streamPath, state);
+        while (this.liveSegmentIdentity.size > 16) {
+          const oldest = this.liveSegmentIdentity.keys().next().value;
+          this.liveSegmentIdentity.delete(oldest);
+        }
+      }
+      return state;
+    }
     createTaskLeg(task, slot, url) {
       return {
         slot,
@@ -2214,6 +2282,7 @@
       try {
         takeover = this.serveLive({
           url: request.url,
+          classification,
           credentials: request.credentials,
           signal: request.signal
         });
@@ -2260,7 +2329,13 @@
       Object.defineProperty(response, "type", { configurable: true, value: "basic" });
       return response;
     }
-    serveLive({ url, credentials, signal }) {
+    serveLive({ url, classification, credentials, signal }) {
+      if (classification?.kind === "hls_segment") {
+        return this.serveLiveSegment({ url, credentials, signal });
+      }
+      return this.serveLiveStream({ url, credentials, signal });
+    }
+    serveLiveStream({ url, credentials, signal }) {
       if (signal?.aborted) throw abortError();
       const startedAt = performanceNow(this.windowObject);
       let serveFailed = false;
@@ -2435,6 +2510,386 @@
         });
       }
       return takeover;
+    }
+    // HLS 直播分片接管：整段文件双腿竞速（视频页分片同形）。身份门未决的首个竞速
+    // 分片对等双腿收齐后整体比对，一致才开放竞速；不一致或门期反复无法完整比对则
+    // 永久降级为播放器所名地址单腿。双腿全灭或签名到期且无新地址时显式失败。
+    serveLiveSegment({ url, credentials, signal }) {
+      if (signal?.aborted) throw abortError();
+      const startedAt = performanceNow(this.windowObject);
+      const playerUrl = new URL(url);
+      const streamPath = hlsStreamPathOf(playerUrl.pathname);
+      let serveFailed = false;
+      const emitFailedServe = (error) => {
+        if (serveFailed) return;
+        serveFailed = true;
+        this.emitDiagnostic("bank.serve", {
+          source: scrubUrl(url),
+          mirror: mirrorForUrl2(url),
+          durationMs: performanceNow(this.windowObject) - startedAt,
+          result: "failed",
+          reason: "live_hls_segment_failed",
+          errorName: error?.name
+        });
+      };
+      const knownIdentity = this.liveSegmentIdentity.get(streamPath);
+      let pairDecision = { pairUrl: void 0, miss: void 0 };
+      if (knownIdentity?.verdict !== "rejected" && this.config.raceLegs > 1) {
+        pairDecision = this.pairSegmentDecisionFor(playerUrl);
+        if (pairDecision.pairUrl === void 0) {
+          this.readInlineLivePlayinfo();
+          pairDecision = this.pairSegmentDecisionFor(playerUrl);
+        }
+      }
+      const pairUrl = pairDecision.pairUrl;
+      const candidateUrls = pairUrl === void 0 ? [url] : [url, pairUrl];
+      const legDescriptors = [];
+      for (const [slot, candidate] of candidateUrls.entries()) {
+        const expiresAt = liveUrlExpiresAt(candidate);
+        if (expiresAt !== void 0 && this.now() >= expiresAt) {
+          this.emitDiagnostic("bank.fetch.chunk", {
+            source: scrubUrl(candidate),
+            mirror: mirrorForUrl2(candidate),
+            chunkIndex: 0,
+            start: 0,
+            end: 0,
+            bytes: 0,
+            durationMs: 0,
+            slot,
+            priority: "foreground",
+            result: "address_expired"
+          });
+          continue;
+        }
+        legDescriptors.push({ slot, url: candidate });
+      }
+      if (legDescriptors.length === 0) {
+        const error = new BankNetworkError("直播分片地址签名到期且无可用地址");
+        emitFailedServe(error);
+        throw error;
+      }
+      const legs = legDescriptors.map((descriptor) => ({
+        ...descriptor,
+        controller: new AbortController(),
+        reader: void 0,
+        stallTimer: void 0,
+        startedAt: void 0,
+        ttfbAt: void 0,
+        byteCount: 0,
+        httpStatus: void 0,
+        errorName: void 0,
+        outcome: void 0,
+        cancelledByWinner: false
+      }));
+      let headersSettled = false;
+      let resolveHeaders;
+      let rejectHeaders;
+      const headersPromise = new Promise((resolve, reject) => {
+        resolveHeaders = resolve;
+        rejectHeaders = reject;
+      });
+      const takeover = {
+        headersPromise,
+        onHeaders: void 0,
+        onBytes: void 0,
+        onEnd: void 0,
+        onError: void 0,
+        cancel: void 0
+      };
+      let finished = false;
+      let cancelled = false;
+      const emitSegmentChunk = (leg, result, detail = {}) => {
+        const payload = {
+          source: scrubUrl(leg.url),
+          mirror: mirrorForUrl2(leg.url),
+          chunkIndex: 0,
+          start: 0,
+          end: leg.byteCount > 0 ? leg.byteCount - 1 : 0,
+          bytes: leg.byteCount,
+          durationMs: leg.startedAt === void 0 ? 0 : performanceNow(this.windowObject) - leg.startedAt,
+          slot: leg.slot,
+          priority: "foreground",
+          result
+        };
+        if (leg.byteCount > 0 && leg.ttfbAt !== void 0) payload.ttfbMs = leg.ttfbAt - leg.startedAt;
+        if (Number.isInteger(detail.httpStatus)) payload.httpStatus = detail.httpStatus;
+        if (typeof detail.errorName === "string" && detail.errorName.length > 0) payload.errorName = detail.errorName;
+        this.emitDiagnostic("bank.fetch.chunk", payload);
+      };
+      const emitSegmentServeHit = () => {
+        const served = {
+          source: scrubUrl(url),
+          mirror: mirrorForUrl2(url),
+          durationMs: performanceNow(this.windowObject) - startedAt,
+          result: "hit",
+          reason: legs.length > 1 ? "live_hls_segment" : "live_hls_segment_unpaired"
+        };
+        if (legs.length > 1) served.pairedAddressAvailable = true;
+        else if (pairDecision.miss !== void 0) served.pairMiss = pairDecision.miss;
+        this.emitDiagnostic("bank.serve", served);
+      };
+      const clearSegmentLegStall = (leg) => {
+        if (leg.stallTimer !== void 0) {
+          this.windowObject.clearTimeout(leg.stallTimer);
+          leg.stallTimer = void 0;
+        }
+      };
+      const cancelSegmentLeg = (leg) => {
+        clearSegmentLegStall(leg);
+        leg.controller.abort();
+        if (leg.reader !== void 0) {
+          void leg.reader.cancel().catch((error) => {
+            if (!isAbortError2(error)) this.reportLiveError("LIVE_CANCEL", "直播分片读取取消失败", error);
+          });
+        }
+      };
+      const deliverSegment = (leg, value) => {
+        if (finished) return;
+        finished = true;
+        emitSegmentChunk(leg, "fetched");
+        emitSegmentServeHit();
+        for (const other of legs) {
+          if (other === leg || other.outcome !== void 0) continue;
+          other.cancelledByWinner = true;
+          cancelSegmentLeg(other);
+        }
+        takeover.onBytes?.(value.bytes);
+        takeover.onEnd?.();
+      };
+      const failSegment = (error) => {
+        if (finished) return;
+        finished = true;
+        for (const leg of legs) clearSegmentLegStall(leg);
+        emitFailedServe(error);
+        if (!headersSettled) {
+          headersSettled = true;
+          rejectHeaders(error);
+          return;
+        }
+        takeover.onError?.(error);
+      };
+      takeover.cancel = () => {
+        if (cancelled || finished) return;
+        cancelled = true;
+        finished = true;
+        for (const leg of legs) {
+          clearSegmentLegStall(leg);
+          leg.controller.abort();
+          if (leg.reader !== void 0) {
+            void leg.reader.cancel().catch((error) => {
+              if (!isAbortError2(error)) this.reportLiveError("LIVE_CANCEL", "直播分片读取取消失败", error);
+            });
+          }
+        }
+        if (!headersSettled) {
+          headersSettled = true;
+          rejectHeaders(abortError());
+          return;
+        }
+        takeover.onError?.(abortError());
+      };
+      if (signal !== void 0) {
+        signal.addEventListener("abort", () => takeover.cancel(), { once: true });
+      }
+      const noteHeaders = (leg, response) => {
+        if (headersSettled) return;
+        headersSettled = true;
+        const info = {
+          status: response.status,
+          statusText: response.statusText,
+          contentType: headerValue(response.headers, "Content-Type") || void 0
+        };
+        takeover.onHeaders?.(info);
+        resolveHeaders(info);
+      };
+      const settlements = legs.map((leg) => this.runLiveSegmentLeg(leg, { credentials, noteHeaders }).then(
+        (value) => ({ kind: "done", leg, value }),
+        (error) => ({ kind: "failed", leg, error })
+      ));
+      void this.settleLiveSegment({
+        url,
+        streamPath,
+        legs,
+        settlements,
+        identity: pairUrl === void 0 ? void 0 : this.liveSegmentIdentityFor(streamPath),
+        maxGateAttempts: this.config.maxChunkAttempts,
+        emitSegmentChunk,
+        deliverSegment,
+        failSegment
+      });
+      return takeover;
+    }
+    async settleLiveSegment({
+      streamPath,
+      legs,
+      settlements,
+      identity,
+      maxGateAttempts,
+      emitSegmentChunk,
+      deliverSegment,
+      failSegment
+    }) {
+      const settlementOf = (leg) => settlements[legs.indexOf(leg)];
+      const emitFailure = (settlement) => {
+        const fallback = isAbortError2(settlement.error) ? "aborted" : "network_error";
+        emitSegmentChunk(settlement.leg, settlement.leg.outcome ?? fallback, {
+          httpStatus: settlement.leg.httpStatus,
+          errorName: settlement.leg.errorName ?? settlement.error?.name
+        });
+      };
+      if (legs.length === 1) {
+        const settlement = await settlements[0];
+        if (settlement.kind === "done") {
+          deliverSegment(settlement.leg, settlement.value);
+          return;
+        }
+        emitFailure(settlement);
+        failSegment(new BankNetworkError("直播分片取数失败", settlement.error));
+        return;
+      }
+      const [first, second] = legs;
+      if (identity.verdict === "verified") {
+        const winner = await Promise.race(settlements);
+        if (winner.kind === "done") {
+          deliverSegment(winner.leg, winner.value);
+          const loserSettlement = await settlementOf(winner.leg === first ? second : first);
+          if (loserSettlement.kind === "done" || loserSettlement.leg.outcome === void 0) {
+            emitSegmentChunk(loserSettlement.leg, "lost_race");
+          } else {
+            emitFailure(loserSettlement);
+          }
+          return;
+        }
+        emitFailure(winner);
+        const last = await settlementOf(winner.leg === first ? second : first);
+        if (last.kind === "done") {
+          deliverSegment(last.leg, last.value);
+          return;
+        }
+        emitFailure(last);
+        failSegment(new BankNetworkError("直播分片双腿取数失败"));
+        return;
+      }
+      const firstSettlement = await Promise.race(settlements);
+      const secondSettlement = await settlementOf(firstSettlement.leg === first ? second : first);
+      if (firstSettlement.kind === "done" && secondSettlement.kind === "done") {
+        const mismatchAt = compareSegmentBytes(
+          firstSettlement.value.bytes,
+          secondSettlement.value.bytes
+        );
+        if (mismatchAt === -1) {
+          identity.verdict = "verified";
+          this.emitDiagnostic("live.stream.stitch", {
+            streamPath,
+            bytesChecked: firstSettlement.value.bytes.byteLength,
+            mismatch: false,
+            phase: "segment"
+          });
+          deliverSegment(firstSettlement.leg, firstSettlement.value);
+          emitSegmentChunk(secondSettlement.leg, "lost_race");
+          return;
+        }
+        identity.verdict = "rejected";
+        this.emitDiagnostic("live.stream.stitch", {
+          streamPath,
+          bytesChecked: mismatchAt + 1,
+          mismatch: true,
+          phase: "segment"
+        });
+        const playerSettlement = firstSettlement.leg === first ? firstSettlement : secondSettlement;
+        const otherSettlement = playerSettlement === firstSettlement ? secondSettlement : firstSettlement;
+        deliverSegment(playerSettlement.leg, playerSettlement.value);
+        emitSegmentChunk(otherSettlement.leg, "lost_race");
+        return;
+      }
+      if (firstSettlement.kind === "failed") emitFailure(firstSettlement);
+      if (secondSettlement.kind === "failed") emitFailure(secondSettlement);
+      if (firstSettlement.kind === "failed" && secondSettlement.kind === "failed") {
+        failSegment(new BankNetworkError("直播分片双腿取数失败"));
+        return;
+      }
+      identity.attempts += 1;
+      if (identity.attempts >= maxGateAttempts) identity.verdict = "rejected";
+      const survivor = firstSettlement.kind === "done" ? firstSettlement : secondSettlement;
+      deliverSegment(survivor.leg, survivor.value);
+    }
+    async runLiveSegmentLeg(leg, { credentials, noteHeaders }) {
+      const armStall = () => {
+        if (leg.stallTimer !== void 0) this.windowObject.clearTimeout(leg.stallTimer);
+        leg.stallTimer = this.windowObject.setTimeout(() => {
+          if (leg.controller.signal.aborted) return;
+          leg.abortReason = "stalled";
+          leg.outcome = "stalled";
+          leg.controller.abort();
+          if (leg.reader !== void 0) {
+            void leg.reader.cancel().catch((error) => {
+              if (!isAbortError2(error)) this.reportLiveError("LIVE_CANCEL", "直播分片停滞读取取消失败", error);
+            });
+          }
+        }, this.config.stallMs);
+      };
+      armStall();
+      leg.startedAt = performanceNow(this.windowObject);
+      try {
+        let response;
+        try {
+          response = await this.nativeFetch.call(this.windowObject, leg.url, {
+            credentials,
+            signal: leg.controller.signal
+          });
+        } catch (error) {
+          if (isAbortError2(error) || leg.controller.signal.aborted) throw error;
+          leg.outcome = "network_error";
+          leg.errorName = error?.name;
+          throw new BankNetworkError("直播分片网络取数失败", error);
+        }
+        if (leg.controller.signal.aborted) throw abortError();
+        if (response.status < 200 || response.status >= 300) {
+          leg.outcome = "http_error";
+          leg.httpStatus = response.status;
+          throw new BankNetworkError(`直播分片网络响应状态无效: ${response.status}`);
+        }
+        noteHeaders(leg, response);
+        const reader = response.body.getReader();
+        leg.reader = reader;
+        armStall();
+        const bodyChunks = [];
+        try {
+          for (; ; ) {
+            const read = await reader.read();
+            if (read.done) break;
+            if (read.value.byteLength > 0) {
+              if (leg.ttfbAt === void 0) leg.ttfbAt = performanceNow(this.windowObject);
+              bodyChunks.push(read.value.slice());
+              leg.byteCount += read.value.byteLength;
+              armStall();
+            }
+            if (leg.controller.signal.aborted) throw abortError();
+          }
+        } catch (error) {
+          if (isAbortError2(error) || leg.controller.signal.aborted) throw error;
+          leg.outcome = "network_error";
+          leg.errorName = error?.name;
+          throw new BankNetworkError("直播分片响应读取失败", error);
+        }
+        if (leg.controller.signal.aborted) throw abortError();
+        const bytes = new Uint8Array(leg.byteCount);
+        let offset = 0;
+        for (const chunk of bodyChunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        return {
+          bytes,
+          status: response.status,
+          contentType: headerValue(response.headers, "Content-Type") || void 0
+        };
+      } finally {
+        if (leg.stallTimer !== void 0) {
+          this.windowObject.clearTimeout(leg.stallTimer);
+          leg.stallTimer = void 0;
+        }
+      }
     }
     async runLiveLeg(leg, { credentials, stitcher, noteHeaders }) {
       const armStall = () => {

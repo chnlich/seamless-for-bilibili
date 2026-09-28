@@ -253,7 +253,7 @@
       return "单路接管（无可用备用线路）";
     }
     if (facts.engagement === "failed") return "接管请求失败";
-    return "未接管（未发现 FLV 直播流）";
+    return "未接管（未发现直播媒体流）";
   }
 
   // src/extension/popup.js

@@ -30,6 +30,8 @@ import { createBankXMLHttpRequestClass } from '../src/bank/xhr.js';
 import {
   LiveStreamStitcher,
   classifyLiveRequest,
+  compareSegmentBytes,
+  hlsStreamPathOf,
   isLiveLocation,
   liveUrlExpiresAt,
   urlFromLiveUrlInfo,
@@ -46,6 +48,19 @@ const LIVE_PAIR_URL = 'https://d1--ov-gotcha07b.bilivideo.com/live-bvc/1/stream.
 const LIVE_HLS_URL = 'https://d1--ov-gotcha105.bilivideo.com/live-bvc/1/index.m3u8?expires=4102444800&sign=hls';
 const LIVE_KEY = '/live-bvc/1/stream.flv';
 const LIVE_PLAYURL_URL = 'https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id=21452505&protocol=0';
+const HLS_STREAM_DIR = '/live-bvc/791488/live_i9bl9s_SIPAZ9L_1b53ey_4000/';
+const HLS_MAIN_PLAYLIST = `https://d1--ov-gotcha105.bilivideo.com${HLS_STREAM_DIR}index.m3u8?expires=4102444800&sign=hls105`;
+const HLS_BACKUP_PLAYLIST = `https://d1--ov-gotcha105b.bilivideo.com${HLS_STREAM_DIR}index.m3u8?expires=4102444800&sign=hls105b`;
+const HLS_SEGMENT_URL = `https://d1--ov-gotcha207.bilivideo.com${HLS_STREAM_DIR}423384050.m4s?expires=4102444800&sign=seg207`;
+const HLS_SEGMENT_INIT_URL = `https://d1--ov-gotcha207.bilivideo.com${HLS_STREAM_DIR}423384050_init.m4s?expires=4102444800&sign=seg207`;
+const HLS_SEGMENT_ON_MAIN_URL = `https://d1--ov-gotcha105.bilivideo.com${HLS_STREAM_DIR}423384050.m4s?expires=4102444800&sign=segmain`;
+const HLS_SEGMENT_NEXT_URL = `https://d1--ov-gotcha207.bilivideo.com${HLS_STREAM_DIR}423384051.m4s?expires=4102444800&sign=seg207`;
+const HLS_SEGMENT_PAIR_FOR_PLAYER = `https://d1--ov-gotcha105.bilivideo.com${HLS_STREAM_DIR}423384050.m4s?expires=4102444800&sign=hls105`;
+const HLS_SEGMENT_PAIR_FOR_MAIN = `https://d1--ov-gotcha105b.bilivideo.com${HLS_STREAM_DIR}423384050.m4s?expires=4102444800&sign=hls105b`;
+const HLS_PLAYURL_BODY = liveUrlInfoBody(
+  [liveUrlInfoEntry(HLS_MAIN_PLAYLIST), liveUrlInfoEntry(HLS_BACKUP_PLAYLIST)],
+  `${HLS_STREAM_DIR}index.m3u8?`,
+);
 
 function playurlBody(baseUrl = MEDIA_URL, backupUrl = [PAIR_URL]) {
   return {
@@ -2407,24 +2422,43 @@ function stitcherHarness({ legCount = 2, chunkBytes = 8 } = {}) {
   return { stitcher, harness };
 }
 
-test('live locations and requests classify only flv streams on live media hosts', () => {
+test('live locations classify flv streams and hls segments, passing playlists through', () => {
   assert.equal(isLiveLocation(LIVE_LOCATION), true);
   assert.equal(isLiveLocation(new URL('https://www.bilibili.com/video/BVbank')), false);
-  assert.deepEqual(classifyLiveRequest({ url: LIVE_URL, locationObject: LIVE_LOCATION }).intercepted, true);
+  assert.deepEqual(classifyLiveRequest({ url: LIVE_URL, locationObject: LIVE_LOCATION }), {
+    intercepted: true,
+    url: LIVE_URL,
+    kind: 'flv_stream',
+  });
   for (const url of [
-    LIVE_HLS_URL,
-    'https://d1--ov-gotcha105.bilivideo.com/live-bvc/1/seg-1.ts?x=1',
-    'https://d1--ov-gotcha207.bilivideo.com/live-bvc/1/seg-1.m4s?x=1',
+    'https://d1--ov-gotcha105.bilivideo.com/live-bvc/1/live_xxx/seg-1.m4s?x=1',
+    'https://d1--ov-gotcha105.bilivideo.com/live-bvc/1/live_xxx/seg-1_init.m4s?x=1',
+    'https://d1--ov-gotcha105.bilivideo.com/live-bvc/1/live_xxx/seg-1.ts?x=1',
   ]) {
     const classification = classifyLiveRequest({ url, locationObject: LIVE_LOCATION });
-    assert.equal(classification.intercepted, false);
-    assert.equal(classification.reason, 'live_non_flv');
+    assert.equal(classification.intercepted, true);
+    assert.equal(classification.kind, 'hls_segment');
   }
+  assert.deepEqual(classifyLiveRequest({ url: LIVE_HLS_URL, locationObject: LIVE_LOCATION }), {
+    intercepted: false,
+    reason: 'live_hls_playlist',
+  });
+  assert.deepEqual(
+    classifyLiveRequest({
+      url: 'https://d1--ov-gotcha207.bilivideo.com/live-bvc/1/keepalive.txt?x=1',
+      locationObject: LIVE_LOCATION,
+    }),
+    { intercepted: false, reason: 'live_other_media' },
+  );
   assert.equal(
     classifyLiveRequest({ url: 'https://api.live.bilibili.com/xlive/room/flv', locationObject: LIVE_LOCATION }).reason,
     'non_media_host',
   );
   assert.equal(classifyLiveRequest({ url: LIVE_URL, enabled: false, locationObject: LIVE_LOCATION }).intercepted, false);
+  assert.equal(
+    classifyLiveRequest({ url: LIVE_HLS_URL, enabled: false, locationObject: LIVE_LOCATION }).intercepted,
+    false,
+  );
   const expiry = new URL(LIVE_URL).searchParams.get('expires');
   assert.equal(liveUrlExpiresAt(LIVE_URL), Number(expiry) * 1000);
   assert.equal(liveUrlExpiresAt('https://d1--ov-gotcha07.bilivideo.com/live-bvc/1/stream.flv'), undefined);
@@ -2795,7 +2829,7 @@ test('live takeover drops an expired pair address and continues with the player 
   bank.destroy();
 });
 
-test('live fetch passes non-flv live media back to the native path with live_non_flv', async () => {
+test('live fetch passes playlists and other live media back with their own reasons', async () => {
   let nativeCalled = 0;
   const { bank, windowObject } = createLiveBank({
     nativeFetch: async () => {
@@ -2811,8 +2845,12 @@ test('live fetch passes non-flv live media back to the native path with live_non
     source: 'https://d1--ov-gotcha105.bilivideo.com/live-bvc/1/index.m3u8',
     mirror: 'd1--ov-gotcha105.bilivideo.com',
     result: 'pass',
-    reason: 'live_non_flv',
+    reason: 'live_hls_playlist',
   });
+  const other = await liveFetchThrough(bank, 'https://d1--ov-gotcha207.bilivideo.com/live-bvc/1/keepalive.txt?x=1');
+  assert.equal(await other.text(), 'playlist');
+  const otherServe = windowObject.messages.filter((message) => message.code === 'bank.serve').at(-1);
+  assert.equal(otherServe.data.reason, 'live_other_media');
   bank.destroy();
 });
 
@@ -2961,7 +2999,7 @@ test('live XHR takeover races the paired backup and streams response bytes', asy
 
 test('live XHR passes non-flv live media and synchronous requests back', async () => {
   for (const [url, asyncFlag, reason] of [
-    [LIVE_HLS_URL, true, 'live_non_flv'],
+    [LIVE_HLS_URL, true, 'live_hls_playlist'],
     [LIVE_URL, false, 'sync_xhr'],
   ]) {
     const { bank, windowObject } = createLiveBank({ nativeFetch: async () => new Response('x') });
@@ -3245,4 +3283,386 @@ test('live chunk events carry errorName on network errors and omit details on su
     assert.equal(Object.hasOwn(chunk.data, 'errorName'), false);
   }
   paired.bank.destroy();
+});
+
+// ---- HLS 直播分片 ----
+
+function segmentFeed(bytes, { status = 200, headers = { 'Content-Type': 'video/mp4' } } = {}) {
+  const feed = liveFeed({ status, headers });
+  feed.push(bytes);
+  feed.close();
+  return feed;
+}
+
+function hlsFetchThrough(bank, url = HLS_SEGMENT_URL, init = {}) {
+  return liveFetchThrough(bank, url, init);
+}
+
+test('hls segment pairing builds the paired url from the entry host, its own query, and the same stream path', () => {
+  const { bank } = createLiveBank({ nativeFetch: async () => new Response('x') });
+  assert.deepEqual(bank.pairSegmentDecisionFor(new URL(HLS_SEGMENT_URL)), {
+    pairUrl: undefined,
+    miss: 'no_book_entry',
+  });
+
+  bank.observeLivePlayurlData(HLS_PLAYURL_BODY);
+  const pairedForPlayer = bank.pairSegmentDecisionFor(new URL(HLS_SEGMENT_URL));
+  assert.equal(pairedForPlayer.pairUrl, HLS_SEGMENT_PAIR_FOR_PLAYER);
+  assert.equal(pairedForPlayer.miss, undefined);
+  // 播放器本身命名主址时分到备址，配对 query 用条目自己的签名。
+  const pairedForMain = bank.pairSegmentDecisionFor(new URL(HLS_SEGMENT_ON_MAIN_URL));
+  assert.equal(pairedForMain.pairUrl, HLS_SEGMENT_PAIR_FOR_MAIN);
+  assert.equal(pairedForMain.miss, undefined);
+  // init 分片与媒体分片同流目录，同样配对。
+  assert.equal(
+    bank.pairSegmentDecisionFor(new URL(HLS_SEGMENT_INIT_URL)).pairUrl,
+    `https://d1--ov-gotcha105.bilivideo.com${HLS_STREAM_DIR}423384050_init.m4s?expires=4102444800&sign=hls105`,
+  );
+
+  // 跨流目录（跨 cluster 的另一条流）不配：只认同目录的 .m3u8 条目。
+  const otherStream = liveUrlInfoBody(
+    [liveUrlInfoEntry('https://d1--ov-gotcha07.bilivideo.com/live-bvc/247297/live_other.flv?expires=4102444800&sign=flv')],
+    '/live-bvc/247297/live_other.flv?',
+  );
+  bank.observeLivePlayurlData(otherStream);
+  assert.equal(
+    bank.pairSegmentDecisionFor(new URL(HLS_SEGMENT_URL)).pairUrl,
+    HLS_SEGMENT_PAIR_FOR_PLAYER,
+  );
+  assert.deepEqual(bank.pairSegmentDecisionFor(new URL(
+    `https://d1--ov-gotcha07.bilivideo.com/live-bvc/247297/423384050.m4s?x=1`,
+  )), { pairUrl: undefined, miss: 'no_book_entry' });
+
+  // 只有单腿条目时，条目主机与播放器主机不同仍配对。
+  const single = createLiveBank({ nativeFetch: async () => new Response('x') });
+  single.bank.observeLivePlayurlData(liveUrlInfoBody(
+    [liveUrlInfoEntry(HLS_MAIN_PLAYLIST)],
+    `${HLS_STREAM_DIR}index.m3u8?`,
+  ));
+  assert.equal(
+    single.bank.pairSegmentDecisionFor(new URL(HLS_SEGMENT_URL)).pairUrl,
+    HLS_SEGMENT_PAIR_FOR_PLAYER,
+  );
+  // 播放器命名的就是条目主机时无备可配。
+  assert.deepEqual(single.bank.pairSegmentDecisionFor(new URL(HLS_SEGMENT_ON_MAIN_URL)), {
+    pairUrl: undefined,
+    miss: 'no_alt_host',
+  });
+  single.bank.destroy();
+
+  // 条目过期不配。
+  const clock = { value: 100000 };
+  const stale = createLiveBank({ nativeFetch: async () => new Response('x'), now: () => clock.value });
+  stale.bank.observeLivePlayurlData(HLS_PLAYURL_BODY);
+  clock.value += 3600000 + 1;
+  assert.deepEqual(stale.bank.pairSegmentDecisionFor(new URL(HLS_SEGMENT_URL)), {
+    pairUrl: undefined,
+    miss: 'stale',
+  });
+  stale.bank.destroy();
+  bank.destroy();
+});
+
+test('hls fetch gate compares the first raced pair in full, then races first-completion', async () => {
+  const feeds = {
+    [HLS_SEGMENT_URL]: segmentFeed(encoded('ABCD')),
+    [HLS_SEGMENT_PAIR_FOR_PLAYER]: segmentFeed(encoded('ABCD')),
+  };
+  const calls = [];
+  const { bank, windowObject } = createLiveBank({
+    playinfo: HLS_PLAYURL_BODY,
+    nativeFetch: async (url) => {
+      calls.push(url);
+      return feeds[url].response;
+    },
+  });
+  const response = await hlsFetchThrough(bank);
+  assert.equal(response.status, 200);
+  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [...encoded('ABCD')]);
+
+  const stitch = windowObject.messages.find((message) => message.code === 'live.stream.stitch');
+  assert.deepEqual(stitch.data, {
+    streamPath: HLS_STREAM_DIR,
+    bytesChecked: 4,
+    mismatch: false,
+    phase: 'segment',
+  });
+  const serve = windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.equal(serve.data.result, 'hit');
+  assert.equal(serve.data.reason, 'live_hls_segment');
+  assert.equal(serve.data.pairedAddressAvailable, true);
+  let chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result, data.bytes, data.chunkIndex]),
+    [[0, 'fetched', 4, 0], [1, 'lost_race', 4, 0]],
+  );
+  assert.deepEqual(calls, [HLS_SEGMENT_URL, HLS_SEGMENT_PAIR_FOR_PLAYER]);
+
+  // 门开后的第二个分片：先完成的腿直接供给，另一腿取消，其已读字节按浪费口径记录。
+  const nextFeeds = {
+    [HLS_SEGMENT_NEXT_URL]: liveFeed(),
+    [`https://d1--ov-gotcha105.bilivideo.com${HLS_STREAM_DIR}423384051.m4s?expires=4102444800&sign=hls105`]: liveFeed(),
+  };
+  const pairNext = `https://d1--ov-gotcha105.bilivideo.com${HLS_STREAM_DIR}423384051.m4s?expires=4102444800&sign=hls105`;
+  bank.nativeFetch = async (url) => {
+    calls.push(url);
+    return nextFeeds[url].response;
+  };
+  const second = await hlsFetchThrough(bank, HLS_SEGMENT_NEXT_URL);
+  const bodyPromise = second.arrayBuffer();
+  nextFeeds[pairNext].push(encoded('EFGH'));
+  nextFeeds[pairNext].close();
+  await tick();
+  await tick();
+  assert.deepEqual([...new Uint8Array(await bodyPromise)], [...encoded('EFGH')]);
+  assert.equal(nextFeeds[HLS_SEGMENT_NEXT_URL].cancelled, true);
+  chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk').slice(-2);
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result, data.bytes]),
+    [[1, 'fetched', 4], [0, 'lost_race', 0]],
+  );
+  bank.destroy();
+});
+
+test('hls fetch identity mismatch downgrades the stream to permanent single leg', async () => {
+  const calls = [];
+  const feeds = {
+    [HLS_SEGMENT_URL]: segmentFeed(encoded('ABCD')),
+    [HLS_SEGMENT_PAIR_FOR_PLAYER]: segmentFeed(encoded('ABCE')),
+  };
+  const { bank, windowObject } = createLiveBank({
+    playinfo: HLS_PLAYURL_BODY,
+    nativeFetch: async (url) => {
+      calls.push(url);
+      return feeds[url].response;
+    },
+  });
+  const response = await hlsFetchThrough(bank);
+  // 不一致时交付播放器所名地址的字节。
+  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [...encoded('ABCD')]);
+  const stitch = windowObject.messages.find((message) => message.code === 'live.stream.stitch');
+  assert.deepEqual(stitch.data, {
+    streamPath: HLS_STREAM_DIR,
+    bytesChecked: 4,
+    mismatch: true,
+    phase: 'segment',
+  });
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result, data.bytes]),
+    [[0, 'fetched', 4], [1, 'lost_race', 4]],
+  );
+
+  // 后续分片单腿：只请求播放器所名地址。
+  bank.nativeFetch = async (url) => {
+    calls.push(url);
+    return segmentFeed(encoded('WXYZ')).response;
+  };
+  const second = await hlsFetchThrough(bank, HLS_SEGMENT_NEXT_URL);
+  assert.deepEqual([...new Uint8Array(await second.arrayBuffer())], [...encoded('WXYZ')]);
+  assert.deepEqual(calls.slice(-1), [HLS_SEGMENT_NEXT_URL]);
+  const secondServe = windowObject.messages.filter((message) => message.code === 'bank.serve').at(-1);
+  assert.equal(secondServe.data.reason, 'live_hls_segment_unpaired');
+  assert.equal(secondServe.data.pairedAddressAvailable, undefined);
+  bank.destroy();
+});
+
+test('hls fetch delivers the survivor and permanently downgrades after repeated gate leg deaths', async () => {
+  const calls = [];
+  const { bank, windowObject } = createLiveBank({
+    playinfo: HLS_PLAYURL_BODY,
+    nativeFetch: async (url) => {
+      calls.push(url);
+      if (url === HLS_SEGMENT_URL) return segmentFeed(encoded('ABCD')).response;
+      return segmentFeed(encoded('X'), { status: 503 }).response;
+    },
+  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await hlsFetchThrough(bank, HLS_SEGMENT_URL);
+    assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [...encoded('ABCD')]);
+  }
+  const deadLegChunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk'
+    && message.data.slot === 1);
+  assert.deepEqual(deadLegChunks.map(({ data }) => data.result), ['http_error', 'http_error', 'http_error']);
+  assert.deepEqual(deadLegChunks.map(({ data }) => data.httpStatus), [503, 503, 503]);
+
+  // 三次门期失败后永久降级：下一分片只请求播放器所名地址。
+  bank.nativeFetch = async (url) => {
+    calls.push(url);
+    return segmentFeed(encoded('WXYZ')).response;
+  };
+  const downgraded = await hlsFetchThrough(bank, HLS_SEGMENT_NEXT_URL);
+  assert.deepEqual([...new Uint8Array(await downgraded.arrayBuffer())], [...encoded('WXYZ')]);
+  assert.deepEqual(calls.slice(-1), [HLS_SEGMENT_NEXT_URL]);
+  const serve = windowObject.messages.filter((message) => message.code === 'bank.serve').at(-1);
+  assert.equal(serve.data.reason, 'live_hls_segment_unpaired');
+  bank.destroy();
+});
+
+test('hls fetch fails explicitly when both legs fail', async () => {
+  const { bank, windowObject } = createLiveBank({
+    playinfo: HLS_PLAYURL_BODY,
+    nativeFetch: async () => new Response('no', { status: 500 }),
+  });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    await assert.rejects(hlsFetchThrough(bank), /直播分片双腿取数失败/);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(errors.length, 1);
+  const failedServes = windowObject.messages.filter((message) => message.code === 'bank.serve'
+    && message.data.result === 'failed');
+  assert.equal(failedServes.length, 1);
+  assert.equal(failedServes[0].data.reason, 'live_hls_segment_failed');
+  assert.equal(failedServes[0].data.errorName, 'BankNetworkError');
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result, data.httpStatus]),
+    [[0, 'http_error', 500], [1, 'http_error', 500]],
+  );
+  bank.destroy();
+});
+
+test('hls fetch without a pair covers the segment with the player-named URL alone', async () => {
+  const calls = [];
+  const { bank, windowObject } = createLiveBank({
+    nativeFetch: async (url) => {
+      calls.push(url);
+      return segmentFeed(encoded('ABCD')).response;
+    },
+  });
+  const response = await hlsFetchThrough(bank);
+  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [...encoded('ABCD')]);
+  assert.deepEqual(calls, [HLS_SEGMENT_URL]);
+  const serve = windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.equal(serve.data.result, 'hit');
+  assert.equal(serve.data.reason, 'live_hls_segment_unpaired');
+  assert.equal(serve.data.pairMiss, 'no_book_entry');
+  bank.destroy();
+});
+
+test('hls XHR takeover gates, races, and passes playlists through like the fetch channel', async () => {
+  const feeds = {
+    [HLS_SEGMENT_URL]: segmentFeed(encoded('ABCD')),
+    [HLS_SEGMENT_PAIR_FOR_PLAYER]: segmentFeed(encoded('ABCD')),
+  };
+  const { bank, windowObject } = createLiveBank({
+    playinfo: HLS_PLAYURL_BODY,
+    nativeFetch: async (url) => feeds[url].response,
+  });
+  windowObject.XMLHttpRequest = createBankXMLHttpRequestClass({
+    windowObject,
+    nativeConstructor: NativeXHR,
+    bank,
+  });
+
+  const playlistXhr = new windowObject.XMLHttpRequest();
+  playlistXhr.open('GET', LIVE_HLS_URL);
+  playlistXhr.send();
+  await tick();
+  assert.equal(playlistXhr._native.sendCalls.length, 1);
+  const playlistServe = windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.equal(playlistServe.data.reason, 'live_hls_playlist');
+
+  const events = [];
+  const xhr = new windowObject.XMLHttpRequest();
+  xhr.responseType = 'arraybuffer';
+  for (const type of ['readystatechange', 'load', 'loadend']) {
+    xhr.addEventListener(type, () => events.push(`${type}:${xhr.readyState}`));
+  }
+  xhr.open('GET', HLS_SEGMENT_URL);
+  xhr.send();
+  await new Promise((resolve) => xhr.addEventListener('loadend', resolve));
+  assert.equal(xhr.status, 200);
+  assert.deepEqual([...new Uint8Array(xhr.response)], [...encoded('ABCD')]);
+  assert.equal(xhr._native.sendCalls.length, 0);
+  assert.equal(events[0], 'readystatechange:2');
+  assert.equal(events.includes('load:4'), true);
+  assert.equal(events.at(-1), 'loadend:4');
+  const serve = windowObject.messages.filter((message) => message.code === 'bank.serve').at(-1);
+  assert.equal(serve.data.result, 'hit');
+  assert.equal(serve.data.reason, 'live_hls_segment');
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result, data.bytes]),
+    [[0, 'fetched', 4], [1, 'lost_race', 4]],
+  );
+  const stitch = windowObject.messages.find((message) => message.code === 'live.stream.stitch');
+  assert.equal(stitch.data.mismatch, false);
+  assert.equal(stitch.data.phase, 'segment');
+  bank.destroy();
+});
+
+test('hls XHR surfaces an explicit failure when both segment legs fail', async () => {
+  const { bank, windowObject } = createLiveBank({
+    playinfo: HLS_PLAYURL_BODY,
+    nativeFetch: async () => new Response('no', { status: 500 }),
+  });
+  windowObject.XMLHttpRequest = createBankXMLHttpRequestClass({
+    windowObject,
+    nativeConstructor: NativeXHR,
+    bank,
+  });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  const xhr = new windowObject.XMLHttpRequest();
+  const events = [];
+  xhr.addEventListener('error', () => events.push('error'));
+  xhr.addEventListener('loadend', () => events.push('loadend'));
+  xhr.open('GET', HLS_SEGMENT_URL);
+  xhr.send();
+  await tick();
+  console.error = originalError;
+  assert.deepEqual(events, ['error', 'loadend']);
+  assert.equal(errors.length >= 1, true);
+  const failedServes = windowObject.messages.filter((message) => message.code === 'bank.serve'
+    && message.data.result === 'failed');
+  assert.equal(failedServes.length, 1);
+  assert.equal(failedServes[0].data.reason, 'live_hls_segment_failed');
+  bank.destroy();
+});
+
+test('hls fetch stall rule kills a silent leg after stallMs and the survivor serves', async () => {
+  const timers = manualTimers();
+  const calls = [];
+  const { bank, windowObject } = createLiveBank({
+    playinfo: HLS_PLAYURL_BODY,
+    timers,
+    nativeFetch: async (url) => {
+      calls.push(url);
+      if (url === HLS_SEGMENT_URL) return segmentFeed(encoded('ABCD')).response;
+      return liveFeed().response;
+    },
+  });
+  const response = await hlsFetchThrough(bank);
+  const bodyPromise = response.arrayBuffer();
+  await tick();
+  // 门期：先到且收完的腿不立即交付，等静默腿在 10 秒无字节后死亡再交付存活腿。
+  assert.equal(windowObject.messages.some((message) => message.code === 'live.stream.stitch'), false);
+  // 收完的腿计时器已清，只剩静默腿的停滞计时器。
+  const stallTimerIds = [...timers.pending.keys()];
+  assert.equal(stallTimerIds.length, 1);
+  timers.fireId(stallTimerIds[0]);
+  await tick();
+  assert.deepEqual([...new Uint8Array(await bodyPromise)], [...encoded('ABCD')]);
+  const chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  assert.deepEqual(
+    chunks.map(({ data }) => [data.slot, data.result, data.bytes]),
+    [[1, 'stalled', 0], [0, 'fetched', 4]],
+  );
+  // 门期一腿停滞按一次无法完整比对记；流未降级，但三次后降级由其余测试覆盖。
+  const serve = windowObject.messages.find((message) => message.code === 'bank.serve');
+  assert.equal(serve.data.result, 'hit');
+  bank.destroy();
+});
+
+test('hls segment byte comparison treats length differences as mismatches', async () => {
+  assert.equal(compareSegmentBytes(encoded('ABCD'), encoded('ABCD')), -1);
+  assert.equal(compareSegmentBytes(encoded('ABCD'), encoded('ABCE')), 3);
+  assert.equal(compareSegmentBytes(encoded('ABC'), encoded('ABCD')), 3);
+  assert.equal(compareSegmentBytes(encoded('ABCD'), encoded('ABC')), 3);
 });
