@@ -17,13 +17,14 @@
 1. 用捕获脚本得到原始截图到仓库根的 `store-images-raw/`（不提交，已在仓库 .gitignore 中忽略：页面截图含第三方内容）：
    需要 `video-popup-light.png`、`live-popup-light.png`、`video-page.png`、`live-page.png` 与 `report.json`。
 2. `node store/images/src/compose.mjs` → 弹窗特写按原始捕获的完整尺寸原样导出（不做裁切），并渲染上表全部 PNG。
-3. 文案修改直接改 `src/*.html`（截图说明语在 HTML 里；直播说明语按 `report.json` 的实际接管状态自动插值）。
+   每张图渲染前自检：弹窗、说明语和文字块不出画，说明语不压弹窗，标题只在词边界换行，背景页面截图必须加载成功；任一不满足即报错退出。
+3. 文案修改直接改 `src/*.html`（截图说明语在 HTML 里；直播说明语按 `report.json` 的实际接管状态插值到渲染页面，源文件不改）。
 
 ## 捕获来源（2026-09-28）
 
 - commit `9b98bf2`，buildId `src-a310e6b368da2fda35983525`，Chrome 154.0.8037.57（系统 Chrome，Windows），
   临时专用 profile，未登录。
 - 视频：BV1esa36qEbN（播放量 < 10 的冷门视频）；直播：房间 27632810（首页候选里第一个真实进入
-  FLV 接管的房间；gotcha07/07b 竞速后前缀比对不一致，弹窗如实显示单路接管）。
+  FLV 接管的房间；gotcha07/07b 两条线路配对竞速，弹窗显示“正在按两条线路竞速下载”）。
 - 捕获即验证：弹窗读数（缓冲条、120 秒申请状态、线路健康词与连接时间、直播接管行）来自真实运行，
   深色模式经 `prefers-color-scheme` 模拟逐像素核对（健康词整词着色，无半色缺陷）。
