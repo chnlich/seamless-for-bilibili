@@ -73,9 +73,7 @@
   function emptyLiveFacts() {
     return {
       serveCount: 0,
-      engagedCount: 0,
-      failedCount: 0,
-      passCount: 0,
+      engagement: void 0,
       pairedAddressAvailable: false,
       pairRejected: false
     };
@@ -95,12 +93,11 @@
     facts.serveCount += 1;
     const klass = liveServeClass(data.result);
     if (klass === "engaged") {
-      facts.engagedCount += 1;
-      if (data.pairedAddressAvailable === true) facts.pairedAddressAvailable = true;
+      facts.engagement = "engaged";
+      facts.pairedAddressAvailable = data.pairedAddressAvailable === true;
+      facts.pairRejected = false;
     } else if (klass === "failed") {
-      facts.failedCount += 1;
-    } else {
-      facts.passCount += 1;
+      facts.engagement = "failed";
     }
     return facts;
   }
@@ -239,11 +236,11 @@
   }
   function liveTakeoverText(facts) {
     if (!facts || facts.serveCount === 0) return "等待直播数据";
-    if (facts.engagedCount > 0) {
+    if (facts.engagement === "engaged") {
       if (facts.pairedAddressAvailable && !facts.pairRejected) return "正在按两条线路竞速下载";
       return "单路接管（无可用备用线路）";
     }
-    if (facts.failedCount > 0) return "接管请求失败";
+    if (facts.engagement === "failed") return "接管请求失败";
     return "未接管（未发现 FLV 直播流）";
   }
 

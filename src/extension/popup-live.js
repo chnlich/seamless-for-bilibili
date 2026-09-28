@@ -34,18 +34,16 @@ export function applyPopupRoute(documentObject, route) {
 export function emptyLiveFacts() {
   return {
     serveCount: 0,
-    engagedCount: 0,
-    failedCount: 0,
-    passCount: 0,
+    engagement: undefined,
     pairedAddressAvailable: false,
     pairRejected: false,
   };
 }
 
 // 直播页 bank.serve 三类结果：hit=接管已供数，failed=接管尝试失败，pass=按原样放行
-// （含 live_non_flv：播放器未使用 FLV 流，接管从未介入）。接管一旦供数，之后的放行
-// 事件（心跳、非 FLV 附属请求）不改变「已接管」事实，所以状态按类计数取优先级，
-// 不按最近一条。
+// （含 live_non_flv：播放器未使用 FLV 流，接管从未介入）。放行事件（心跳、非 FLV
+// 附属请求）不改变接管事实，所以状态取最近一条接管类（hit/failed）结果，而非最近
+// 一条 serve：供数后双腿全灭要显示失败，失败后播放器重试成功要回到接管。
 export function liveServeClass(result) {
   if (result === 'hit') return 'engaged';
   if (result === 'failed') return 'failed';
@@ -62,12 +60,12 @@ export function foldLiveEvent(facts, event) {
   facts.serveCount += 1;
   const klass = liveServeClass(data.result);
   if (klass === 'engaged') {
-    facts.engagedCount += 1;
-    if (data.pairedAddressAvailable === true) facts.pairedAddressAvailable = true;
+    // 每次接管只发一条 hit（先于本次接管的拼接裁决），新一轮接管以这条的配对事实重置。
+    facts.engagement = 'engaged';
+    facts.pairedAddressAvailable = data.pairedAddressAvailable === true;
+    facts.pairRejected = false;
   } else if (klass === 'failed') {
-    facts.failedCount += 1;
-  } else {
-    facts.passCount += 1;
+    facts.engagement = 'failed';
   }
   return facts;
 }
