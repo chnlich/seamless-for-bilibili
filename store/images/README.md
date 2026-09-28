@@ -5,8 +5,8 @@
 
 | 文件 | 尺寸 | 内容 |
 |---|---|---|
-| `screenshot-01-popup-video.png` | 1280×800 | 视频页上的真实弹窗（背景为真实页面截图，整体模糊以隐藏第三方内容） |
-| `screenshot-02-popup-live.png` | 1280×800 | 直播页上的真实弹窗（同上） |
+| `screenshot-01-popup-video.png` | 1280×800 | 视频页上的真实弹窗（背景为真实页面截图，整体模糊以隐藏第三方内容）。**待重摄**：拍的是旧的单开关弹窗，popup 现在有两个常驻开关（to recapture: popup now has two switches） |
+| `screenshot-02-popup-live.png` | 1280×800 | 直播页上的真实弹窗（同上）。**待重摄**：同上（to recapture: popup now has two switches） |
 | `screenshot-03-racing-diagram.png` | 1280×800 | 机制示意图：双镜像竞速、120 秒缓冲、流量代价 |
 | `promo-tile-440x280.png` | 440×280 | 小型宣传图（必需项） |
 | `marquee-1400x560.png` | 1400×560 | Marquee 宣传图（可选项） |

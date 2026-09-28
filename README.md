@@ -40,14 +40,14 @@
 - **直播接近两倍流量**：配对后两路一直同时下载，流量接近单路的两倍。
 - **提前下载**：120 秒缓冲目标与预取会把还没看到的数据先下载；提前离开视频页，这些字节就白下了。
 - **内存**：每个标签页的媒体缓存最多约 512 MiB。
-- **磁盘**：本地诊断日志按设计不轮转、不设上限，随使用持续增长（开发者自用浏览器实测：视频页每打开 1 小时约 7 MB）；卸载扩展即全部删除。
-- **开关**：弹窗里的「视频增强」开关只作用于视频页（刷新后生效）；直播页的接管今天没有单独开关；不想承担直播的双倍流量，请在 chrome://extensions 停用本扩展。
+- **磁盘**：本地诊断日志只保留最近 3 天（72 小时），超期记录自动删除；实测视频页每打开 1 小时约产生 7 MB，因此占用大致以最近 3 天的用量为上界；卸载扩展即全部删除。
+- **开关**：弹窗里有两个开关，都在刷新页面后生效：「视频增强」只作用于视频页，「直播增强」只作用于直播页；不想承担直播的双倍流量，把「直播增强」关掉即可，视频增强不受影响。
 
 ![视频页弹窗截图](store/images/screenshot-01-popup-video.png)
 
 ## 弹窗（popup）怎么读
 
-弹窗只读、只显示观测事实，不影响播放、不上传：
+弹窗顶部有两个常驻开关（改动在刷新页面后生效）：「视频增强」控制视频页、「直播增强」控制直播页，各自独立。弹窗其余部分只读、只显示观测事实，不影响播放、不上传：
 
 - **缓冲**：一条缓冲条和「已缓冲 N 秒 / 目标 120 秒」。数值是覆盖当前播放点的连续可播放前向秒数，不是整段视频的缓冲；条到头（120 秒）变绿。
 - **120 秒申请状态**：向播放器申请 120 秒缓存的结果，分为已生效 / 等待生效 / 播放器不支持 / 申请失败四种。
@@ -86,7 +86,7 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 说明带宽跟不上当前码率。扩展能做的是把带宽花在播放器真正需要的下载上，它不能让缓冲在慢线路上停止流失。
 
 **直播能单独关掉吗？**
-今天没有直播单独开关。不想承担直播双倍流量，请在 chrome://extensions 停用整个扩展。
+可以。弹窗里的「直播增强」开关只控制直播页（刷新后生效）：关闭后播放器按原样自己下载，扩展不接管、不竞速，视频页的增强不受影响。
 
 **会动我的播放操作吗？**
 不会。播放、暂停、拖动、倍速、画质、音量与轨道选择仍由你和播放器决定；弹窗只读。
@@ -109,7 +109,8 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 ## 当前行为
 
 - `/video/*` 与 `/list/watchlater*` 使用同一视频增强。扩展拦截视频页媒体分片请求，命中时从内存回应，未命中时由扩展取回覆盖请求的完整分片、入库后再回应；分片只在实例内存中保存，离开视频路由或页面关闭即释放，不落盘；仍只对当前原生播放器尝试一次 120 秒稳定缓存目标，并只读显示覆盖当前播放点的 `video.buffered` 连续区间。不接管播放，不调用 `play()`/`pause()`，不写播放位置、倍速、画质、音量、静音、source，也不改变播放器的清晰度、seek、播放暂停或音视频轨决策。
-- popup 只显示视频增强开关和只读观测事实，不影响播放，不上传。
+- popup 常驻显示「视频增强」「直播增强」两个开关和只读观测事实，不影响播放，不上传。每个开关只作用于自己的页面类型：www.bilibili.com 读视频开关，live.bilibili.com 读直播开关。
+- 开发诊断日志只保留最近 3 天（72 小时）：超过 72 小时的事件按自身 `wallTime` 由后台清理删除；session 在自身 `startedAt` 超过 72 小时且名下已无剩余事件时一并删除。清理由 service worker 在启动时和日志批次写入后触发，用 `chrome.storage.session` 节流到至多每小时一次，分小批 readwrite 事务进行，不长期占用 events 存储；失败向 console 全量报告。导出在开始时固定 maxEventId 快照，范围内的记录被清理时分页原样跳过，导出照常完成（`src/diagnostics/prune.js`、`src/diagnostics/worker.js`、`src/diagnostics/export.js`）。
 
 ## 浏览器后台行为
 
@@ -123,6 +124,7 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 
 ## 下载层
 
+- 接管受弹窗开关控制：www.bilibili.com 的分片接管只看「视频增强」，live.bilibili.com 的流接管只看「直播增强」，改动在刷新页面后生效。下载层默认让路：页面加载后到内容脚本读到开关值并写入接管标记之前，任何媒体请求都不接管；开关关闭时永远停在让路。让路中的媒体请求由播放器原生下载，不竞速、不缓存，也不产生 `bank.serve`/`bank.fetch.chunk` 记录；页面与开关状态照常进入诊断日志。因此开关开启时，加载最初几毫秒内的个别请求可能由播放器原生下载，这是关闭「先读开关再接管」窗口的代价。
 - 识别为媒体分片且带闭合单段 `Range` 的请求一律由下载层拦截。命中时从内存中的完整分片切片回应，未命中时由扩展用同一 URL 和凭据取回覆盖范围的完整分片，入库后再回应播放器的原始 Range；播放器不会为这类媒体分片另行发起网络请求。非媒体请求、缺少 `Range`、非闭合 `Range`、同步 XHR、直播页非 FLV 媒体请求（`live_non_flv`），以及下载层自身的 `internal_fallback`/`internal_error` 路径仍按原样放行，并由 `bank.serve` 记录 `pass` 和原因（包括 `range_missing`、`range_not_closed`、`sync_xhr`、`live_non_flv`）。`bank.serve` 的命中事件记录 `mirror` 与 `durationMs`，`bank.fetch.chunk` 记录 `mirror`。
 - 直播页（`live.bilibili.com`）只做下载接管与双路竞速，不做预拉、不设缓存目标。播放器在直播页发起的 `.flv` 长连接请求由扩展接管：首个此类请求到达时按需同步解析页面内嵌 `playurl_info`，并观察播放器自身的直播 `getRoomPlayInfo` 流量补充地址簿；只配同 cluster 主备两路（如 07 对 07b），跨 cluster 不配，地址不合成、不猜，URL 签名 `expires` 到期按地址失效处理。双腿 reader 并发累积，拼接窗口与前缀门窗口同按 `BANK_CONFIG.chunkBytes`（1 MiB）分窗：共同前缀比对一致才进入竞速交付，先达字节供给，败腿已读字节按既有浪费口径记录；竞速中重叠窗口持续比对，晚到不一致保领先腿、撤销另一腿；门期备腿停滞按单腿死处理，单腿死后余腿独跑、不重连。查无配对或前缀不一致时永久降级为播放器所名 URL 单腿接管（不制造播放故障）。双腿全灭、或签名到期且无新地址时显式失败，不静默退回原生。直播流事件按偏移分窗复用 `bank.fetch.chunk`（`chunkIndex` 为偏移对 `chunkBytes` 下取整，`slot` 标腿）与 `bank.serve`（`result`/`reason` 增 `live_stream`、`live_stream_unpaired`、`live_non_flv`），拼接裁决记 `live.stream.stitch`（`streamPath` 为去 query 的流路径、`bytesChecked` 为累计比对字节数、`mismatch`、`phase` 为 `prefix` 或 `stream`）。
 - 预取窗口按媒体资源分别锚定在仍未供数完成的播放器请求所需的最小块号；没有在途请求时使用最近一次播放器请求的起始块。窗口最多覆盖 48 个块，并发上限 4，只选择窗口内尚未入库且连续失败未达 3 次的前四个块。失败块下一轮自然重新进入窗口，达到上限后向需要它的播放器请求报告错误。
@@ -136,7 +138,7 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 - popup 面向普通观众，只讲三件事：缓冲、下载线路、连接时间。视频页显示一条缓冲条和「已缓冲 N 秒 / 目标 120 秒」，数值是覆盖当前播放点的连续可播放前向秒数（`src/extension/popup.js:62-77`、`src/extension/popup-view.js`、`src/extension/readouts.js`）；下方一行报告向播放器申请 120 秒缓存的结果：已生效、等待生效、播放器不支持，或申请失败（`src/ui/panel.js`、`src/vod/controller.js` 的 `updateStatus`）。
 - popup 的「下载线路」卡片按镜像列出本次播放实际用到的每条 CDN 线路（通常两条），每条给一个健康状况词（正常、有停滞、有错误、尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，来自 `logs:cdn-summary` 的每镜像 TTFB P50/P90）（`src/extension/popup-view.js`、`src/diagnostics/cdn.js`、`src/diagnostics/worker.js`）。线路名是镜像主机名的可读短名。
 - 直播页（live.bilibili.com）同一风格：同样的「下载线路」卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现 FLV 直播流）/ 等待直播数据），由内容侧折叠 `bank.serve` 事件得出；直播不设缓冲目标，popup 不显示缓冲条（`src/extension/popup-live.js`、`src/extension/popup-view.js`）。popup 的路由判定优先使用内容侧自报的 `routeKind`，因为 popup 没有 `tabs` 权限、读不到标签页地址（`src/diagnostics/client.js` 的 `getStatus`、`src/extension/readouts.js`）。
-- popup 面板只读，不影响播放、不上传；内容侧错误只在存在时以一句人话显示，非 Bilibili 标签页或没有内容脚本的标签页只显示一句友好提示（`src/extension/popup.js`、`src/extension/popup-view.js`）。popup 底部保留「打开开发日志」入口，日志页本身不变。
+- popup 面板只读，不影响播放、不上传；内容侧错误只在存在时以一句人话显示，非 Bilibili 标签页或没有内容脚本的标签页只显示一句友好提示（`src/extension/popup.js`、`src/extension/popup-view.js`）。popup 底部保留「打开开发日志」入口。日志页开头写明保留期限：日志只保留最近 3 天（72 小时），更早的记录自动删除。
 - 所有 `media.*` 事件都附带同一帧周期聚合的 `frameTiming`，包括 presentedTotal、maxFrameGapMs、processingMs、displayLead、mediaStep 与 append 相关指标（`src/diagnostics/media.js`、`src/diagnostics/privacy.js:195-212`）。这些细节只进开发日志；popup 不再展示 readyState、networkState、轨道 ranges、库存计数或持久化状态等开发读数。
 - 下载层库存只列出本次播放实际参与的分轨（`resourceState` 或 `chunks` 中出现过的资源），不展示地址簿里的所有表示（`src/bank/inventory.js:103-107`）；它作为 `bank.inventory` 诊断事件进入开发日志。
 - 日志页提供 CDN 竞速面板，按镜像统计竞速进入、胜出、TTFB P50/P90、停滞与交付字节，并给出配对覆盖率与浪费字节率（`src/diagnostics/logs.js`、`src/diagnostics/worker.js`）。

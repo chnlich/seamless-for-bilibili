@@ -14,8 +14,8 @@ Applies to: Bilibili 桌面网页抗卡 (Chrome extension, version 1.0.0).
 ### 处理哪些数据、放在哪里
 
 1. **媒体分片（音频/视频字节）**：只保存在页面内存中（每个标签页上限 512 MiB），离开视频路由（转到非视频页或换到另一个视频）或关闭页面时释放；直播流字节只在内存中转交播放器。媒体字节不写入磁盘，也不进入诊断日志。
-2. **开发诊断日志**：保存在扩展自身 origin 的本地 IndexedDB 数据库（`bilibili-development-logs`）中，只追加，不删除、不轮转、不设条数或容量上限。每打开一个 `www.bilibili.com` 或 `live.bilibili.com` 页面（包括非视频页）都会建立一条记录。日志字段只包括：时间戳、浏览器标签页编号、扩展版本与构建编号、页面地址中的站点与路径、视频编号（如 bvid）、分 P 编号、媒体编号、去除 query/hash 的媒体地址与镜像主机名、媒体请求的字节数/耗时/结果、播放器媒体事件（播放、暂停、拖动、倍速与音量变化等）及当时的媒体事实（buffered/seekable 区间、readyState、帧统计、清晰度等）、扩展动作和去除地址参数的错误文本。**不保存**：query/hash、签名 CDN 参数、Cookie、账号、标题、页面文字、弹幕/聊天、API body、音视频数据、帧或截图。无法安全读取的值记为“未提供”。
-3. **偏好设置**：`chrome.storage.local` 中只保存一个开关（视频增强启用或关闭）。
+2. **开发诊断日志**：保存在扩展自身 origin 的本地 IndexedDB 数据库（`bilibili-development-logs`）中，只保留最近 3 天（72 小时）：超过 72 小时的记录按其自身时间自动删除，保留窗口内只追加，不设条数或容量上限。每打开一个 `www.bilibili.com` 或 `live.bilibili.com` 页面（包括非视频页）都会建立一条记录。日志字段只包括：时间戳、浏览器标签页编号、扩展版本与构建编号、页面地址中的站点与路径、视频编号（如 bvid）、分 P 编号、媒体编号、去除 query/hash 的媒体地址与镜像主机名、媒体请求的字节数/耗时/结果、播放器媒体事件（播放、暂停、拖动、倍速与音量变化等）及当时的媒体事实（buffered/seekable 区间、readyState、帧统计、清晰度等）、扩展动作和去除地址参数的错误文本。**不保存**：query/hash、签名 CDN 参数、Cookie、账号、标题、页面文字、弹幕/聊天、API body、音视频数据、帧或截图。无法安全读取的值记为“未提供”。
+3. **偏好设置**：`chrome.storage.local` 中保存两个开关（视频增强、直播增强各自启用或关闭）。
 
 ### 数据不离开设备
 
@@ -27,7 +27,7 @@ Applies to: Bilibili 桌面网页抗卡 (Chrome extension, version 1.0.0).
 
 ### 保留期限
 
-诊断日志按设计不轮转、不删除，保留到用户卸载扩展为止，因此占用的磁盘空间随使用持续增长（开发者自用浏览器的一次实测：视频页每打开 1 小时约增加 7 MB）。卸载扩展会连同其 IndexedDB 与存储一起删除全部数据。日志不设“删除部分记录”的功能。
+诊断日志只保留最近 3 天（72 小时）：超过 72 小时的记录按其自身时间自动删除，无需用户操作；实测视频页每打开 1 小时约增加 7 MB，因此磁盘占用大致以最近 3 天的用量为上界。卸载扩展会连同其 IndexedDB 与存储一起删除全部数据。除此之外日志没有手动“删除部分记录”的功能。
 
 ### 第三方与广告
 
@@ -48,8 +48,8 @@ On Bilibili video pages and live pages, the extension takes over the player's me
 ### What data is handled, and where it stays
 
 1. **Media segments (audio/video bytes)**: held in page memory only (up to 512 MiB per tab), released when the video route is left (moving to a non-video page or to another video) or the page is closed; live stream bytes only pass through memory to the player. Media bytes are never written to disk and never written to the diagnostic log.
-2. **Development diagnostic log**: stored in the extension's own local IndexedDB database (`bilibili-development-logs`), append-only — never deleted, rotated, or capped by count or size. Every `www.bilibili.com` or `live.bilibili.com` page that is opened (non-video pages included) gets a record. Log fields are limited to: timestamps, browser tab number, extension version and build id, site and path of the page address, video identifiers (such as bvid), part number, media identifier, media URLs with query/hash removed and mirror host names, byte counts/timings/results of media requests, player media events (play, pause, seeking, rate and volume changes, and so on) with the media facts at that moment (buffered/seekable ranges, readyState, frame statistics, quality), extension actions, and error text with URL parameters removed. **Not stored**: query/hash, signed CDN parameters, cookies, account information, titles, page text, danmaku/chat, API bodies, audio/video data, frames, or screenshots. Values that cannot be read safely are recorded as “未提供” (not provided).
-3. **Preferences**: a single on/off switch (video enhancement enabled or disabled) in `chrome.storage.local`.
+2. **Development diagnostic log**: stored in the extension's own local IndexedDB database (`bilibili-development-logs`); it keeps only the last 3 days (72 hours). Records older than 72 hours are deleted automatically by their own timestamp; within that window the log is append-only and not capped by count or size. Every `www.bilibili.com` or `live.bilibili.com` page that is opened (non-video pages included) gets a record. Log fields are limited to: timestamps, browser tab number, extension version and build id, site and path of the page address, video identifiers (such as bvid), part number, media identifier, media URLs with query/hash removed and mirror host names, byte counts/timings/results of media requests, player media events (play, pause, seeking, rate and volume changes, and so on) with the media facts at that moment (buffered/seekable ranges, readyState, frame statistics, quality), extension actions, and error text with URL parameters removed. **Not stored**: query/hash, signed CDN parameters, cookies, account information, titles, page text, danmaku/chat, API bodies, audio/video data, frames, or screenshots. Values that cannot be read safely are recorded as “未提供” (not provided).
+3. **Preferences**: two on/off switches in `chrome.storage.local` (video enhancement and live enhancement, each enabled or disabled).
 
 ### Data never leaves the device
 
@@ -61,7 +61,7 @@ Users can inspect the log at any time on the extension's log page. Export happen
 
 ### Retention
 
-By design the diagnostic log is never rotated or deleted; it is kept until the user uninstalls the extension, so its disk use keeps growing with use (one measurement on the developer's own browser: about 7 MB per hour a video page is open). Uninstalling deletes the extension's IndexedDB and storage together with all data. There is no "delete part of the log" feature.
+The diagnostic log keeps only the last 3 days (72 hours): records older than 72 hours are deleted automatically by their own timestamp, with no action from the user. One measurement on the developer's own browser put growth at about 7 MB per hour a video page is open, so disk use is roughly bounded by the last 3 days of usage. Uninstalling deletes the extension's IndexedDB and storage together with all data. Apart from that automatic deletion there is no manual "delete part of the log" feature.
 
 ### Third parties and advertising
 

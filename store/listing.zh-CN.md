@@ -25,11 +25,11 @@
   不使用第三方地址，不改写、不替换 Bilibili 的地址；不接管播放：播放、暂停、拖动、倍速、画质、音量与轨道选择仍由您和 Bilibili 播放器决定。
 
   【代价：请按流量套餐衡量】
-  视频：竞速中落败一路已下载的字节被丢弃，一次实测稳态浪费约 12.6%（每场播放不同，扩展日志页的 CDN 竞速面板显示当场实际浪费率）；120 秒缓冲与预取会提前下载，提前离开视频会比原生播放器多下载未观看的数据。直播：配对后两路一直同时下载，流量接近单路的两倍。内存：每个标签页的媒体缓存最多约 512 MiB。磁盘：本地诊断日志不轮转，随使用持续增长（开发者自用浏览器实测：视频页每打开 1 小时约 7 MB），卸载扩展即删除。
-  开关：弹窗里的“视频增强”开关只作用于视频页（刷新后生效）；直播页的接管没有单独开关，不想承担直播的双倍流量，请在 chrome://extensions 停用本扩展。
+  视频：竞速中落败一路已下载的字节被丢弃，一次实测稳态浪费约 12.6%（每场播放不同，扩展日志页的 CDN 竞速面板显示当场实际浪费率）；120 秒缓冲与预取会提前下载，提前离开视频会比原生播放器多下载未观看的数据。直播：配对后两路一直同时下载，流量接近单路的两倍。内存：每个标签页的媒体缓存最多约 512 MiB。磁盘：本地诊断日志只保留最近 3 天（72 小时），超期记录自动删除（开发者自用浏览器实测：视频页每打开 1 小时约 7 MB，占用大致以最近 3 天的用量为上界），卸载扩展即全部删除。
+  开关：弹窗里有两个开关，都在刷新页面后生效：“视频增强”只作用于视频页，“直播增强”只作用于直播页。不想承担直播的双倍流量，把“直播增强”关掉即可；关闭后播放器按原样自己下载，扩展在直播页不接管、不竞速，视频页的增强不受影响。
 
   【数据】
-  媒体分片只驻留内存。开发诊断日志只存扩展本地 IndexedDB：记录每个 Bilibili 页面的路径、视频编号、去掉参数的媒体地址、媒体请求耗时与结果、播放器事件（播放、暂停、拖动等）和缓冲状态；不记录 Cookie、账号、标题、页面文字、弹幕、签名参数或音视频字节。不上传、无遥测；导出仅在您主动选择文件时发生。权限只有 storage（记住一个开关）与 unlimitedStorage（保存不轮转的本地日志），没有 host_permissions。全部源码开源：https://github.com/chnlich/smooth-bilibili-chrome-plugin
+  媒体分片只驻留内存。开发诊断日志只存扩展本地 IndexedDB：记录每个 Bilibili 页面的路径、视频编号、去掉参数的媒体地址、媒体请求耗时与结果、播放器事件（播放、暂停、拖动等）和缓冲状态；不记录 Cookie、账号、标题、页面文字、弹幕、签名参数或音视频字节。不上传、无遥测；导出仅在您主动选择文件时发生。权限只有 storage（记住两个开关：视频增强与直播增强）与 unlimitedStorage（写入 3 天窗口内的本地诊断日志），没有 host_permissions。全部源码开源：https://github.com/chnlich/smooth-bilibili-chrome-plugin
   ```
 
 - **类别**：娱乐（Entertainment）。依据商店类目说明，2023 年起旧“Productivity”大类已拆分，Entertainment 是面向影视观看者的类目，与本扩展只服务 Bilibili 看视频/直播最贴近；备选“工具（Tools）”。
@@ -47,8 +47,8 @@
 
   | 后台列出的项 | 粘贴文本 |
   |---|---|
-  | `storage` | 仅在 chrome.storage.local 保存一个用户开关（视频页增强启用/关闭），用于记住用户在扩展弹窗中的选择；不保存任何其他数据。 |
-  | `unlimitedStorage` | 开发诊断日志按设计只追加、不轮转、不设上限（见仓库 GOAL.md），保存在扩展自身 origin 的 IndexedDB 中，随使用持续增长（开发者自用浏览器实测：视频页每打开 1 小时约 7 MB）。unlimitedStorage 移除浏览器默认存储配额，使日志能持续追加而不因配额写入失败。日志只在本机，用户可在日志页查看或导出，卸载扩展即全部删除。 |
+  | `storage` | 仅在 chrome.storage.local 保存两个用户开关（视频增强、直播增强各自启用/关闭），用于记住用户在扩展弹窗中的选择；不保存任何其他数据。 |
+  | `unlimitedStorage` | 开发诊断日志保存在扩展自身 origin 的 IndexedDB 中，只保留最近 3 天（72 小时），超期记录自动删除；窗口内的日志只追加、不设条数或容量上限（见仓库 GOAL.md）。实测视频页每打开 1 小时约产生 7 MB，3 天窗口的占用仍可能明显大于浏览器默认配额，unlimitedStorage 移除该配额，使窗口内的日志能连续写入而不因配额写入失败。日志只在本机，用户可在日志页查看或导出，卸载扩展即全部删除。 |
   | 内容脚本 `https://www.bilibili.com/*` | 下载接管只在视频路由（/video/* 与 /list/watchlater*）启动：拦截播放器的媒体分片请求，由内存缓存应答或代为向 Bilibili 提供的镜像地址取回，并向播放器请求 120 秒缓冲。匹配整个站点是因为扩展在页面内跟随路由变化，脚本须在页面开始时（document_start）就位；在其他路由上不拦截任何请求，只在本地诊断日志记录一条页面路径。 |
   | 内容脚本 `https://live.bilibili.com/*` | 在直播页接管播放器的 FLV 直播流，对 Bilibili 给出的同集群主备两路地址做前缀比对后并发竞速（不预取、不设缓冲目标）。 |
   | MAIN world 注入（`world: "MAIN"`） | 三个脚本必须运行在页面自身的 JavaScript 环境中：bank.js 包装页面的 fetch/XMLHttpRequest 才能接住播放器发出的媒体请求；source-buffer-shim.js 观察页面的 MediaSource/SourceBuffer 追加与移除，用于本地诊断；main-bridge.js 调用 Bilibili 播放器对象自带的缓冲设置（setStableBufferTime）。MAIN world 不提供 chrome.* API；读取偏好与写日志由 ISOLATED world 的 controller.js 完成。 |
@@ -83,7 +83,7 @@
 | 素材 | 规格 | 状态 |
 |---|---|---|
 | 商店图标 | 128×128 PNG（96×96 图形 + 16px 透明边） | ✅ 已完成：`assets/icon.svg` → `npm run icons` 生成四个尺寸（16/32/48 取图形区铺满画布以便工具栏辨认），已随包提交；后台上传 `src/extension/icons/icon128.png` |
-| 截图 | 1280×800（或 640×400），至少 1 张、最多 5 张 | ✅ 已完成：`store/images/screenshot-01-popup-video.png`（视频页弹窗实拍）、`screenshot-02-popup-live.png`（直播页弹窗实拍）、`screenshot-03-racing-diagram.png`（机制与流量代价示意图）。由 `store/images/src/compose.mjs` 从真实运行捕获合成，页面背景整体模糊以隐藏第三方内容 |
+| 截图 | 1280×800（或 640×400），至少 1 张、最多 5 张 | `store/images/screenshot-01-popup-video.png`（视频页弹窗实拍）与 `screenshot-02-popup-live.png`（直播页弹窗实拍）**待重摄**：拍的是旧的单开关弹窗，popup 现在有两个常驻开关（to recapture: popup now has two switches）；`screenshot-03-racing-diagram.png`（机制与流量代价示意图）已随 3 天日志保留规则更新。由 `store/images/src/compose.mjs` 从真实运行捕获合成，页面背景整体模糊以隐藏第三方内容 |
 | 小型宣传图（必需） | 440×280 PNG/JPEG | ✅ 已完成：`store/images/promo-tile-440x280.png` |
 | Marquee 宣传图（可选，入选推荐位需要） | 1400×560 PNG/JPEG | ✅ 已完成：`store/images/marquee-1400x560.png` |
 | YouTube 宣传视频 | 链接 | ⬜ 无。图片规范页写明只有图标、小型宣传图、截图是必需项；商店信息页的列表把视频与其他素材并列。若后台拦截提交，由后续任务补做 |

@@ -42,14 +42,14 @@ Judge this against your data plan before installing:
 - **Live is close to double traffic**: while paired, both legs download continuously, so traffic approaches twice the single-leg amount.
 - **Downloaded ahead**: the 120-second buffer target and prefetch fetch data you have not watched yet; leave the video early and those bytes were spent for nothing.
 - **Memory**: the per-tab media cache holds up to about 512 MiB.
-- **Disk**: the local diagnostic log is never rotated and has no cap, so it keeps growing with use (measured on the developer's own browser: about 7 MB per hour a video page is open); uninstalling the extension deletes all of it.
-- **Switches**: the "video enhancement" toggle in the popup applies to video pages only (it takes effect after a page reload). The live takeover has no separate switch today — if you do not want live's double traffic, disable the extension in chrome://extensions.
+- **Disk**: the local diagnostic log keeps only the last 3 days (72 hours); older records are deleted automatically. Measured on the developer's own browser, an open video page adds about 7 MB per hour, so disk use is roughly bounded by the last 3 days of usage; uninstalling the extension deletes all of it.
+- **Switches**: the popup carries two switches, both effective after a page reload. "视频增强" (video enhancement) applies to video pages only and "直播增强" (live enhancement) to live pages only. If you do not want live's double traffic, turn off the live switch; video enhancement is unaffected.
 
 ![Popup over a video page](store/images/screenshot-01-popup-video.png)
 
 ## The popup
 
-The popup is read-only: it shows observed facts, affects no playback, and uploads nothing.
+The popup is read-only: it shows observed facts, affects no playback, and uploads nothing. Two always-visible switches sit at the top (effective after a page reload): "视频增强" for video pages and "直播增强" for live pages, each independent of the other.
 
 - **Buffer**: a bar and the line "已缓冲 N 秒 / 目标 120 秒" (N seconds buffered / 120-second target). The number is the continuous playable forward range covering the current playhead, not the whole video's buffer; the bar turns green when the 120-second target is reached.
 - **120-second request state**: the result of asking the player for the 120-second buffer — 已生效 (applied) / 等待生效 (waiting) / 播放器不支持 (player does not support it) / 申请失败 (request failed).
@@ -88,7 +88,7 @@ Chrome stops video decoding for background tabs (background video track optimiza
 That means the connection cannot keep up with the current bitrate. The extension spends the available bandwidth on what the player actually needs; it cannot keep a buffer from draining on a slow link.
 
 **Can live be switched off separately?**
-There is no separate live switch today. If you do not want live's double traffic, disable the whole extension in chrome://extensions.
+Yes. The "直播增强" (live enhancement) switch in the popup controls live pages only (it takes effect after a page reload): with it off, the player downloads natively — no takeover, no racing — and video enhancement is unaffected.
 
 **Does it touch playback controls?**
 No. Play, pause, seeking, speed, quality, volume, and tracks stay with you and the player; the popup is read-only.
@@ -114,6 +114,6 @@ The sections below describe how the implementation works. The full authoritative
 - **Video buffering.** The extension never builds a playback pipeline. It uses Bilibili's own player API to ask for a 120-second stable buffer, once per player or media item, and shows the player-reported forward range in the popup.
 - **Live takeover.** On live pages the extension answers the player's FLV stream requests directly. Mirror pairing comes from Bilibili's own live playback info (the page-embedded `playurl_info` and the player's `getRoomPlayInfo` traffic); only same-cluster primary/backup pairs are raced, byte windows are compared between legs (1 MiB windows), and any disagreement permanently degrades that stream to the single address the player named. Both legs dying, or an expired signature with no new address, fails explicitly — no silent native fallback.
 - **Bounds.** Segments live in a `Map` capped at 512 MiB per tab and are never written to disk; a fetch that receives no bytes for 10 s is cancelled and its partial chunk discarded; the prefetch window covers at most 48 chunks with 4 concurrent fetches and at most 3 consecutive failures per chunk.
-- **Diagnostics.** A structured local-only log (append-only, never rotated) records page routes, media facts, and download-layer events; the logs page includes a CDN racing panel with per-mirror racing, stall, latency, and waste statistics. The popup shows a deliberately small subset (buffer, download lines, connection times, live takeover state — including an explicit "not taken over" state when the player streams without FLV, instead of implying a takeover that never engaged).
+- **Diagnostics.** A structured local-only log records page routes, media facts, and download-layer events; it keeps the last 3 days (72 hours) and deletes older records automatically, by each record's own time. The logs page states this retention. An export fixes its maxEventId snapshot when it starts; rows pruned out of that range while the export runs are skipped by the pagination and the export still completes. The logs page also includes a CDN racing panel with per-mirror racing, stall, latency, and waste statistics. The popup shows a deliberately small subset (buffer, download lines, connection times, live takeover state — including an explicit "not taken over" state when the player streams without FLV, instead of implying a takeover that never engaged).
 
 Build, test, and verification commands are identical on any OS and are listed in the [build section of README.md](README.md#构建) and the [testing section of README.md](README.md#测试与验证) (both Chinese). The repo carries no device-specific paths.
