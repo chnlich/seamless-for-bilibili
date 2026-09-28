@@ -12,23 +12,23 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
 
 - **Item name**: comes from the manifest (unchanged in this task). Recommended rename:
   "Anti-Stutter for Bilibili" — decision in README.md.
-- **Summary** (= manifest `description`; the live summary is the 61-character zh text — the en
-  summary below is 129 characters, counted, within the 132 limit):
-  Fetches media segments for the Bilibili player and holds a deeper 120-second buffer to cut stuttering. In memory, on-device only.
+- **Summary** (= manifest `description`; the live summary is the 98-character zh text — the en
+  summary below is 124 characters, counted, within the 132 limit):
+  Races Bilibili's mirrors for video and live streams, holding a 120-second buffer to cut stalling. In memory, on-device only.
 - **Detailed description** (paste-ready):
 
   ```text
-  Takes over media segment downloads on Bilibili video and live pages and asks the native player to keep a stable 120-second buffer, leaving headroom for bandwidth swings.
+  Cuts playback stalling on Bilibili video and live pages. An independent third-party tool, not affiliated with or endorsed by Bilibili; Bilibili and related names are trademarks of their respective owner.
 
-  - Segment requests from the player are answered from the extension's in-memory cache; on a miss the extension issues the very same request, stores it, and answers the player.
-  - Playback is not taken over: play, pause, seeking, playback rate, quality, volume, and track choices all stay with you and Bilibili's native player.
-  - Media segments live in memory only and are released when the page is left; nothing is written to disk.
-  - On live pages the two stream addresses Bilibili itself supplies race concurrently; first bytes win.
-  - The development diagnostic log stays in the extension's local IndexedDB: no cookies, account data, titles, page text, chat, signed parameters, or audio/video bytes; no upload, no telemetry; export happens only when you pick a file; the log is kept until you uninstall.
-  - Permissions are only storage (one on/off switch) and unlimitedStorage (an unrotated local log); no broad host permissions.
-  - Fully open source: https://github.com/chnlich/smooth-bilibili-chrome-plugin
+  Idea and assumptions: stalling often comes from one slow or unstable Bilibili CDN host rather than from your own bandwidth, and Bilibili itself supplies primary/backup mirror addresses for the same content — the extension fetches from two addresses at once and keeps the first complete response. It rescues a slow host, not a slow link: if your connection itself is too slow, or the browser's decoder stalls even with a full buffer, this extension cannot help.
 
-  This is an independent third-party tool, not affiliated with or endorsed by Bilibili. Bilibili and related names are trademarks of their respective owner.
+  Video pages: takes over the player's media segment downloads — every 1 MiB segment is requested from the two mirror addresses Bilibili supplied at once, first complete response wins; prefetches ahead (window up to 48 segments, concurrency 4); segments stay in memory only (512 MiB cap), are released when the page is left, and are never written to disk; asks the native player to keep a 120-second buffer. Playback is not taken over: play, pause, seeking, rate, quality, volume, and track choices stay with you and Bilibili's player.
+
+  Live pages: takes over the player's FLV stream — pairs only the primary/backup addresses of the same cluster, checks their common prefix matches before racing both concurrently, and delivers whichever bytes arrive first; with no pair or a prefix mismatch it falls back to a single leg on the player's own URL. No prefetch and no buffer target on live.
+
+  The cost — please weigh against your data plan: on video, the bytes the losing leg already downloaded are discarded — about 12.6% steady-state waste in one real run (it varies per session; the extension's CDN racing panel on its log page shows the session's own wasted-byte ratio); the 120-second buffer and prefetch download ahead, so leaving a video early downloads more unwatched data than the native player would. On live, both legs stream at once while a pair is racing — close to twice the traffic. Each tab may use up to about 512 MiB of memory for media; the local diagnostic log is never rotated and grows with use (on-device only, deleted on uninstall).
+
+  Data: media segments stay in memory; the development diagnostic log lives in the extension's local IndexedDB and stores no cookies, account data, titles, page text, chat, signed parameters, or audio/video bytes; no upload, no telemetry; export happens only when you pick a file, and the log is kept until you uninstall. Permissions are only storage (one on/off switch) and unlimitedStorage (an unrotated local log); no broad host permissions. Fully open source: https://github.com/chnlich/smooth-bilibili-chrome-plugin
   ```
 
 - **Category**: Productivity. The extension category list has no media/playback entry; this is the
@@ -42,8 +42,9 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
 ## Privacy practices tab
 
 - **Single purpose description**:
-  Reduce video stuttering on Bilibili by taking over the player's media segment downloads and
-  requesting a deeper playback buffer from the native player.
+  Reduce playback stalling on Bilibili video and live pages by taking over the player's media
+  downloads (racing Bilibili's own mirror addresses) and, on video, requesting a 120-second buffer
+  from the native player.
 - **Permissions justification** (per item, exactly the manifest's permissions and matches):
 
   | Dashboard item | Paste text |

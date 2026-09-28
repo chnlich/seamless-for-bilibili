@@ -9,7 +9,7 @@ Applies to: Bilibili 桌面网页抗卡 (Chrome extension, version 1.0.0).
 
 ### 扩展做什么
 
-本扩展在 Bilibili 的视频页与直播页接管播放器发起的媒体分片（音频/视频字节段）下载：播放器请求一个媒体分片时，由扩展用内存中的缓存回应；未命中时由扩展向 Bilibili 为该视频提供的媒体地址发出同一段 Range 请求取回，存入内存后再回应播放器；同时向原生播放器请求 120 秒稳定缓冲。扩展不接管播放：不改变播放、暂停、拖动、倍速、画质、音量与音视频轨的任何决定。
+本扩展在 Bilibili 的视频页与直播页接管播放器的媒体下载。视频页：播放器请求一个媒体分片（音频/视频字节段）时，由扩展用内存中的缓存回应；未命中时由扩展同时向 Bilibili 为该视频提供的主备两个镜像地址发出同样的 Range 请求，先完整到达的一份存入内存后回应播放器，并向前预取后续分片；同时向原生播放器请求 120 秒稳定缓冲。直播页：接管播放器的 FLV 流，配对同一集群的主备两路地址，比对两路前缀一致后并发竞速、先到的字节先供给，查无配对或前缀不一致时退回播放器原地址单路供给；直播不预取、不设缓冲目标。无论在视频页还是直播页，扩展都不接管播放：不改变播放、暂停、拖动、倍速、画质、音量与音视频轨的任何决定。
 
 ### 处理哪些数据、放在哪里
 
@@ -19,7 +19,7 @@ Applies to: Bilibili 桌面网页抗卡 (Chrome extension, version 1.0.0).
 
 ### 数据不离开设备
 
-扩展没有上传、遥测、统计或任何外部端点。扩展发出的网络请求只有一种：代替播放器，向 Bilibili 播放信息中为当前视频给出的媒体地址发出与播放器相同的媒体请求（域名限定为 `*.bilivideo.com` 与 `*.akamaized.net`）。诊断日志、媒体分片与偏好设置永不离开本机。扩展不读取、不存储、不上传 Cookie。
+扩展没有上传、遥测、统计或任何外部端点。扩展发出的网络请求只有一种：代替播放器，向 Bilibili 播放信息中为当前视频或直播给出的媒体地址发出的媒体请求，域名限定为 `*.bilivideo.com` 与 `*.akamaized.net`。为求速度会进行竞速：同一段视频分片同时请求两个镜像地址（先完成先用，另一路取消），直播两路流并发传输；下载流量因此可能高于不接管（直播配对期间接近两倍），但请求去向不超出这些 Bilibili 媒体地址。诊断日志、媒体分片与偏好设置永不离开本机。扩展不读取、不存储、不上传 Cookie。
 
 ### 查看与导出
 
@@ -43,7 +43,7 @@ GitHub Issues：https://github.com/chnlich/smooth-bilibili-chrome-plugin/issues
 
 ### What the extension does
 
-On Bilibili video pages and live pages, the extension takes over the media segments (audio/video byte ranges) that the native player requests: a segment request from the player is answered from an in-memory cache; on a miss, the extension issues the same Range request to the media addresses that Bilibili supplied for that video, stores the bytes in memory, and then answers the player. It also asks the native player to keep a 120-second stable buffer. The extension does not take over playback: it never changes play, pause, seeking, playback rate, quality, volume, or audio/video track decisions.
+On Bilibili video pages and live pages, the extension takes over the player's media downloads. Video pages: a segment request from the player is answered from an in-memory cache; on a miss, the extension issues the same Range request to both the primary and backup mirror addresses Bilibili supplied for that video, stores the first complete response in memory, answers the player, and prefetches further segments; it also asks the native player to keep a 120-second stable buffer. Live pages: the extension takes over the player's FLV stream, pairs the primary/backup addresses of the same cluster, checks that their common prefix matches, then delivers whichever bytes arrive first; with no pair or a prefix mismatch it falls back to a single leg on the player's own URL. Live has no prefetch and no buffer target. On neither page type does the extension take over playback: it never changes play, pause, seeking, playback rate, quality, volume, or audio/video track decisions.
 
 ### What data is handled, and where it stays
 
@@ -53,7 +53,7 @@ On Bilibili video pages and live pages, the extension takes over the media segme
 
 ### Data never leaves the device
 
-The extension has no upload, telemetry, analytics, or any external endpoint. The only network requests the extension issues are the same media requests the player would issue, made on the player's behalf to the media addresses Bilibili's own playback info supplies for the current video (hosts limited to `*.bilivideo.com` and `*.akamaized.net`). Diagnostic logs, media segments, and preferences never leave the device. The extension does not read, store, or upload cookies.
+The extension has no upload, telemetry, analytics, or any external endpoint. The only network requests the extension issues are media requests made on the player's behalf to the media addresses Bilibili's own playback info supplies for the current video or live stream, with hosts limited to `*.bilivideo.com` and `*.akamaized.net`. For speed it races: the same video segment is requested from two mirror addresses at once (first complete response wins, the other leg is cancelled) and a paired live stream is transferred on both legs concurrently. Download traffic can therefore exceed what a takeover-free player would use (close to double while a live pair is racing), but the destinations never extend beyond these Bilibili media addresses. Diagnostic logs, media segments, and preferences never leave the device. The extension does not read, store, or upload cookies.
 
 ### Viewing and export
 

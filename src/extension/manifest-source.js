@@ -1,7 +1,7 @@
 import { EXTENSION_MANIFEST, VERSION } from '../constants.js';
 
 // Manifest description = store summary draft in store/listing.zh-CN.md (CWS limit 132 characters).
-const DESCRIPTION = '接管 Bilibili 视频页的媒体分片下载，向播放器请求 120 秒缓冲来减少卡顿；全部在本机内存完成，不改动播放控制。';
+const DESCRIPTION = '接管 Bilibili 视频与直播页的媒体下载：视频分片同时向两个镜像地址取回、先完成先用，并请求播放器保持 120 秒缓冲；直播主备两路流并发供给、先到先用。全部在本机内存完成，不改动播放控制。';
 
 const ICONS = Object.freeze({
   16: 'icon16.png',
