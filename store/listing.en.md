@@ -1,8 +1,9 @@
 # Store listing draft (English)
 
-Field-by-field draft for the Chrome Web Store Developer Dashboard. Name candidates and the final
-decision live in [README.md](README.md); the user copy-pastes and submits. Every field is pre-filled
-including all images.
+Field-by-field draft for the Chrome Web Store Developer Dashboard. The name is decided:
+Seamless for Bilibili (decision and rationale in [README.md](README.md)); the user copy-pastes and
+submits. Every field is pre-filled; images that show the old name are to be recaptured
+(see [images/README.md](images/README.md)).
 
 Note: the item currently has a single default listing language (the manifest declares no `_locales`),
 so the live listing will be the zh-CN draft ([listing.zh-CN.md](listing.zh-CN.md)). This English
@@ -10,8 +11,8 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
 
 ## Store listing tab
 
-- **Item name**: comes from the manifest (unchanged in this task). Recommended rename:
-  "Anti-Stutter for Bilibili" — decision in README.md.
+- **Item name**: Seamless for Bilibili (comes from the manifest `name`; the dashboard name stays
+  identical to it — decision in README.md).
 - **Summary**: not a dashboard field; the dashboard takes the manifest `description`. The live summary
   is the 107-character zh text. For a future `_locales/en` `description` (131 characters, counted as
   Unicode characters, within the 132 limit):
@@ -38,7 +39,7 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
   Switches: the popup carries two switches, both effective after a reload. "Video enhancement" applies to video pages only and "live enhancement" to live pages. To avoid the doubled live traffic, turn off the live switch: the player then downloads natively, with no takeover and no racing on live pages, while video enhancement is unaffected.
 
   Data
-  Media segments stay in memory. The development diagnostic log lives only in the extension's local IndexedDB: it records the path of each Bilibili page, video identifiers, media URLs without parameters, timings and results of media requests, player events (play, pause, seeking, and so on), and buffer state. It stores no cookies, account data, titles, page text, chat, signed parameters, or audio/video bytes. No upload, no telemetry; export happens only when you pick a file. Permissions are only storage (two switches: video enhancement and live enhancement) and unlimitedStorage (writing the local log inside its 3-day window); no host_permissions. Fully open source: https://github.com/chnlich/smooth-bilibili-chrome-plugin
+  Media segments stay in memory. The development diagnostic log lives only in the extension's local IndexedDB: it records the path of each Bilibili page, video identifiers, media URLs without parameters, timings and results of media requests, player events (play, pause, seeking, and so on), and buffer state. It stores no cookies, account data, titles, page text, chat, signed parameters, or audio/video bytes. No upload, no telemetry; export happens only when you pick a file. Permissions are only storage (two switches: video enhancement and live enhancement) and unlimitedStorage (writing the local log inside its 3-day window); no host_permissions. Fully open source: https://github.com/chnlich/seamless-for-bilibili
   ```
 
 - **Category**: Entertainment. The old "Productivity" group was split up in the mid-2023 category
@@ -46,8 +47,8 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
   an extension that serves only Bilibili video and live viewing. Fallback: Tools.
 - **Language**: the dashboard listing language for the default listing is 中文（简体）(zh-CN); add
   this English text as a locale-specific listing only after the manifest ships `_locales`.
-- **Homepage URL**: https://github.com/chnlich/smooth-bilibili-chrome-plugin
-- **Support URL**: https://github.com/chnlich/smooth-bilibili-chrome-plugin/issues
+- **Homepage URL**: https://github.com/chnlich/seamless-for-bilibili
+- **Support URL**: https://github.com/chnlich/seamless-for-bilibili/issues
 - **Official URL**: leave empty (optional; requires verifying the site in Google Search Console).
 - **Mature content**: leave unchecked.
 
@@ -94,7 +95,7 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
   lending). Reason: the extension has no external endpoint, so data never leaves the device; the only
   network requests it makes are the player's own media requests, to Bilibili's media addresses. If the
   dashboard shows a different number of statements, check each on the same reasoning.
-- **Privacy policy URL**: https://github.com/chnlich/smooth-bilibili-chrome-plugin/blob/main/PRIVACY.md
+- **Privacy policy URL**: https://github.com/chnlich/seamless-for-bilibili/blob/main/PRIVACY.md
   (the repository is public; the current PRIVACY.md must be on main before submitting — the URL is
   user-facing.)
 - **Limited Use statement**: not applicable. That requirement covers data received from Google APIs;
@@ -115,9 +116,9 @@ credentials; Bilibili video and live play without logging in.
 | Asset | Spec | Status |
 |---|---|---|
 | Store icon | 128×128 PNG (96×96 artwork + 16px transparent padding) | ✅ Done: `assets/icon.svg` → `npm run icons` renders the four sizes (16/32/48 crop to the artwork so the toolbar icon stays legible), committed with the package; upload `src/extension/icons/icon128.png` |
-| Screenshots | 1280×800 (or 640×400), 1–5 images | `store/images/screenshot-01-popup-video.png` (real popup over a video page) and `screenshot-02-popup-live.png` (real popup over a live page) are **to recapture**: they show the old single-switch popup, and the popup now has two always-visible switches (to recapture: popup now has two switches). `screenshot-03-racing-diagram.png` (mechanism and traffic cost diagram) is updated for the 3-day log retention. Composed by `store/images/src/compose.mjs` from a real run; the page background is blurred wholesale to hide third-party content |
-| Small promo tile (required) | 440×280 PNG/JPEG | ✅ Done: `store/images/promo-tile-440x280.png` |
-| Marquee promo tile (optional, needed for featuring) | 1400×560 PNG/JPEG | ✅ Done: `store/images/marquee-1400x560.png` |
+| Screenshots | 1280×800 (or 640×400), 1–5 images | `store/images/screenshot-01-popup-video.png` (real popup over a video page) and `screenshot-02-popup-live.png` (real popup over a live page) are **to recapture**: they show the old single-switch popup, and the popup now has two always-visible switches (to recapture: popup now has two switches); they also show the old name (to recapture: shows the old name). `screenshot-03-racing-diagram.png` (mechanism and traffic cost diagram) is updated for the 3-day log retention. Composed by `store/images/src/compose.mjs` from a real run; the page background is blurred wholesale to hide third-party content |
+| Small promo tile (required) | 440×280 PNG/JPEG | Rendered but shows the old name, **to recapture** (to recapture: shows the old name): `store/images/promo-tile-440x280.png`; the HTML source is updated to the new name, re-render after recapture |
+| Marquee promo tile (optional, needed for featuring) | 1400×560 PNG/JPEG | Rendered but shows the old name, **to recapture** (to recapture: shows the old name): `store/images/marquee-1400x560.png`; the HTML source is updated to the new name, re-render after recapture |
 | YouTube promo video | link | ⬜ none. The images page says only the icon, small promo tile, and a screenshot are mandatory; the listing page lists the video alongside the other assets. If the dashboard blocks submission without it, a later task produces one |
 
 ## Packaging and upload
@@ -126,7 +127,7 @@ credentials; Bilibili video and live play without logging in.
 npm run package
 ```
 
-Builds → runs the contract test → writes `release/smooth-bilibili-chrome-plugin-<version>.zip`
+Builds → runs the contract test → writes `release/seamless-for-bilibili-<version>.zip`
 (manifest.json at the zip root); upload it under Items → New item. If the reviewer requests source,
 provide a repository zip separately; the published bundles are unminified and carry source maps.
 

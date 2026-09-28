@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Bilibili 桌面网页抗卡",
+  "name": "Seamless for Bilibili",
   "version": "1.0.0",
   "description": "减少 Bilibili 视频与直播卡顿：同一内容同时从 Bilibili 自带的两个镜像地址下载，先到先用；视频页另请播放器保持 120 秒缓冲。代价是多用流量（直播双路时接近两倍）。数据不离开本机，不改播放操作。",
   "minimum_chrome_version": "120",
@@ -16,7 +16,7 @@
     "128": "icon128.png"
   },
   "action": {
-    "default_title": "Bilibili 抗卡设置",
+    "default_title": "Seamless for Bilibili",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icon16.png",

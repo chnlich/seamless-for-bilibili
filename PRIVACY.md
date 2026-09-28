@@ -1,7 +1,7 @@
 # 隐私政策 / Privacy Policy
 
-适用于：Bilibili 桌面网页抗卡（Chrome 扩展，版本 1.0.0）。
-Applies to: Bilibili 桌面网页抗卡 (Chrome extension, version 1.0.0).
+适用于：Seamless for Bilibili（Chrome 扩展，版本 1.0.0）。
+Applies to: Seamless for Bilibili (Chrome extension, version 1.0.0).
 
 ---
 
@@ -35,7 +35,7 @@ Applies to: Bilibili 桌面网页抗卡 (Chrome extension, version 1.0.0).
 
 ### 联系方式
 
-GitHub Issues：https://github.com/chnlich/smooth-bilibili-chrome-plugin/issues
+GitHub Issues：https://github.com/chnlich/seamless-for-bilibili/issues
 
 ---
 
@@ -69,4 +69,4 @@ The extension executes no third-party or remote code, shows no advertising, perf
 
 ### Contact
 
-GitHub Issues: https://github.com/chnlich/smooth-bilibili-chrome-plugin/issues
+GitHub Issues: https://github.com/chnlich/seamless-for-bilibili/issues

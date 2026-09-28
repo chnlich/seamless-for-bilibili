@@ -13,7 +13,7 @@ const ICONS = Object.freeze({
 export function createManifest() {
   return {
     manifest_version: EXTENSION_MANIFEST.manifestVersion,
-    name: 'Bilibili 桌面网页抗卡',
+    name: 'Seamless for Bilibili',
     version: VERSION,
     description: DESCRIPTION,
     minimum_chrome_version: EXTENSION_MANIFEST.minimumChromeVersion,
@@ -21,7 +21,7 @@ export function createManifest() {
     host_permissions: [...EXTENSION_MANIFEST.hostPermissions],
     icons: { ...ICONS },
     action: {
-      default_title: 'Bilibili 抗卡设置',
+      default_title: 'Seamless for Bilibili',
       default_popup: 'popup.html',
       default_icon: { ...ICONS },
     },

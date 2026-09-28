@@ -1,4 +1,4 @@
-# Bilibili 抗卡长期目标
+# Seamless for Bilibili 长期目标
 
 本仓库唯一的产品目标，是让 Bilibili 视频与直播尽量少卡。
 

@@ -27,7 +27,7 @@ for (const iconPath of new Set([...Object.values(manifest.icons ?? {}), ...Objec
 }
 
 await fs.mkdir(outputDirectory, { recursive: true });
-const zipPath = path.join(outputDirectory, `smooth-bilibili-chrome-plugin-${manifest.version}.zip`);
+const zipPath = path.join(outputDirectory, `seamless-for-bilibili-${manifest.version}.zip`);
 await zip.writeZipPromise(zipPath);
 const { size } = await fs.stat(zipPath);
 console.log(`wrote ${path.relative(root, zipPath)} (${size} bytes)`);

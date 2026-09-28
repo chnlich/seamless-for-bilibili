@@ -129,6 +129,7 @@ const readme = await fs.readFile(path.join(root, 'README.md'), 'utf8');
 assert.deepEqual(manifest, manifestSource);
 assert.equal(packageMetadata.version, manifest.version);
 assert.equal(manifest.manifest_version, 3);
+assert.equal(manifest.name, 'Seamless for Bilibili');
 assert.equal(manifest.minimum_chrome_version, '120');
 assert.deepEqual(manifest.permissions, ['storage', 'unlimitedStorage']);
 assert.deepEqual(manifest.host_permissions, [...EXTENSION_MANIFEST.hostPermissions]);

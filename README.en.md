@@ -1,6 +1,6 @@
-# Bilibili anti-stutter (Bilibili 桌面网页抗卡)
+# Seamless for Bilibili
 
-A Chrome extension that reduces playback stutter on Bilibili video and live pages. It is an independent third-party tool, not affiliated with or endorsed by Bilibili; Bilibili and related names belong to their respective owners.
+Seamless for Bilibili is a Chrome extension that reduces playback stutter on Bilibili video and live pages. It is an independent third-party tool, not affiliated with or endorsed by Bilibili; Bilibili and related names belong to their respective owners.
 
 [简体中文](README.md) | **English** (this file)
 
@@ -98,7 +98,7 @@ Nothing. See [PRIVACY.md](PRIVACY.md).
 
 ## Feedback
 
-Issues and suggestions: https://github.com/chnlich/smooth-bilibili-chrome-plugin/issues
+Issues and suggestions: https://github.com/chnlich/seamless-for-bilibili/issues
 
 ## License
 

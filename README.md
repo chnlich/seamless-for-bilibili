@@ -1,6 +1,6 @@
-# Bilibili 桌面网页抗卡
+# Seamless for Bilibili
 
-缓解 Bilibili 视频与直播卡顿的 Chrome 扩展。独立第三方工具，与 Bilibili 无隶属或合作关系；Bilibili 及相关名称归其权利人所有。
+Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome 扩展。独立第三方工具，与 Bilibili 无隶属或合作关系；Bilibili 及相关名称归其权利人所有。
 
 **简体中文**（本文件） | **English**：[README.en.md](README.en.md)
 
@@ -96,7 +96,7 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 
 ## 反馈
 
-问题与建议请到 GitHub Issues：https://github.com/chnlich/smooth-bilibili-chrome-plugin/issues
+问题与建议请到 GitHub Issues：https://github.com/chnlich/seamless-for-bilibili/issues
 
 ## 许可证
 
