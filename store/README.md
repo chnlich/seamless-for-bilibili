@@ -4,47 +4,62 @@ Chrome Web Store 提交所需要的、不依赖新 popup 的内容都在这里�
 
 - 商店草稿：[listing.zh-CN.md](listing.zh-CN.md)（默认列表语言）、[listing.en.md](listing.en.md)（未来 `_locales` 英文列表）
 - 隐私政策：仓库根目录 [PRIVACY.md](../PRIVACY.md)（双语；商店后台填它的 main 分支 URL）
-- 图标源文件：[assets/icon.svg](../assets/icon.svg)，`npm run icons` 重新生成 PNG（16/32/48/128，已提交到 `src/extension/icons/`，构建会复制进 `dist/extension/`）
+- 图标源文件：[assets/icon.svg](../assets/icon.svg)，`npm run icons` 重新生成 PNG（128 保留 16px 透明边作商店图标；16/32/48 取 96×96 图形区铺满画布，保证工具栏 16px 下可辨认；已提交到 `src/extension/icons/`，构建会复制进 `dist/extension/`）
 - 打包：`npm run package` → 构建 + 合同测试 → `release/smooth-bilibili-chrome-plugin-<版本>.zip`（`release/` 已加入 .gitignore）
 
 ## 名称决定（用户决定，本任务未改名）
 
-现状「Bilibili 桌面网页抗卡」把第三方品牌放在名称主位。商店的《冒充与知识产权》政策禁止暗示商品由他人授权、认可或出品；把品牌词放在主位容易被读成官方出品，存在被 Bilibili 商标投诉、拒绝上架或下架的风险（无需事先警告）。另外「桌面网页」含义不明。
+现状「Bilibili 桌面网页抗卡」把第三方品牌放在名称主位。商店《冒充与知识产权》政策要求不得表示商品由他人授权、认可或出品，不得侵犯商标权，并写明“若认为商品可能侵犯知识产权，其可见度可能受影响”；计划政策另规定标题含误导信息的商品可被移除。品牌词放在主位容易被读成官方出品，保留现名的风险是：Bilibili 的商标投诉、审核拒绝，或上架后降低可见度乃至下架。另外「桌面网页」含义不明。
 
-按品牌规范中“for …”（如 “for Google Chrome™”）的指称模式，候选（zh ↔ en 同步）：
+Chrome 的品牌规范对 Google 商标规定用“for …”（如 “for Google Chrome™”）指称兼容对象；这里类比采用同一模式指称 Bilibili。候选（zh ↔ en 同步）：
 
 | 候选 | zh | en | 一句话点评 |
 |---|---|---|---|
-| 1（推荐） | 视频抗卡 for Bilibili | Anti-Stutter for Bilibili | 功能词在前、品牌以“for”指称，最稳妥；沿用已有的“抗卡”说法 |
+| 1（推荐） | 视频抗卡 for Bilibili | Anti-Stutter for Bilibili | 功能词在前、品牌以“for”指称，最稳妥；沿用已有的“抗卡”说法，覆盖视频与直播 |
 | 2 | 流畅播放 for Bilibili | Smooth Playback for Bilibili | 强调体验结果，弱化技术机制 |
-| 3 | 深缓冲播放 for Bilibili | Deep Buffer for Bilibili | 强调机制（120 秒深缓冲），对懂行用户更准确 |
+| 3 | 双线下载 for Bilibili | Dual-Mirror Download for Bilibili | 直接说出机制（两个镜像同时下载），对在意流量的用户最透明 |
 
-风险对照：保留现名 → 冒充/商标投诉与下架风险（见上）；改用 “for Bilibili” 结构 → 风险低，属指称性使用，配合详细说明里的免责声明（无隶属、非官方）。
+风险对照：保留现名 → 上述商标投诉/拒审/下架风险；改用 “for Bilibili” 结构 → 风险低，属指称性使用，但名称仍含对方商标，配合详细说明首段的免责声明（无隶属、非官方）。
 
-改名需要改 manifest `name` 并发新版本，本任务未执行；中英文名在草稿中已按候选 1 预填，用户拍板后替换。
+改名需要改 manifest `name`（以及同样带品牌的 `action.default_title`「Bilibili 抗卡设置」）并发新版本，PRIVACY.md 首行的适用名称随之更新；本任务未执行。中英文名在草稿中已按候选 1 预填，用户拍板后替换。
 
 ## 提交步骤（复制粘贴流程）
 
 1. 注册开发者账号并支付一次性注册费（https://developer.chrome.com/docs/webstore/register ）。
-2. 确认 PRIVACY.md 已在 main 分支（隐私政策 URL 用户可见）。
+2. 确认 PRIVACY.md 当前版本已在 main 分支（隐私政策 URL 用户可见；仓库是公开仓库，Issues 已开启）。
 3. `npm run package` 生成 zip。
 4. 后台 Items → New item，上传 zip。
 5. Store listing 标签页：按 listing.zh-CN.md 逐字段粘贴；上传商店图标；截图与宣传图待 popup 任务后补。
-6. Privacy practices 标签页：单一用途、逐项权限用途说明、远程代码选“否”、数据使用勾选与认证、隐私政策 URL、支持 URL。
-7. Distribution 标签页：公开、全部地区。
-8. Submit for review。若审查要求补充源码（code readability），提供仓库 zip；发布 bundle 未压缩且带 source map。
+6. Privacy practices 标签页：单一用途、逐项权限用途说明、远程代码选“否”、数据使用勾选与认证、隐私政策 URL。
+7. Test instructions 标签页留空；Distribution 标签页：公开、全部地区。
+8. Submit for review。若审查要求补充源码，提供仓库 zip；发布 bundle 未压缩且带 source map。
 
 ## unlimitedStorage 说明（诚实口径，不改保留策略）
 
-开发诊断日志按 GOAL.md 设计**永不轮转**：不删除、不压缩、不摘要、不设条数或容量上限，只受物理磁盘、浏览器资料损坏、卸载和实际存储失败影响。因此日志在普通用户的磁盘上会无上限增长；`unlimitedStorage` 移除浏览器默认配额是这一设计的直接前提。后台答复已如实写明“随使用持续增长、卸载删除、仅在本机”。
+开发诊断日志按 GOAL.md 设计**永不轮转**：不删除、不压缩、不摘要、不设条数或容量上限，只受物理磁盘、浏览器资料损坏、卸载和实际存储失败影响。因此日志在普通用户的磁盘上会无上限增长；`unlimitedStorage` 移除浏览器默认配额是这一设计的直接前提。后台答复与 PRIVACY.md 已如实写明“随使用持续增长、卸载删除、仅在本机”。
 
-量级估算（由事件 schema 推导，非本机数据）：`media.sample` 以 1 Hz 记录完整 buffered/seekable 区间与帧统计，单行约 0.6–1.2 KB，即约 2–4 MB/小时观看；分片竞速事件（1 MiB 分块）再贡献约 0.3–0.7 MB/小时；合计约 3–5 MB/小时、每月约 30–50 MB（按每月 10 小时观看）。
+**增长速度（实测，不是估算）**：对开发者日常浏览器 profile 的日志库做只读离线解码（按 smooth-bilibili-plugin 技能的离线解码配方，复制后解码全部 349 个 LevelDB 文件）：
 
-**留给用户的取舍**：保持无上限保留（现设计，诊断价值最高）还是未来版本引入轮转/上限（会改 GOAL.md 行为，超出本任务范围）。商店审查风险：`unlimitedStorage` 属于少见的权限，审查员可能追问用途——上面给出的“日志不轮转设计 + 本机 + 卸载删除”口径即为答复；日志本身不上传，审查员看不到日志内容。
+| 量 | 值 |
+|---|---|
+| 库在磁盘上的大小 | 453 MB |
+| 覆盖时间 | 2026-09-18 至 2026-09-28，约 9.7 天；584 个 session，183 万条事件 |
+| `media.sample`（1 Hz，只在视频路由挂着 video 元素时采样，暂停/后台也计） | 226,214 条 ≈ 62.8 小时视频页打开时长 |
+| 磁盘增长 | 约 **7.2 MB / 视频页打开小时**（453 MB ÷ 62.8 h，含 LevelDB 与索引开销） |
+| 导出 JSONL 体积 | 约 19 MB / 小时（事件 JSON 合计 1.22 GB ÷ 62.8 h） |
+| 这个 profile 的实际速度 | 约 47 MB/天（453 MB ÷ 9.7 天），折合每月约 1.4 GB |
+
+按事件 JSON 体积拆分：`media.append` 35%（每秒约 4.1 条，每条约 450 B）、`media.sample` 34%（每条约 1.8 KB：完整 buffered/seekable/分轨区间加 `frameTiming`）、`bank.serve` 13%（每秒约 1.9 条）、`media.progress` 7%、`bank.inventory` 7%。每条 `media.*` 事件都附带同样的媒体快照，所以单条就在 1.8 KB 左右。
+
+**留给用户的生产决定**：
+
+- 保持无上限保留（现设计，诊断价值最高），还是正式版引入轮转/上限（会改 GOAL.md 的行为，超出本任务）。按实测速度，每天看 2 小时的普通用户一年约 5 GB；日志对普通用户没有直接用途。
+- 审查风险：`unlimitedStorage` 不触发安装警告，但审查员可能追问一个“减少卡顿”的扩展为何需要无限存储；答复口径就是上面的“日志不轮转设计 + 只在本机 + 卸载删除”。日志不上传，审查员看不到日志内容；若审查认为与单一用途不符，要么改保留策略，要么去掉该权限。
 
 ## 待用户决定的其他事项
 
-- 数据使用勾选：草稿建议勾选「网页历史」与「网站内容」（依据 User Data Policy 对“处理的定义”包含本地内存中转；本地处理也必须披露）。若把“收集”理解为仅持久化，可不勾「网站内容」，但两选都需与 PRIVACY.md 一致。
-- 类别：建议 Productivity（商店无媒体/播放类目）。
+- **直播没有开关**：popup 的“视频增强”开关只在 www.bilibili.com 下发（`src/extension/controller.js` 的 `start()`），下载层默认启用，所以直播接管（配对时流量接近两倍）没有单独开关，只能在 chrome://extensions 停用整个扩展。草稿已如实写明；是否给直播加开关是产品决定。
+- 数据使用勾选：草稿建议勾选「网页历史」「用户活动」「网站内容」三项。「用户活动」的商店定义第一项就是“网络监控”，日志记录播放器每个媒体请求的耗时与结果、以及播放/暂停/拖动/倍速/音量事件，不勾会与实际行为矛盾（计划政策：隐私字段与扩展行为矛盾可被下架）。「网站内容」若只按“持久化才算收集”理解可不勾，但须与 PRIVACY.md 一致。
+- 类别：建议 Entertainment（旧 Productivity 大类 2023 年已拆分），备选 Tools。
 - 名称：见上表。
 - 图片：商店图标已完成；截图、440×280 小宣传图、1400×560 Marquee 待 popup 重设计后的任务完成。
