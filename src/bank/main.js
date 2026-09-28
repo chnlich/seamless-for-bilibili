@@ -166,7 +166,10 @@ export class SegmentBank {
     this.config = config;
     this.maxPrefetchConcurrency = maxPrefetchConcurrency;
     this.now = now;
-    this.enabled = true;
+    // 默认让路：扩展内容脚本读到用户开关（controller.js 的 preference read）并写入
+    // BANK_ENABLED_ATTRIBUTE 之前，任何媒体请求都不接管。开关关闭时永远停在让路状态，
+    // 包括页面加载后最先发出的请求。
+    this.enabled = false;
     this.disabled = false;
     this.queue = [];
     this.inflight = new Map();
@@ -1428,7 +1431,7 @@ export class SegmentBank {
           leg.outcome = 'fetched';
           if (task.sessionGeneration === this.sessionGeneration) {
             this.recordTotalSize(leg.url, result.totalSize);
-            if (this.enabled === true && this.disabled === false) {
+            if (this.isEnabled()) {
               try {
                 this.storeTask(task, result);
               } catch (error) {

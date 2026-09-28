@@ -10,10 +10,15 @@
     hostPermissions: Object.freeze([])
   });
   var EXTENSION_PREFERENCES = Object.freeze({
-    vodEnabled: "vodEnabled"
+    vodEnabled: "vodEnabled",
+    liveEnabled: "liveEnabled"
   });
   var VOD_CONFIG = Object.freeze({
     stableBufferSeconds: 120
+  });
+  var LOG_RETENTION = Object.freeze({
+    retentionMs: 72 * 60 * 60 * 1e3,
+    pruneIntervalMs: 60 * 60 * 1e3
   });
   var BANK_CONFIG = Object.freeze({
     chunkBytes: 1024 ** 2,
@@ -252,6 +257,126 @@
       };
       request.onsuccess = () => resolve(request.result);
     });
+  }
+
+  // src/diagnostics/prune.js
+  var PRUNE_CHUNK_RECORDS = 2e3;
+  var SESSION_KEY_CEILING = Number.MAX_SAFE_INTEGER;
+  function parseTimeMs(value) {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : void 0;
+  }
+  function expired(timeMs, cutoffMs) {
+    return timeMs !== void 0 && timeMs < cutoffMs;
+  }
+  function pruneChunk(database, cutoffMs) {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction([EVENT_STORE], "readwrite");
+      let walkOver = false;
+      let complete = false;
+      let deleted = 0;
+      transaction.oncomplete = () => resolve({ complete, deleted });
+      transaction.onabort = () => reject(transaction.error || new Error("日志清理事务中止"));
+      transaction.onerror = () => reject(transaction.error || new Error("日志清理事务失败"));
+      const request = transaction.objectStore(EVENT_STORE).openCursor();
+      let visited = 0;
+      request.onerror = () => reject(request.error || new Error("走访日志 event 失败"));
+      request.onsuccess = () => {
+        if (walkOver) return;
+        const cursor = request.result;
+        if (cursor === null) {
+          walkOver = true;
+          complete = true;
+          return;
+        }
+        visited += 1;
+        const timeMs = parseTimeMs(cursor.value?.wallTime);
+        if (timeMs === void 0) {
+          cursor.continue();
+          return;
+        }
+        if (!expired(timeMs, cutoffMs)) {
+          walkOver = true;
+          complete = true;
+          return;
+        }
+        const deleteRequest = cursor.delete();
+        deleteRequest.onerror = () => reject(deleteRequest.error || new Error("删除过期日志 event 失败"));
+        deleteRequest.onsuccess = () => {
+          deleted += 1;
+          if (!walkOver && visited >= PRUNE_CHUNK_RECORDS) walkOver = true;
+          if (!walkOver) cursor.continue();
+        };
+      };
+    });
+  }
+  async function pruneExpiredEvents(database, cutoffMs) {
+    let deleted = 0;
+    for (; ; ) {
+      const chunk = await pruneChunk(database, cutoffMs);
+      deleted += chunk.deleted;
+      if (chunk.complete) return deleted;
+    }
+  }
+  function pruneExpiredSessions(database, cutoffMs) {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction([SESSION_STORE, EVENT_STORE], "readwrite");
+      let deleted = 0;
+      transaction.oncomplete = () => resolve(deleted);
+      transaction.onabort = () => reject(transaction.error || new Error("日志清理事务中止"));
+      transaction.onerror = () => reject(transaction.error || new Error("日志清理事务失败"));
+      const request = transaction.objectStore(SESSION_STORE).openCursor();
+      request.onerror = () => reject(request.error || new Error("走访日志 session 失败"));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor === null) return;
+        const session = cursor.value;
+        if (!expired(parseTimeMs(session?.startedAt), cutoffMs)) {
+          cursor.continue();
+          return;
+        }
+        const remainingRequest = transaction.objectStore(EVENT_STORE).index(EVENT_INDEX).openCursor(
+          IDBKeyRange.bound([session.sessionId, 0], [session.sessionId, SESSION_KEY_CEILING])
+        );
+        remainingRequest.onerror = () => reject(remainingRequest.error || new Error("检查 session 剩余 event 失败"));
+        remainingRequest.onsuccess = () => {
+          if (remainingRequest.result !== null) {
+            cursor.continue();
+            return;
+          }
+          const deleteRequest = cursor.delete();
+          deleteRequest.onerror = () => reject(deleteRequest.error || new Error("删除过期日志 session 失败"));
+          deleteRequest.onsuccess = () => {
+            deleted += 1;
+            cursor.continue();
+          };
+        };
+      };
+    });
+  }
+  async function pruneExpiredLogs({
+    indexedDbObject = globalThis.indexedDB,
+    throttleStore,
+    now = /* @__PURE__ */ new Date()
+  } = {}) {
+    if (throttleStore?.get === void 0 || throttleStore?.set === void 0) {
+      throw new Error("日志清理节流存储不可用");
+    }
+    const stored = await throttleStore.get("lastPruneAtMs");
+    const lastPruneAtMs = Number(stored?.lastPruneAtMs);
+    if (Number.isFinite(lastPruneAtMs) && now.getTime() - lastPruneAtMs < LOG_RETENTION.pruneIntervalMs) {
+      return { skipped: true };
+    }
+    await throttleStore.set({ lastPruneAtMs: now.getTime() });
+    const database = await openLogDatabase(indexedDbObject);
+    try {
+      const cutoffMs = now.getTime() - LOG_RETENTION.retentionMs;
+      const deletedEvents = await pruneExpiredEvents(database, cutoffMs);
+      const deletedSessions = await pruneExpiredSessions(database, cutoffMs);
+      return { deletedEvents, deletedSessions };
+    } finally {
+      database.close();
+    }
   }
 
   // src/diagnostics/privacy.js
@@ -1228,10 +1353,19 @@
     if (message.type === "logs:cdn-summary") return readCdnSummary(message, indexedDbObject);
     return readEventsPage(message, indexedDbObject);
   }
+  function schedulePrune() {
+    const throttleStore = globalThis.chrome?.storage?.session;
+    if (throttleStore === void 0) return;
+    void pruneExpiredLogs({ throttleStore }).catch((error) => {
+      console.error("[BilibiliBuffer] 日志清理失败", error);
+    });
+  }
   async function handleMessage(message, sender, indexedDbObject = globalThis.indexedDB) {
     if (message?.type === BATCH_TYPE) {
       try {
-        return await appendBatch(message, sender, indexedDbObject);
+        const result = await appendBatch(message, sender, indexedDbObject);
+        if (result.status === "PERSISTED") schedulePrune();
+        return result;
       } catch (error) {
         const status = ["SESSION_CONFLICT", "SEQUENCE_CONFLICT", "SESSION_EVENT_CONFLICT"].includes(error?.code) ? error.code : "DEGRADED";
         return { status, error: serializeError(error), eventCount: message.events?.length || 0 };
@@ -1243,6 +1377,7 @@
     throw storageError("MESSAGE_OPERATION_DENIED", "日志消息操作未允许");
   }
   if (typeof chrome !== "undefined" && chrome.runtime?.onMessage?.addListener) {
+    schedulePrune();
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (typeof message?.namespace === "string" && message.namespace.startsWith("bilibili-buffer:segment-bank-")) {
         return false;

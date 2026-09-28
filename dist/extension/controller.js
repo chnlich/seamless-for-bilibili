@@ -11,10 +11,15 @@
     hostPermissions: Object.freeze([])
   });
   var EXTENSION_PREFERENCES = Object.freeze({
-    vodEnabled: "vodEnabled"
+    vodEnabled: "vodEnabled",
+    liveEnabled: "liveEnabled"
   });
   var VOD_CONFIG = Object.freeze({
     stableBufferSeconds: 120
+  });
+  var LOG_RETENTION = Object.freeze({
+    retentionMs: 72 * 60 * 60 * 1e3,
+    pruneIntervalMs: 60 * 60 * 1e3
   });
   var BANK_CONFIG = Object.freeze({
     chunkBytes: 1024 ** 2,
@@ -603,7 +608,7 @@
   }
 
   // src/build-id.js
-  var BUILT_BUILD_ID = true ? "src-4664a8bb12d2ba4646510ed0" : "source-build";
+  var BUILT_BUILD_ID = true ? "src-cf7d1ffd401e076edb5806e7" : "source-build";
   function readBuildId() {
     return BUILT_BUILD_ID;
   }
@@ -2519,7 +2524,11 @@
     });
   }
   function readPreferences(storage) {
-    return storage.get([EXTENSION_PREFERENCES.vodEnabled]);
+    return storage.get(Object.values(EXTENSION_PREFERENCES));
+  }
+  function bankPreferenceForLocation(locationObject) {
+    if (isLiveLocation(locationObject)) return EXTENSION_PREFERENCES.liveEnabled;
+    return EXTENSION_PREFERENCES.vodEnabled;
   }
   function popupError(error) {
     return {
@@ -2614,12 +2623,12 @@
       if (this.routeTimer !== void 0) throw new Error("扩展路由协调器已经启动");
       this.diagnostics?.log("extension.started", { action: "coordinator" });
       this.preferences = await readPreferences(this.storage);
-      if (this.windowObject.location.hostname === "www.bilibili.com") {
-        postBankControl(this.windowObject, this.preferences[EXTENSION_PREFERENCES.vodEnabled] !== false);
-      }
+      const bankPreference = bankPreferenceForLocation(this.windowObject.location);
+      const bankEnabled = this.preferences[bankPreference] !== false;
+      postBankControl(this.windowObject, bankEnabled);
       this.diagnostics?.log("preference.read", {
-        name: EXTENSION_PREFERENCES.vodEnabled,
-        enabled: this.preferences[EXTENSION_PREFERENCES.vodEnabled] !== false
+        name: bankPreference,
+        enabled: bankEnabled
       });
       const runtimeId = this.runtimeObject.chrome?.runtime?.id || this.runtimeObject.runtime?.id;
       if (this.documentObject.documentElement !== null && runtimeId !== void 0) {

@@ -114,9 +114,57 @@
     };
   }
 
+  // src/diagnostics/export.js
+  async function writeLine(writer, value) {
+    await writer.write(`${JSON.stringify(value)}
+`);
+  }
+  async function writeSessions(send2, writer, sessionId, maxEventId) {
+    let afterSessionId;
+    for (; ; ) {
+      const response = await send2({
+        type: "logs:sessions-page",
+        limit: 250,
+        ...afterSessionId === void 0 ? {} : { afterSessionId },
+        maxEventId,
+        ...sessionId === void 0 ? {} : { sessionId }
+      });
+      for (const session of response.sessions) await writeLine(writer, { recordType: "session", ...session });
+      if (sessionId !== void 0 || !response.hasMore) break;
+      const nextAfterSessionId = response.nextAfterSessionId;
+      if (typeof nextAfterSessionId !== "string" || nextAfterSessionId.length === 0 || nextAfterSessionId === afterSessionId) {
+        throw new Error("日志 session 分页没有向前推进");
+      }
+      afterSessionId = nextAfterSessionId;
+    }
+  }
+  async function forEachEventPage(send2, sessionId, maxEventId, callback) {
+    let afterEventId = 0;
+    for (; ; ) {
+      const response = await send2({
+        type: "logs:events-page",
+        limit: 250,
+        afterEventId,
+        maxEventId,
+        ...sessionId === void 0 ? {} : { sessionId }
+      });
+      await callback(response.events);
+      if (!response.hasMore) break;
+      const nextAfterEventId = response.nextAfterEventId ?? response.events.at(-1)?.eventId;
+      if (!Number.isInteger(nextAfterEventId) || nextAfterEventId <= afterEventId) {
+        throw new Error("日志分页没有向前推进");
+      }
+      afterEventId = nextAfterEventId;
+    }
+  }
+  async function writeEvents(send2, writer, sessionId, maxEventId) {
+    await forEachEventPage(send2, sessionId, maxEventId, async (events) => {
+      for (const event of events) await writeLine(writer, { recordType: "event", ...event });
+    });
+  }
+
   // src/diagnostics/logs.js
   var MESSAGE_VERSION = 1;
-  var PAGE_SIZE = 250;
   var sessionSelect = document.querySelector("[data-session-filter]");
   var exportButton = document.querySelector("[data-export]");
   var statusElement = document.querySelector("[data-status]");
@@ -148,53 +196,6 @@
   function renderDetails() {
     const value = sessionSelect.value === "current" ? currentSessionId : sessionSelect.value;
     sessionDetails.textContent = value === void 0 || value === "" ? "导出全部 session" : `筛选 session: ${value}`;
-  }
-  async function writeLine(writer, value) {
-    await writer.write(`${JSON.stringify(value)}
-`);
-  }
-  async function writeSessions(writer, sessionId, maxEventId) {
-    let afterSessionId;
-    for (; ; ) {
-      const response = await send({
-        type: "logs:sessions-page",
-        limit: PAGE_SIZE,
-        ...afterSessionId === void 0 ? {} : { afterSessionId },
-        maxEventId,
-        ...sessionId === void 0 ? {} : { sessionId }
-      });
-      for (const session of response.sessions) await writeLine(writer, { recordType: "session", ...session });
-      if (sessionId !== void 0 || !response.hasMore) break;
-      const nextAfterSessionId = response.nextAfterSessionId;
-      if (typeof nextAfterSessionId !== "string" || nextAfterSessionId.length === 0 || nextAfterSessionId === afterSessionId) {
-        throw new Error("日志 session 分页没有向前推进");
-      }
-      afterSessionId = nextAfterSessionId;
-    }
-  }
-  async function forEachEventPage(sessionId, maxEventId, callback) {
-    let afterEventId = 0;
-    for (; ; ) {
-      const response = await send({
-        type: "logs:events-page",
-        limit: PAGE_SIZE,
-        afterEventId,
-        maxEventId,
-        ...sessionId === void 0 ? {} : { sessionId }
-      });
-      await callback(response.events);
-      if (!response.hasMore) break;
-      const nextAfterEventId = response.nextAfterEventId ?? response.events.at(-1)?.eventId;
-      if (!Number.isInteger(nextAfterEventId) || nextAfterEventId <= afterEventId) {
-        throw new Error("日志分页没有向前推进");
-      }
-      afterEventId = nextAfterEventId;
-    }
-  }
-  async function writeEvents(writer, sessionId, maxEventId) {
-    await forEachEventPage(sessionId, maxEventId, async (events) => {
-      for (const event of events) await writeLine(writer, { recordType: "event", ...event });
-    });
   }
   function ratioText(value) {
     return `${(value * 100).toFixed(1)}%`;
@@ -246,8 +247,8 @@
         type: "logs:max-event-id",
         ...sessionId === void 0 ? {} : { sessionId }
       });
-      await writeSessions(writer, sessionId, snapshot.maxEventId);
-      await writeEvents(writer, sessionId, snapshot.maxEventId);
+      await writeSessions(send, writer, sessionId, snapshot.maxEventId);
+      await writeEvents(send, writer, sessionId, snapshot.maxEventId);
       await writer.close();
       statusElement.textContent = `导出完成，截止 eventId ${snapshot.maxEventId}。新事件仍继续保存。`;
     } catch (error) {

@@ -61,6 +61,13 @@ h1 {
   gap: 12px;
 }
 
+.switches {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
 .switch-row {
   display: flex;
   align-items: center;

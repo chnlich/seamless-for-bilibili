@@ -10,10 +10,16 @@
     <main>
       <header class="head">
         <h1>Bilibili 抗卡</h1>
-        <label class="switch-row">
-          <span data-vod-toggle-label>视频增强</span>
-          <input type="checkbox" data-preference="vodEnabled">
-        </label>
+        <div class="switches">
+          <label class="switch-row">
+            <span>视频增强</span>
+            <input type="checkbox" data-preference="vodEnabled">
+          </label>
+          <label class="switch-row">
+            <span>直播增强</span>
+            <input type="checkbox" data-preference="liveEnabled">
+          </label>
+        </div>
       </header>
       <p class="hint">开关改动在刷新页面后生效。</p>
 

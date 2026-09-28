@@ -169,8 +169,13 @@ function nativeOwnership(video) {
 
 function eventDocument(video) {
   const listeners = new Map();
-  return {
-    documentElement: { dataset: {} },
+  const attributes = new Map();
+  const documentObject = {
+    attributes,
+    documentElement: {
+      dataset: {},
+      setAttribute(name, value) { attributes.set(name, value); },
+    },
     defaultView: {},
     querySelectorAll(selector) { return selector === 'video' ? [video] : []; },
     addEventListener(name, listener) {
@@ -193,6 +198,7 @@ function eventDocument(video) {
       };
     },
   };
+  return documentObject;
 }
 
 function diagnosticsRecorder() {
@@ -201,10 +207,20 @@ function diagnosticsRecorder() {
     log(code, data, error, context) { this.events.push({ code, data, error, context }); },
     markVideoAvailable() {},
     getStatus() { return { sessionId: 'session-test', persistence: 'PERSISTED' }; },
+    destroy() {},
   };
 }
 
-function coordinatorFixture({ diagnostics = diagnosticsRecorder(), enabled = false } = {}) {
+function coordinatorFixture({
+  diagnostics = diagnosticsRecorder(),
+  enabled = false,
+  liveEnabled = true,
+  location = {
+    href: 'https://www.bilibili.com/video/BVpassive',
+    hostname: 'www.bilibili.com',
+    pathname: '/video/BVpassive',
+  },
+} = {}) {
   const video = mediaVideo('https://media.example/video-passive-1');
   const documentObject = eventDocument(video);
   const callbacks = [];
@@ -217,29 +233,25 @@ function coordinatorFixture({ diagnostics = diagnosticsRecorder(), enabled = fal
     setTimeout() { return 1; },
     clearTimeout() {},
   };
-  const location = {
-    href: 'https://www.bilibili.com/video/BVpassive',
-    hostname: 'www.bilibili.com',
-    pathname: '/video/BVpassive',
-  };
   const bridgeClient = {
     destroy() {},
     callAsync() { throw new Error('被动诊断不得调用 bridge'); },
   };
+  const windowObject = { location, document: documentObject };
   const coordinator = new ExtensionCoordinator({
     documentObject,
-    windowObject: { location },
+    windowObject,
     runtimeObject,
     storage: {
       async get() {
-        return { vodEnabled: enabled };
+        return { vodEnabled: enabled, liveEnabled };
       },
     },
     bridgeClient,
     diagnostics,
     loggerObject: { error() {}, warn() {} },
   });
-  return { coordinator, diagnostics, video, callbacks };
+  return { coordinator, diagnostics, video, callbacks, documentObject, windowObject };
 }
 
 async function tick() {
@@ -647,6 +659,43 @@ test('disabled video route passively records media without media or bridge owner
   assert.equal(diagnostics.events.length, eventCount);
   fixture.video.emit('timeupdate');
   assert.equal(diagnostics.events.length, eventCount);
+});
+
+test('each switch gates its own page type and the other switch never leaks into the bank control', async () => {
+  const offVideo = coordinatorFixture({ enabled: false, liveEnabled: true });
+  await offVideo.coordinator.start();
+  assert.equal(offVideo.documentObject.attributes.get('data-bilibili-buffer-bank-enabled'), 'false');
+  const videoRead = offVideo.diagnostics.events.find((event) => event.code === 'preference.read');
+  assert.deepEqual(videoRead.data, { name: 'vodEnabled', enabled: false });
+  await offVideo.coordinator.destroy();
+
+  const offLive = coordinatorFixture({
+    enabled: true,
+    liveEnabled: false,
+    location: {
+      href: 'https://live.bilibili.com/21452505',
+      hostname: 'live.bilibili.com',
+      pathname: '/21452505',
+    },
+  });
+  await offLive.coordinator.start();
+  assert.equal(offLive.documentObject.attributes.get('data-bilibili-buffer-bank-enabled'), 'false');
+  const liveRead = offLive.diagnostics.events.find((event) => event.code === 'preference.read');
+  assert.deepEqual(liveRead.data, { name: 'liveEnabled', enabled: false });
+  await offLive.coordinator.destroy();
+
+  const onLive = coordinatorFixture({
+    enabled: false,
+    liveEnabled: true,
+    location: {
+      href: 'https://live.bilibili.com/21452505',
+      hostname: 'live.bilibili.com',
+      pathname: '/21452505',
+    },
+  });
+  await onLive.coordinator.start();
+  assert.equal(onLive.documentObject.attributes.get('data-bilibili-buffer-bank-enabled'), 'true');
+  await onLive.coordinator.destroy();
 });
 
 test('a failed controller boot falls back to passive diagnostics after destroying the partial controller', async () => {

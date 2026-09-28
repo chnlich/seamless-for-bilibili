@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { BANK_CONFIG, EXTENSION_MANIFEST, VOD_CONFIG } from '../src/constants.js';
+import { BANK_CONFIG, EXTENSION_MANIFEST, LOG_RETENTION, VOD_CONFIG } from '../src/constants.js';
 import { createManifest } from '../src/extension/manifest-source.js';
 import { SHIM_APPEND_EVENT } from '../src/extension/bridge-contract.js';
 import { DATA_ALLOWLIST, EVENT_CODES, MEDIA_EVENT_NAMES } from '../src/diagnostics/catalog.js';
@@ -245,6 +245,7 @@ assert.match(shim, /SourceBuffer\.prototype\.remove/);
 const indexedDbReference = /\bindexedDB\b|['"]indexedDB['"]/;
 const indexedDbSourceAllowlist = new Set([
   'diagnostics/idb.js',
+  'diagnostics/prune.js',
   'diagnostics/worker.js',
   'diagnostics/logs.js',
 ]);
@@ -302,11 +303,22 @@ assert.match(bank, /fetch\s*\(/);
 assert.match(bank, /XMLHttpRequest/);
 assert.doesNotMatch(`${source}\n${bank}`, /prefetchPauseBelowSeconds/);
 assert.doesNotMatch(source, /window\.onerror|window\.onunhandledrejection/);
-const diagnosticStorageSource = `${await fs.readFile(path.join(root, 'src/diagnostics/idb.js'), 'utf8')}\n${await fs.readFile(path.join(root, 'src/diagnostics/worker.js'), 'utf8')}`;
+// 日志库整体仍只追加：put 与 clear 任何地方都不允许；删除只允许出现在按自身
+// 时间清理过期记录的 prune 模块里，idb/worker 保持纯追加。
+const idbStorageSource = await fs.readFile(path.join(root, 'src/diagnostics/idb.js'), 'utf8');
+const workerStorageSource = await fs.readFile(path.join(root, 'src/diagnostics/worker.js'), 'utf8');
+const pruneStorageSource = await fs.readFile(path.join(root, 'src/diagnostics/prune.js'), 'utf8');
+const diagnosticStorageSource = `${idbStorageSource}\n${workerStorageSource}`;
 assert.doesNotMatch(diagnosticStorageSource, /\.put\s*\(|\.delete\s*\(|\.clear\s*\(/);
+assert.doesNotMatch(pruneStorageSource, /\.put\s*\(|\.clear\s*\(/);
+assert.match(pruneStorageSource, /\.delete\s*\(/);
 assert.match(vodSource, /setStableBufferTime/);
 assert.equal((vodSource.match(/\.setStableBufferTime\(/g) || []).length, 1);
 assert.equal(VOD_CONFIG.stableBufferSeconds, 120);
+assert.deepEqual(LOG_RETENTION, {
+  retentionMs: 72 * 60 * 60 * 1000,
+  pruneIntervalMs: 60 * 60 * 1000,
+});
 assert.deepEqual(Object.keys(BANK_CONFIG), [
   'chunkBytes',
   'maxBankBytes',
@@ -471,6 +483,8 @@ assert.doesNotMatch(bank, /(?:\.currentTime|\.playbackRate|\.muted|\.volume|\.sr
 assert.doesNotMatch(bank, /\b(?:play|pause)\s*\(/);
 for (const mediaEvent of MEDIA_EVENT_NAMES) assert.ok(EVENT_CODES.includes(`media.${mediaEvent}`));
 assert.match(controller, /unlimitedStorage|diagnostic/);
+assert.match(worker, /pruneExpiredLogs/);
+assert.match(worker, /日志清理失败/);
 assert.match(logs, /showSaveFilePicker|createWritable|recordType/);
 const userVisibleDocuments = [
   { path: 'GOAL.md', content: goal },

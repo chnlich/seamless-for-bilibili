@@ -1,5 +1,6 @@
 import { DIAGNOSTIC_MESSAGE_VERSION } from './catalog.js';
 import { EVENT_INDEX, EVENT_STORE, SESSION_STORE, openLogDatabase } from './idb.js';
+import { pruneExpiredLogs } from './prune.js';
 import { normalizeEventForStorage } from './privacy.js';
 import { sessionWithTabId, validateSession } from './session.js';
 import { serializeError } from '../extension/bridge-contract.js';
@@ -403,10 +404,24 @@ async function readLogs(message, indexedDbObject) {
   return readEventsPage(message, indexedDbObject);
 }
 
+// 日志只保留最近 3 天：批次写入成功后与 service worker 启动时各触发一次检查；
+// pruneExpiredLogs 内部用 chrome.storage.session 节流，至多每小时真正清理一次，
+// 且绝不阻塞本条消息的应答。失败走 console.error 全量上报，不吞掉。
+function schedulePrune() {
+  const throttleStore = globalThis.chrome?.storage?.session;
+  // 模块也会在单测环境导入：那里没有 chrome.storage.session，也就没有要清理的库。
+  if (throttleStore === undefined) return;
+  void pruneExpiredLogs({ throttleStore }).catch((error) => {
+    console.error('[BilibiliBuffer] 日志清理失败', error);
+  });
+}
+
 async function handleMessage(message, sender, indexedDbObject = globalThis.indexedDB) {
   if (message?.type === BATCH_TYPE) {
     try {
-      return await appendBatch(message, sender, indexedDbObject);
+      const result = await appendBatch(message, sender, indexedDbObject);
+      if (result.status === 'PERSISTED') schedulePrune();
+      return result;
     } catch (error) {
       const status = ['SESSION_CONFLICT', 'SEQUENCE_CONFLICT', 'SESSION_EVENT_CONFLICT'].includes(error?.code)
         ? error.code
@@ -423,6 +438,7 @@ async function handleMessage(message, sender, indexedDbObject = globalThis.index
 export { appendBatch, handleMessage, readLogs };
 
 if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage?.addListener) {
+  schedulePrune();
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (typeof message?.namespace === 'string' && message.namespace.startsWith('bilibili-buffer:segment-bank-')) {
       return false;

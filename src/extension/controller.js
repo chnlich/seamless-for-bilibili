@@ -86,7 +86,15 @@ function setBootError(panel, error) {
 }
 
 function readPreferences(storage) {
-  return storage.get([EXTENSION_PREFERENCES.vodEnabled]);
+  return storage.get(Object.values(EXTENSION_PREFERENCES));
+}
+
+// 每类页面只受自己的开关控制：www.bilibili.com 用视频开关，live.bilibili.com 用直播开关。
+// 读到的值写入 BANK_ENABLED_ATTRIBUTE 才开始接管；读取完成前下载层保持让路，
+// 因此开关关闭时连页面加载后最先发出的请求也不会被接管。
+export function bankPreferenceForLocation(locationObject) {
+  if (isLiveLocation(locationObject)) return EXTENSION_PREFERENCES.liveEnabled;
+  return EXTENSION_PREFERENCES.vodEnabled;
 }
 
 function popupError(error) {
@@ -193,12 +201,12 @@ export class ExtensionCoordinator {
     if (this.routeTimer !== undefined) throw new Error('扩展路由协调器已经启动');
     this.diagnostics?.log('extension.started', { action: 'coordinator' });
     this.preferences = await readPreferences(this.storage);
-    if (this.windowObject.location.hostname === 'www.bilibili.com') {
-      postBankControl(this.windowObject, this.preferences[EXTENSION_PREFERENCES.vodEnabled] !== false);
-    }
+    const bankPreference = bankPreferenceForLocation(this.windowObject.location);
+    const bankEnabled = this.preferences[bankPreference] !== false;
+    postBankControl(this.windowObject, bankEnabled);
     this.diagnostics?.log('preference.read', {
-      name: EXTENSION_PREFERENCES.vodEnabled,
-      enabled: this.preferences[EXTENSION_PREFERENCES.vodEnabled] !== false,
+      name: bankPreference,
+      enabled: bankEnabled,
     });
     const runtimeId = this.runtimeObject.chrome?.runtime?.id || this.runtimeObject.runtime?.id;
     if (this.documentObject.documentElement !== null && runtimeId !== undefined) {

@@ -1,10 +1,10 @@
-// 面板路由与直播只读事实：路由判定、开关标签、直播接管状态的事件折叠。
+// 面板路由、双开关偏好与直播只读事实：路由判定、开关读写、直播接管状态的事件折叠。
 // 数据全部来自 logs:max-event-id / logs:events-page（与开发日志同源），
 // 直播线路连接时间走既有 logs:cdn-summary，这里不做网络请求。
 
-export const POPUP_ROUTE = Object.freeze({ VIDEO: 'video', LIVE: 'live' });
+import { EXTENSION_PREFERENCES } from '../constants.js';
 
-const TOGGLE_LABELS = Object.freeze({ video: '视频增强', live: '直播增强' });
+export const POPUP_ROUTE = Object.freeze({ VIDEO: 'video', LIVE: 'live' });
 
 export function popupRouteForTabUrl(urlString) {
   if (typeof urlString !== 'string' || urlString.length === 0) return POPUP_ROUTE.VIDEO;
@@ -17,15 +17,29 @@ export function popupRouteForTabUrl(urlString) {
   return parsed.hostname === 'live.bilibili.com' ? POPUP_ROUTE.LIVE : POPUP_ROUTE.VIDEO;
 }
 
-export function popupToggleLabel(route) {
-  return route === POPUP_ROUTE.LIVE ? TOGGLE_LABELS.live : TOGGLE_LABELS.video;
+// 两个开关（视频增强、直播增强）在 popup 里常驻，各自控制自己的页面类型；
+// 不再按路由改写开关标签。这里集中开关的读写规则，popup.js 只做装配。
+export function preferenceNames() {
+  return Object.values(EXTENSION_PREFERENCES);
+}
+
+// storage.local 的缺省值都是开启：字段缺失或非 false 都视为开启。
+export function storedPreferences(values) {
+  const result = {};
+  for (const name of preferenceNames()) result[name] = values[name] !== false;
+  return result;
+}
+
+// 一次开关改动只写它自己的偏好；只有视频开关影响缓冲卡的目标状态行。
+export async function savePreferenceChange({ name, checked, storageObject }) {
+  if (!preferenceNames().includes(name)) throw new Error(`未允许的偏好开关: ${name}`);
+  await storageObject.set({ [name]: checked === true });
+  return name === EXTENSION_PREFERENCES.vodEnabled;
 }
 
 export function applyPopupRoute(documentObject, route) {
   const livePanel = documentObject.querySelector('[data-live-panel]');
   if (livePanel !== null) livePanel.hidden = route !== POPUP_ROUTE.LIVE;
-  const label = documentObject.querySelector('[data-vod-toggle-label]');
-  if (label !== null) label.textContent = popupToggleLabel(route);
   for (const block of documentObject.querySelectorAll('[data-vod-only]')) {
     block.hidden = route === POPUP_ROUTE.LIVE;
   }

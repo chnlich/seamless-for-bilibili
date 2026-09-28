@@ -11,7 +11,9 @@ import {
   foldLiveEvents,
   liveServeClass,
   popupRouteForTabUrl,
-  popupToggleLabel,
+  preferenceNames,
+  savePreferenceChange,
+  storedPreferences,
 } from '../src/extension/popup-live.js';
 import {
   NO_PAGE_MESSAGES,
@@ -56,26 +58,72 @@ test('popup route classification treats live.bilibili.com as live and everything
   assert.equal(popupRouteForTabUrl('https://search.bilibili.com/all'), POPUP_ROUTE.VIDEO);
   assert.equal(popupRouteForTabUrl(undefined), POPUP_ROUTE.VIDEO);
   assert.equal(popupRouteForTabUrl('not a url'), POPUP_ROUTE.VIDEO);
-  assert.equal(popupToggleLabel(POPUP_ROUTE.LIVE), '直播增强');
-  assert.equal(popupToggleLabel(POPUP_ROUTE.VIDEO), '视频增强');
+});
+
+test('popup always shows both switches with their own labels, on either route', () => {
+  for (const route of [POPUP_ROUTE.VIDEO, POPUP_ROUTE.LIVE]) {
+    const document = popupDocument();
+    applyPopupRoute(document, route);
+    const labels = [...document.querySelectorAll('.switch-row span')].map((span) => span.textContent);
+    assert.deepEqual(labels, ['视频增强', '直播增强']);
+    for (const name of preferenceNames()) {
+      const input = document.querySelector(`input[data-preference="${name}"]`);
+      assert.notEqual(input, undefined, `缺少开关 input: ${name}`);
+      assert.equal(input.closest('.switch-row').hidden, false);
+    }
+  }
 });
 
 test('popup on a video route shows the buffer card and hides the live takeover card', () => {
   const document = popupDocument();
   applyPopupRoute(document, POPUP_ROUTE.VIDEO);
-  assert.equal(document.querySelector('[data-vod-toggle-label]').textContent, '视频增强');
   assert.equal(document.querySelector('[data-live-panel]').hidden, true);
   assert.equal(document.querySelector('[aria-label="缓冲"]').hidden, false);
   assert.equal(document.querySelector('[aria-label="下载线路"]').hidden, false);
 });
 
-test('popup on a live route relabels the toggle, hides the buffer card, and shows the takeover card', () => {
+test('popup on a live route hides the buffer card and shows the takeover card', () => {
   const document = popupDocument();
   applyPopupRoute(document, POPUP_ROUTE.LIVE);
-  assert.equal(document.querySelector('[data-vod-toggle-label]').textContent, '直播增强');
   assert.equal(document.querySelector('[data-live-panel]').hidden, false);
   assert.equal(document.querySelector('[aria-label="缓冲"]').hidden, true);
   assert.equal(document.querySelector('[aria-label="下载线路"]').hidden, false);
+});
+
+test('stored preferences default both switches to on and treat only false as off', () => {
+  assert.deepEqual(storedPreferences({}), { vodEnabled: true, liveEnabled: true });
+  assert.deepEqual(
+    storedPreferences({ vodEnabled: false, liveEnabled: false }),
+    { vodEnabled: false, liveEnabled: false },
+  );
+  assert.deepEqual(
+    storedPreferences({ vodEnabled: true, liveEnabled: 'no' }),
+    { vodEnabled: true, liveEnabled: true },
+  );
+});
+
+test('each switch saves its own preference and only the video switch affects the video panel', async () => {
+  const writes = [];
+  const storageObject = {
+    async set(value) { writes.push(value); },
+  };
+  assert.equal(
+    await savePreferenceChange({ name: 'liveEnabled', checked: false, storageObject }),
+    false,
+    '直播开关不得影响视频面板',
+  );
+  assert.deepEqual(writes, [{ liveEnabled: false }]);
+  assert.equal(
+    await savePreferenceChange({ name: 'vodEnabled', checked: false, storageObject }),
+    true,
+    '视频开关改动要刷新缓冲卡目标状态',
+  );
+  assert.deepEqual(writes, [{ liveEnabled: false }, { vodEnabled: false }]);
+  await assert.rejects(
+    savePreferenceChange({ name: 'other', checked: true, storageObject }),
+    /未允许的偏好开关/,
+  );
+  assert.deepEqual(writes, [{ liveEnabled: false }, { vodEnabled: false }]);
 });
 
 test('mirror hosts shrink to readable line names that stay distinguishable', () => {

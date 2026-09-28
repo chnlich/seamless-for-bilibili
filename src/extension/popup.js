@@ -7,6 +7,9 @@ import {
   emptyLiveFacts,
   foldLiveEvents,
   popupRouteForTabUrl,
+  preferenceNames,
+  savePreferenceChange,
+  storedPreferences,
 } from './popup-live.js';
 import {
   NO_PAGE_MESSAGES,
@@ -17,7 +20,7 @@ import {
   renderVideoPanel as renderVideoPanelView,
 } from './popup-view.js';
 
-const PREFERENCES = Object.freeze(Object.values(EXTENSION_PREFERENCES));
+const PREFERENCES = Object.freeze(preferenceNames());
 const RECEIVER_MISSING = 'Could not establish connection. Receiving end does not exist.';
 
 const mainElement = document.querySelector('main');
@@ -263,15 +266,22 @@ async function refresh() {
 
 async function loadPreferences() {
   const values = await chrome.storage.local.get(PREFERENCES);
-  for (const name of PREFERENCES) inputs.get(name).checked = values[name] !== false;
-  enhancementEnabled = inputs.get(EXTENSION_PREFERENCES.vodEnabled).checked;
+  const stored = storedPreferences(values);
+  for (const name of PREFERENCES) inputs.get(name).checked = stored[name];
+  enhancementEnabled = stored[EXTENSION_PREFERENCES.vodEnabled];
 }
 
 for (const name of PREFERENCES) {
   inputs.get(name).addEventListener('change', async (event) => {
-    await chrome.storage.local.set({ [name]: event.currentTarget.checked });
-    enhancementEnabled = event.currentTarget.checked;
-    renderVideoPanel();
+    const affectsVideoPanel = await savePreferenceChange({
+      name,
+      checked: event.currentTarget.checked,
+      storageObject: chrome.storage.local,
+    });
+    if (affectsVideoPanel) {
+      enhancementEnabled = event.currentTarget.checked;
+      renderVideoPanel();
+    }
     showNotice(NO_PAGE_MESSAGES.preferenceSaved);
   });
 }

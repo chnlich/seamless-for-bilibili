@@ -10,10 +10,15 @@
     hostPermissions: Object.freeze([])
   });
   var EXTENSION_PREFERENCES = Object.freeze({
-    vodEnabled: "vodEnabled"
+    vodEnabled: "vodEnabled",
+    liveEnabled: "liveEnabled"
   });
   var VOD_CONFIG = Object.freeze({
     stableBufferSeconds: 120
+  });
+  var LOG_RETENTION = Object.freeze({
+    retentionMs: 72 * 60 * 60 * 1e3,
+    pruneIntervalMs: 60 * 60 * 1e3
   });
   var BANK_CONFIG = Object.freeze({
     chunkBytes: 1024 ** 2,
@@ -47,7 +52,6 @@
 
   // src/extension/popup-live.js
   var POPUP_ROUTE = Object.freeze({ VIDEO: "video", LIVE: "live" });
-  var TOGGLE_LABELS = Object.freeze({ video: "视频增强", live: "直播增强" });
   function popupRouteForTabUrl(urlString) {
     if (typeof urlString !== "string" || urlString.length === 0) return POPUP_ROUTE.VIDEO;
     let parsed;
@@ -58,14 +62,22 @@
     }
     return parsed.hostname === "live.bilibili.com" ? POPUP_ROUTE.LIVE : POPUP_ROUTE.VIDEO;
   }
-  function popupToggleLabel(route) {
-    return route === POPUP_ROUTE.LIVE ? TOGGLE_LABELS.live : TOGGLE_LABELS.video;
+  function preferenceNames() {
+    return Object.values(EXTENSION_PREFERENCES);
+  }
+  function storedPreferences(values) {
+    const result = {};
+    for (const name of preferenceNames()) result[name] = values[name] !== false;
+    return result;
+  }
+  async function savePreferenceChange({ name, checked, storageObject }) {
+    if (!preferenceNames().includes(name)) throw new Error(`未允许的偏好开关: ${name}`);
+    await storageObject.set({ [name]: checked === true });
+    return name === EXTENSION_PREFERENCES.vodEnabled;
   }
   function applyPopupRoute(documentObject, route) {
     const livePanel = documentObject.querySelector("[data-live-panel]");
     if (livePanel !== null) livePanel.hidden = route !== POPUP_ROUTE.LIVE;
-    const label = documentObject.querySelector("[data-vod-toggle-label]");
-    if (label !== null) label.textContent = popupToggleLabel(route);
     for (const block of documentObject.querySelectorAll("[data-vod-only]")) {
       block.hidden = route === POPUP_ROUTE.LIVE;
     }
@@ -245,7 +257,7 @@
   }
 
   // src/extension/popup.js
-  var PREFERENCES = Object.freeze(Object.values(EXTENSION_PREFERENCES));
+  var PREFERENCES = Object.freeze(preferenceNames());
   var RECEIVER_MISSING = "Could not establish connection. Receiving end does not exist.";
   var mainElement = document.querySelector("main");
   var noticeElement = document.querySelector("[data-notice]");
@@ -471,14 +483,21 @@
   }
   async function loadPreferences() {
     const values = await chrome.storage.local.get(PREFERENCES);
-    for (const name of PREFERENCES) inputs.get(name).checked = values[name] !== false;
-    enhancementEnabled = inputs.get(EXTENSION_PREFERENCES.vodEnabled).checked;
+    const stored = storedPreferences(values);
+    for (const name of PREFERENCES) inputs.get(name).checked = stored[name];
+    enhancementEnabled = stored[EXTENSION_PREFERENCES.vodEnabled];
   }
   for (const name of PREFERENCES) {
     inputs.get(name).addEventListener("change", async (event) => {
-      await chrome.storage.local.set({ [name]: event.currentTarget.checked });
-      enhancementEnabled = event.currentTarget.checked;
-      renderVideoPanel2();
+      const affectsVideoPanel = await savePreferenceChange({
+        name,
+        checked: event.currentTarget.checked,
+        storageObject: chrome.storage.local
+      });
+      if (affectsVideoPanel) {
+        enhancementEnabled = event.currentTarget.checked;
+        renderVideoPanel2();
+      }
       showNotice(NO_PAGE_MESSAGES.preferenceSaved);
     });
   }

@@ -10,10 +10,15 @@
     hostPermissions: Object.freeze([])
   });
   var EXTENSION_PREFERENCES = Object.freeze({
-    vodEnabled: "vodEnabled"
+    vodEnabled: "vodEnabled",
+    liveEnabled: "liveEnabled"
   });
   var VOD_CONFIG = Object.freeze({
     stableBufferSeconds: 120
+  });
+  var LOG_RETENTION = Object.freeze({
+    retentionMs: 72 * 60 * 60 * 1e3,
+    pruneIntervalMs: 60 * 60 * 1e3
   });
   var BANK_CONFIG = Object.freeze({
     chunkBytes: 1024 ** 2,
@@ -1780,7 +1785,7 @@
       this.config = config;
       this.maxPrefetchConcurrency = maxPrefetchConcurrency;
       this.now = now;
-      this.enabled = true;
+      this.enabled = false;
       this.disabled = false;
       this.queue = [];
       this.inflight = /* @__PURE__ */ new Map();
@@ -2970,7 +2975,7 @@
             leg.outcome = "fetched";
             if (task.sessionGeneration === this.sessionGeneration) {
               this.recordTotalSize(leg.url, result.totalSize);
-              if (this.enabled === true && this.disabled === false) {
+              if (this.isEnabled()) {
                 try {
                   this.storeTask(task, result);
                 } catch (error) {

@@ -106,6 +106,7 @@ function windowFixture({ timers, location = new URL('https://www.bilibili.com/vi
   const listeners = new Map();
   const realTimers = new Set();
   const messages = [];
+  const attributes = new Map();
   return {
     location,
     Response,
@@ -114,8 +115,9 @@ function windowFixture({ timers, location = new URL('https://www.bilibili.com/vi
     performance: { now: () => Date.now() },
     document: {
       querySelectorAll: () => [],
-      documentElement: { getAttribute: () => undefined },
+      documentElement: { getAttribute: (name) => attributes.get(name) },
     },
+    attributes,
     messages,
     setInterval() { return 1; },
     clearInterval() {},
@@ -174,8 +176,15 @@ function createBank({
   now,
   playinfo,
   location,
+  enabled = true,
+  attributeUnset = false,
 } = {}) {
   const windowObject = windowFixture({ timers, location });
+  // 默认模拟 controller 已读到开关并写入接管标记；attributeUnset 表示标记不存在，
+  // 对应 controller 还没读到开关值的窗口（下载层让路）。
+  if (!attributeUnset) {
+    windowObject.attributes.set(BANK_ENABLED_ATTRIBUTE, enabled === true ? 'true' : 'false');
+  }
   if (playinfo !== undefined) windowObject.__playinfo__ = playinfo;
   const calls = [];
   const fetchFunction = nativeFetch || (async (url, init) => {
@@ -312,6 +321,60 @@ test('control stays in the DOM boundary and diagnostic messages carry no binary 
     direction: 'request',
     type: 'write-chunk',
   }), false);
+});
+
+test('before the preference arrives the bank takes over nothing, including the first media request', async () => {
+  // attributeUnset 对应 controller 尚未读到开关、接管标记不存在的窗口。
+  const { bank, windowObject, calls } = createBank({ attributeUnset: true });
+  const nativeResponse = responseFor(4, 6, 100, bytesFor(4, 6));
+  const response = await fetchThrough(bank, MEDIA_URL, { headers: { Range: 'bytes=4-6' } }, async () => nativeResponse);
+  assert.equal(response, nativeResponse, '偏好未读到时媒体请求必须原样交给播放器');
+  assert.deepEqual(calls, [], '让路窗口不得以扩展名义取数');
+  assert.equal(windowObject.messages.length, 0, '让路窗口不产生接管诊断');
+  assert.equal([...bank.chunks.keys()].length, 0, '让路窗口不缓存任何分片');
+  bank.destroy();
+});
+
+test('a disabled switch stops takeover on its own page type and leaves the other untouched', async () => {
+  const videoLocation = new URL('https://www.bilibili.com/video/BVbank');
+  const liveLocation = new URL('https://live.bilibili.com/21452505');
+
+  // 视频开关关闭：www 视频页的分片请求原样放行，不缓存、不竞速。
+  const offVideo = createBank({ location: videoLocation, enabled: false });
+  const videoNative = responseFor(4, 6, 100, bytesFor(4, 6));
+  const videoResponse = await fetchThrough(offVideo.bank, MEDIA_URL, { headers: { Range: 'bytes=4-6' } }, async () => videoNative);
+  assert.equal(videoResponse, videoNative);
+  assert.equal(offVideo.windowObject.messages.length, 0);
+  offVideo.bank.destroy();
+
+  // 直播开关关闭：live 页的 FLV 流原样放行。
+  const offLive = createBank({ location: liveLocation, enabled: false });
+  const liveNative = new Response('native-live-bytes', { status: 200 });
+  const liveResponse = await fetchThrough(offLive.bank, LIVE_URL, {}, async () => liveNative);
+  assert.equal(liveResponse, liveNative);
+  assert.equal(offLive.windowObject.messages.length, 0);
+  offLive.bank.destroy();
+
+  // 直播开关开启：同一请求被接管（双腿竞速开始）。
+  const onLive = createBank({
+    location: liveLocation,
+    enabled: true,
+    nativeFetch: async (url) => {
+      if (String(url) === LIVE_URL) {
+        return new Response(Uint8Array.from({ length: 48 }, (_v, i) => i), { status: 200 });
+      }
+      return new Response(Uint8Array.from({ length: 48 }, (_v, i) => i), { status: 200 });
+    },
+    timers: manualTimers(),
+  });
+  const takeoverResponse = await Promise.race([
+    fetchThrough(onLive.bank, LIVE_URL, {}),
+    new Promise((resolve) => setTimeout(() => resolve('TIMEOUT'), 500)),
+  ]);
+  assert.notEqual(takeoverResponse, 'TIMEOUT');
+  assert.notEqual(takeoverResponse, undefined);
+  assert.equal(onLive.windowObject.messages.some((message) => message.code === 'bank.serve'), true);
+  onLive.bank.destroy();
 });
 
 test('memory hit returns exact bytes and canonical response fields while refilling the window', async () => {

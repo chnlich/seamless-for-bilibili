@@ -62,13 +62,14 @@ class FakeRequest {
 }
 
 class FakeCursorRequest {
-  constructor(transaction, records) {
+  constructor(transaction, records, storeName) {
     this.transaction = transaction;
     this.result = undefined;
     this.error = null;
     this.onsuccess = undefined;
     this.onerror = undefined;
     this.records = records;
+    this.storeName = storeName;
     this.position = 0;
     this.emit();
   }
@@ -103,6 +104,18 @@ class FakeCursor {
   continue() {
     this.request.position += 1;
     this.request.emit();
+  }
+
+  // 真实 IDB 语义：删除当前记录并返回其主键；continue() 落到下一条记录。
+  delete() {
+    const primaryKey = this.primaryKey;
+    return new FakeRequest(this.request.transaction, () => {
+      const records = this.request.transaction.state[this.request.storeName];
+      if (!records.delete(primaryKey)) {
+        throw new Error(`fake IDB cursor 删除了不存在的记录: ${String(primaryKey)}`);
+      }
+      return primaryKey;
+    });
   }
 }
 
@@ -161,7 +174,17 @@ class FakeObjectStore {
         .filter((record) => inRange(range, record.key));
     records.sort((left, right) => compareKeys(left.key, right.key));
     if (direction === 'prev') records.reverse();
-    return new FakeCursorRequest(this.transaction, records);
+    return new FakeCursorRequest(this.transaction, records, this.name);
+  }
+
+  delete(key) {
+    return new FakeRequest(this.transaction, () => {
+      const records = this.transaction.state[this.name];
+      if (!records.has(key)) return undefined;
+      const value = clone(records.get(key));
+      records.delete(key);
+      return value;
+    });
   }
 
   index(name) {
@@ -197,7 +220,7 @@ class FakeIndex {
       .filter((record) => inRange(range, record.key));
     records.sort((left, right) => compareKeys(left.key, right.key));
     if (direction === 'prev') records.reverse();
-    return new FakeCursorRequest(this.transaction, records);
+    return new FakeCursorRequest(this.transaction, records, 'events');
   }
 }
 
