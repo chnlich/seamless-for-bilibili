@@ -2,8 +2,7 @@
 
 Field-by-field draft for the Chrome Web Store Developer Dashboard. The name is decided:
 Seamless for Bilibili (decision and rationale in [README.md](README.md)); the user copy-pastes and
-submits. Every field is pre-filled; images that show the old name are to be recaptured
-(see [images/README.md](images/README.md)).
+submits. Every field and every image is pre-filled and current (see [images/README.md](images/README.md)).
 
 Note: the item currently has a single default listing language (the manifest declares no `_locales`),
 so the live listing will be the zh-CN draft ([listing.zh-CN.md](listing.zh-CN.md)). This English
@@ -116,9 +115,9 @@ credentials; Bilibili video and live play without logging in.
 | Asset | Spec | Status |
 |---|---|---|
 | Store icon | 128×128 PNG (96×96 artwork + 16px transparent padding) | ✅ Done: `assets/icon.svg` → `npm run icons` renders the four sizes (16/32/48 crop to the artwork so the toolbar icon stays legible), committed with the package; upload `src/extension/icons/icon128.png` |
-| Screenshots | 1280×800 (or 640×400), 1–5 images | `store/images/screenshot-01-popup-video.png` (real popup over a video page) and `screenshot-02-popup-live.png` (real popup over a live page) are **to recapture**: they show the old single-switch popup, and the popup now has two always-visible switches (to recapture: popup now has two switches); they also show the old name (to recapture: shows the old name). `screenshot-03-racing-diagram.png` (mechanism and traffic cost diagram) is updated for the 3-day log retention. Composed by `store/images/src/compose.mjs` from a real run; the page background is blurred wholesale to hide third-party content |
-| Small promo tile (required) | 440×280 PNG/JPEG | Rendered but shows the old name, **to recapture** (to recapture: shows the old name): `store/images/promo-tile-440x280.png`; the HTML source is updated to the new name, re-render after recapture |
-| Marquee promo tile (optional, needed for featuring) | 1400×560 PNG/JPEG | Rendered but shows the old name, **to recapture** (to recapture: shows the old name): `store/images/marquee-1400x560.png`; the HTML source is updated to the new name, re-render after recapture |
+| Screenshots | 1280×800 (or 640×400), 1–5 images | ✅ done: `store/images/screenshot-01-popup-video.png` (real popup over a video page, two switches, current name) and `screenshot-02-popup-live.png` (real popup over a live page); `screenshot-03-racing-diagram.png` (mechanism and traffic cost diagram, no name). Composed by `store/images/src/compose.mjs` from a real run; the page background is blurred wholesale to hide third-party content |
+| Small promo tile (required) | 440×280 PNG/JPEG | ✅ done: `store/images/promo-tile-440x280.png`, showing the current name Seamless for Bilibili |
+| Marquee promo tile (optional, needed for featuring) | 1400×560 PNG/JPEG | ✅ done: `store/images/marquee-1400x560.png`, showing the current name Seamless for Bilibili |
 | YouTube promo video | link | ⬜ none. The images page says only the icon, small promo tile, and a screenshot are mandatory; the listing page lists the video alongside the other assets. If the dashboard blocks submission without it, a later task produces one |
 
 ## Packaging and upload

@@ -125,14 +125,25 @@ async function assertLayout(page, htmlName) {
 }
 
 // Honest live caption: the LIVE_NOTE comment in screenshot-live.html is replaced in the
-// rendered page (never in the source file) based on what was actually captured.
+// rendered page (never in the source file) based on what was actually captured. The keys
+// are the popup's live status texts (popup-view.js liveTakeoverText); an unknown status
+// stops the render instead of silently captioning the wrong state.
 function liveCaptionNote(report) {
   const state = report.scenarios.live.readout.liveTakeover;
-  return state === '正在按两条线路竞速下载'
-    ? '配对后两条线路同时下载，'
-    : state === '单路接管（无可用备用线路）'
-      ? '此直播间无可用备用线路，单路接管，'
-      : '此直播间未发现 FLV 流，弹窗如实显示未接管，';
+  switch (state) {
+    case '正在按两条线路竞速下载':
+      return '配对后两条线路同时下载，';
+    case '单路接管（无可用备用线路）':
+      return '此直播间无可用备用线路，单路接管，';
+    case '接管请求失败':
+      return '此直播间接管请求失败，';
+    case '未接管（未发现直播媒体流）':
+      return '此直播间未发现直播媒体流，弹窗如实显示未接管，';
+    case '等待直播数据':
+      return '此直播间还没有直播数据，';
+    default:
+      throw new Error(`report.json 的直播状态不是弹窗已知的任一状态: ${JSON.stringify(state)}`);
+  }
 }
 
 async function fillLiveNote(page, note) {

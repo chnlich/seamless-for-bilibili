@@ -17,7 +17,7 @@ Chrome Web Store 提交所需要的、不依赖新 popup 的内容都在这里�
 2. 确认 PRIVACY.md 当前版本已在 main 分支（隐私政策 URL 用户可见；仓库是公开仓库，Issues 已开启）。
 3. `npm run package` 生成 zip。
 4. 后台 Items → New item，上传 zip。
-5. Store listing 标签页：按 listing.zh-CN.md 逐字段粘贴；上传商店图标与图片（图标与机制示意图已就绪；小型宣传图、marquee、弹窗特写与截图的画面上是旧名称，待重摄，见 [images/](images/README.md)）。
+5. Store listing 标签页：按 listing.zh-CN.md 逐字段粘贴；上传商店图标与图片（图标与全部图片已就绪，见 [images/](images/README.md)）。
 6. Privacy practices 标签页：单一用途、逐项权限用途说明、远程代码选“否”、数据使用勾选与认证、隐私政策 URL。
 7. Test instructions 标签页留空；Distribution 标签页：公开、全部地区。
 8. Submit for review。若审查要求补充源码，提供仓库 zip；发布 bundle 未压缩且带 source map。
@@ -48,4 +48,4 @@ Chrome Web Store 提交所需要的、不依赖新 popup 的内容都在这里�
 
 - 数据使用勾选：草稿建议勾选「网页历史」「用户活动」「网站内容」三项。「用户活动」的商店定义第一项就是“网络监控”，日志记录播放器每个媒体请求的耗时与结果、以及播放/暂停/拖动/倍速/音量事件，不勾会与实际行为矛盾（计划政策：隐私字段与扩展行为矛盾可被下架）。「网站内容」若只按“持久化才算收集”理解可不勾，但须与 PRIVACY.md 一致。
 - 类别：建议 Entertainment（旧 Productivity 大类 2023 年已拆分），备选 Tools。
-- 图片：商店图标已完成（不含名称，不受改名影响）；440×280 小宣传图与 1400×560 Marquee 的 PNG 已渲染，但画面上是旧名称，待重摄（to recapture: shows the old name），HTML 源（tile.html、marquee.html）已改为新名称；弹窗特写（popup-video.png / popup-live.png）与 screenshot-01-popup-video.png、screenshot-02-popup-live.png 拍摄的是旧的单开关弹窗，popup 现在有两个常驻开关（to recapture: popup now has two switches），画面上也是旧名称（to recapture: shows the old name）；机制示意图 screenshot-03-racing-diagram.png 不含名称，已随 3 天保留规则更新。重摄需真实浏览器，做法见 [images/](images/README.md)。
+- 图片：已全部就绪，画面与当前构建一致（名称 Seamless for Bilibili、双开关弹窗）：商店图标、机制示意图（不含名称）、440×280 小宣传图、1400×560 Marquee、两张 1280×800 截图与弹窗特写（popup-video.png / popup-live.png）都从真实运行的原始捕获再生；捕获与再生命令见 [images/](images/README.md)。
