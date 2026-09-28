@@ -29,7 +29,7 @@ Chrome 的品牌规范对 Google 商标规定用“for …”（如 “for Googl
 2. 确认 PRIVACY.md 当前版本已在 main 分支（隐私政策 URL 用户可见；仓库是公开仓库，Issues 已开启）。
 3. `npm run package` 生成 zip。
 4. 后台 Items → New item，上传 zip。
-5. Store listing 标签页：按 listing.zh-CN.md 逐字段粘贴；上传商店图标；截图与宣传图待 popup 任务后补。
+5. Store listing 标签页：按 listing.zh-CN.md 逐字段粘贴；上传商店图标与图片（图标、截图、小型宣传图、marquee 均已就绪，见 [images/](images/README.md)）。
 6. Privacy practices 标签页：单一用途、逐项权限用途说明、远程代码选“否”、数据使用勾选与认证、隐私政策 URL。
 7. Test instructions 标签页留空；Distribution 标签页：公开、全部地区。
 8. Submit for review。若审查要求补充源码，提供仓库 zip；发布 bundle 未压缩且带 source map。

@@ -2,7 +2,7 @@
 
 Field-by-field draft for the Chrome Web Store Developer Dashboard. Name candidates and the final
 decision live in [README.md](README.md); the user copy-pastes and submits. Every field is pre-filled
-except the images marked "TODO".
+including all images.
 
 Note: the item currently has a single default listing language (the manifest declares no `_locales`),
 so the live listing will be the zh-CN draft ([listing.zh-CN.md](listing.zh-CN.md)). This English
@@ -28,7 +28,7 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
   Takes over the player's media segment downloads (both the fetch and XHR channels): every 1 MiB segment is requested from two mirror addresses Bilibili supplied, at once; the first complete response wins and the other is cancelled. It prefetches ahead (window up to 48 segments, concurrency 4). Segments stay in memory only (up to 512 MiB per tab), are released when the page is left, and are never written to disk. Once per video it asks Bilibili's native player to keep a 120-second buffer.
 
   Live pages: how it works
-  Takes over the player's FLV live stream: pairs only the primary/backup addresses of the same cluster, checks that the first bytes of both legs match, then downloads both at once and hands the player whichever bytes arrive first. With no pair or a mismatch it falls back to a single download from the player's own address. No prefetch and no buffer target on live.
+  Takes over the player's FLV live stream: pairs only the primary/backup addresses of the same cluster, checks that the first bytes of both legs match, then downloads both at once and hands the player whichever bytes arrive first. With no pair or a mismatch it falls back to a single download from the player's own address. No prefetch and no buffer target on live. If the player streams without FLV (some tournament rooms do), the takeover stays out and the popup says so honestly.
 
   What it never does, on either page type
   It uses no third-party addresses and never rewrites or substitutes Bilibili's addresses. It does not take over playback: play, pause, seeking, rate, quality, volume, and track choices stay with you and Bilibili's player.
@@ -115,9 +115,9 @@ credentials; Bilibili video and live play without logging in.
 | Asset | Spec | Status |
 |---|---|---|
 | Store icon | 128×128 PNG (96×96 artwork + 16px transparent padding) | ✅ Done: `assets/icon.svg` → `npm run icons` renders the four sizes (16/32/48 crop to the artwork so the toolbar icon stays legible), committed with the package; upload `src/extension/icons/icon128.png` |
-| Screenshots | 1280×800 (or 640×400), 1–5 images | ⬜ TODO: after the popup redesign lands (later task) |
-| Small promo tile (required) | 440×280 PNG/JPEG | ⬜ TODO: later task |
-| Marquee promo tile (optional, needed for featuring) | 1400×560 PNG/JPEG | ⬜ TODO: later task |
+| Screenshots | 1280×800 (or 640×400), 1–5 images | ✅ Done: `store/images/screenshot-01-popup-video.png` (real popup over a video page), `screenshot-02-popup-live.png` (real popup over a live page), `screenshot-03-racing-diagram.png` (mechanism and traffic cost diagram). Composed by `store/images/src/compose.mjs` from a real run; the page background is blurred wholesale to hide third-party content |
+| Small promo tile (required) | 440×280 PNG/JPEG | ✅ Done: `store/images/promo-tile-440x280.png` |
+| Marquee promo tile (optional, needed for featuring) | 1400×560 PNG/JPEG | ✅ Done: `store/images/marquee-1400x560.png` |
 | YouTube promo video | link | ⬜ none. The images page says only the icon, small promo tile, and a screenshot are mandatory; the listing page lists the video alongside the other assets. If the dashboard blocks submission without it, a later task produces one |
 
 ## Packaging and upload

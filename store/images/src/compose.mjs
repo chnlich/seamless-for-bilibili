@@ -27,18 +27,22 @@ const POPUP_CSS_HEIGHT = 338;
 
 async function cropPopup(browser, rawName, outName) {
   const page = await browser.newPage({ viewport: { width: POPUP_CSS_WIDTH, height: POPUP_CSS_HEIGHT }, deviceScaleFactor: 2 });
+  // The crop page lives beside the raw images: a data:/about:blank document cannot
+  // load file:// subresources.
+  const cropPage = path.join(rawDir, `__crop-${outName}.html`);
   try {
-    await page.setContent(`<body style="margin:0"><img src="${rawName}" style="display:block;width:372px"></body>`);
-    await page.evaluate(async (name) => {
+    await fs.writeFile(cropPage, `<body style="margin:0"><img src="./${rawName}" style="display:block;width:372px"></body>`);
+    await page.goto(`file:///${cropPage.replaceAll(path.sep, '/')}`);
+    await page.waitForFunction(() => {
       const image = document.querySelector('img');
-      if (!image.complete) await new Promise((resolve) => { image.onload = resolve; });
-      image.src = name;
-    }, rawName);
+      return image !== null && image.complete && image.naturalWidth > 0;
+    }, { timeout: 15000 });
     const target = path.join(imagesDir, outName);
     await page.screenshot({ path: target, type: 'png' });
     return target;
   } finally {
     await page.close();
+    await fs.rm(cropPage, { force: true });
   }
 }
 
