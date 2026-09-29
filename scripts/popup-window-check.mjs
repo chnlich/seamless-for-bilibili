@@ -39,6 +39,12 @@
 // 给出双镜像地址，首段身份门整体比对后放开竞速；失败场景两个镜像都答 502。
 // 断言的期望值一律从 src 的既有导出（liveTakeoverText、cdnLinesView、
 // shortMirrorName）推导，失败场景页面控制台的如实报错充当阳性对照。
+// 第十组是第四组的直播对照组：商店自动更新落在正在拉流的直播页上。直播有自己
+// 的接管机器（播放列表放行、整段身份门、配对地址簿），更新后能否继续双路竞速
+// 不能由视频结论推出，必须实测。机器同样跑在页面主世界：预期拉流续上、两个
+// 镜像的接管腿计数都继续前进（竞速不退化成单路）、带 Range 的直达分片请求保持
+// 为零（页面拉取始终由接管应答，没有任何一次拉流绕过下载层走原生通道），控制台
+// 只允许「日志持久化降级」这一类如实错误（必须出现，作阳性对照）。
 //
 //   node scripts/popup-window-check.mjs      （Windows；系统 Chrome 由 BILIBILI_E2E_CHROME 指定）
 //
@@ -114,6 +120,7 @@ const LIVE_RACE_URL = 'https://live.bilibili.com/7-race-win-check';
 const LIVE_SINGLE_URL = 'https://live.bilibili.com/7-single-win-check';
 const LIVE_PLAYLIST_URL = 'https://live.bilibili.com/7-playlist-win-check';
 const LIVE_FAIL_URL = 'https://live.bilibili.com/7-fail-win-check';
+const LIVE_UPDATE_URL = 'https://live.bilibili.com/7-update-win-check';
 const LIVE_MEDIA_ORIGINS = ['https://e2e-live.bilivideo.com', 'https://e2e-live-b.bilivideo.com'];
 const LIVE_SEGMENT_BYTES = 256 * 1024;
 const LIVE_TAKEOVER_STREAM_DIRS = Object.freeze({
@@ -121,6 +128,7 @@ const LIVE_TAKEOVER_STREAM_DIRS = Object.freeze({
   single: '/e2e/single-stream/',
   playlist: '/e2e/playlist-stream/',
   fail: '/e2e/fail-stream/',
+  update: '/e2e/live-update-stream/',
 });
 
 function livePlayinfoBlob(streamDir) {
@@ -149,7 +157,7 @@ function livePlayinfoBlob(streamDir) {
 // 拉流不断重试但镜像全灭（502），用作接管失败与控制台如实报错的场景。
 const LIVE_TAKEOVER_FIXTURE_HTML = (variant) => `<!doctype html><html><head><meta charset="utf-8"><title>win-check live ${variant}</title></head><body>
 <script>
-  ${variant === 'race' || variant === 'fail' ? `window.__NEPTUNE_IS_MY_WAIFU__ = ${JSON.stringify(livePlayinfoBlob(LIVE_TAKEOVER_STREAM_DIRS[variant]))};` : ''}
+  ${variant === 'race' || variant === 'fail' || variant === 'update' ? `window.__NEPTUNE_IS_MY_WAIFU__ = ${JSON.stringify(livePlayinfoBlob(LIVE_TAKEOVER_STREAM_DIRS[variant]))};` : ''}
   window.__liveTakeover = { responses: 0, errors: [] };
   const streamDir = ${JSON.stringify(LIVE_TAKEOVER_STREAM_DIRS[variant])};
   const mediaOrigin = ${JSON.stringify(LIVE_MEDIA_ORIGINS[0])};
@@ -178,6 +186,15 @@ const LIVE_TAKEOVER_FIXTURE_HTML = (variant) => `<!doctype html><html><head><met
       window.__liveTakeover.errors.push(String((error && error.message) || error));
     }
   }
+  ${variant === 'update' ? `
+  // 更新组：页面像 hls.js 一样按自己的定时器不停拉新分片（下标单调递增）。扩展
+  // 重载不刷新页面文档，这个定时器必须继续驱动拉流，断流即下载层随上下文死掉。
+  let updatePullIndex = 0;
+  setInterval(() => {
+    updatePullIndex += 1;
+    void pullSegment(updatePullIndex);
+  }, 250);
+` : `
   (async () => {
     const attempts = ${variant === 'fail' ? 8 : 3};
     for (let index = 0; index < attempts; index += 1) {
@@ -185,6 +202,7 @@ const LIVE_TAKEOVER_FIXTURE_HTML = (variant) => `<!doctype html><html><head><met
       await new Promise((resolve) => setTimeout(resolve, 400));
     }
   })();
+`}
 </script></body></html>`;
 
 const FIXTURE_HTML = (kind) => `<!doctype html><html><head><meta charset="utf-8"><title>win-check ${kind}</title></head><body>${kind === 'video' ? '<video id="v" muted playsinline></video>' : ''}popup-window-check ${kind} fixture</body></html>`;
@@ -323,13 +341,22 @@ function fulfillLiveMedia(driver, sessionId, payload, label) {
 }
 
 async function installFixtureInterception(driver) {
-  const stats = { updateSegmentGets: 0, liveMediaGets: 0 };
+  // liveMediaGetsByHost 按镜像主机分开计数（双镜像是否同时供数的直接证据）；
+  // liveMediaRangeGets 数携带 Range 的分片请求：页面视角的拉取带闭合 Range，接管腿
+  // 不带，任何带 Range 的直达请求都意味着分片绕过接管走了原生通道（更新组的判据）。
+  const stats = {
+    updateSegmentGets: 0,
+    liveMediaGets: 0,
+    liveMediaGetsByHost: { [LIVE_MEDIA_ORIGINS[0]]: 0, [LIVE_MEDIA_ORIGINS[1]]: 0 },
+    liveMediaRangeGets: 0,
+  };
   const keyFor = (url) => {
     if (url.startsWith(VIDEO_URL)) return 'video';
     if (url.startsWith(LIVE_RACE_URL)) return 'liverace';
     if (url.startsWith(LIVE_SINGLE_URL)) return 'livesingle';
     if (url.startsWith(LIVE_PLAYLIST_URL)) return 'liveplaylist';
     if (url.startsWith(LIVE_FAIL_URL)) return 'livefail';
+    if (url.startsWith(LIVE_UPDATE_URL)) return 'liveupdate';
     if (url.startsWith(LIVE_URL)) return 'live';
     if (url.startsWith(OTHER_URL)) return 'other';
     if (url.startsWith(HOME_URL)) return 'nomedia';
@@ -350,6 +377,7 @@ async function installFixtureInterception(driver) {
       { urlPattern: `${LIVE_SINGLE_URL}*`, requestStage: 'Request' },
       { urlPattern: `${LIVE_PLAYLIST_URL}*`, requestStage: 'Request' },
       { urlPattern: `${LIVE_FAIL_URL}*`, requestStage: 'Request' },
+      { urlPattern: `${LIVE_UPDATE_URL}*`, requestStage: 'Request' },
       { urlPattern: 'https://e2e-live.bilivideo.com/e2e/*', requestStage: 'Request' },
       { urlPattern: 'https://e2e-live-b.bilivideo.com/e2e/*', requestStage: 'Request' },
     ],
@@ -428,6 +456,8 @@ async function installFixtureInterception(driver) {
       const match = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader);
       const start = match === null ? 0 : Number(match[1]);
       stats.liveMediaGets += 1;
+      stats.liveMediaGetsByHost[mediaUrl.origin] = (stats.liveMediaGetsByHost[mediaUrl.origin] ?? 0) + 1;
+      if (match !== null) stats.liveMediaRangeGets += 1;
       assert.ok(start < LIVE_SEGMENT_BYTES, `live segment request out of range: ${params.request.url}`);
       const end = Math.min(match === null ? LIVE_SEGMENT_BYTES - 1 : Number(match[2]), LIVE_SEGMENT_BYTES - 1);
       const body = Buffer.alloc(end - start + 1);
@@ -467,6 +497,7 @@ function fixtureHtmlFor(kind) {
   if (kind === 'livesingle') return LIVE_TAKEOVER_FIXTURE_HTML('single');
   if (kind === 'liveplaylist') return LIVE_TAKEOVER_FIXTURE_HTML('playlist');
   if (kind === 'livefail') return LIVE_TAKEOVER_FIXTURE_HTML('fail');
+  if (kind === 'liveupdate') return LIVE_TAKEOVER_FIXTURE_HTML('update');
   return FIXTURE_HTML(kind);
 }
 
@@ -1064,6 +1095,134 @@ async function runUpdateMidPlaybackPack() {
       '更新后没有任何持久化降级错误：日志写库失败的如实信号缺席，控制台捕获通道存疑',
     );
     markScenario('扩展更新时视频页正在拉流：拉流续上、库存继续命中，控制台只如实报日志持久化降级');
+  } finally {
+    await cleanup();
+  }
+}
+
+// 第十组：扩展更新落在正在拉流的直播页上（第四组的直播对照组，见文件头说明）。
+async function runLiveUpdateMidStreamPack() {
+  const { driver, cleanup, fixtures } = await setupBrowser('popup-window-check-h-');
+  try {
+    const { id: extensionId } = await driver.send('Extensions.loadUnpacked', { path: extensionDirectory });
+    const launcher = await openLauncher(driver, extensionId);
+    const liveTabId = await driver.evaluate(launcher, `(async () => {
+      const tab = await chrome.tabs.create({ url: ${JSON.stringify(LIVE_UPDATE_URL)}, active: true });
+      return tab.id;
+    })()`);
+    const liveTarget = await driver.findPageByUrl(LIVE_UPDATE_URL);
+    const liveSession = await driver.attach(liveTarget.targetId);
+
+    const consoleErrors = [];
+    driver.on('Runtime.consoleAPICalled', (message) => {
+      if (message.sessionId !== liveSession || message.params.type !== 'error') return;
+      const text = (message.params.args || [])
+        .map((arg) => arg.value ?? arg.description ?? '')
+        .join(' ');
+      consoleErrors.push({ kind: 'console', text });
+    });
+    driver.on('Runtime.exceptionThrown', (message) => {
+      if (message.sessionId !== liveSession) return;
+      const details = message.params.exceptionDetails ?? {};
+      consoleErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
+    });
+
+    // 拉流稳定之后，两路证据都必须成立：fixture 侧两个镜像主机都已收到接管腿
+    // （单路退化时备用镜像一个请求都不会有）；生产读出（logs:live-summary，弹窗
+    // 接管行的数据来源）报告接管生效且双路竞速。
+    await waitForState(
+      () => driver.evaluate(liveSession, `window.__liveTakeover === undefined ? null : JSON.parse(JSON.stringify(window.__liveTakeover))`),
+      (state) => state !== null && state.errors.length === 0 && state.responses >= 6
+        ? true
+        : 'waiting for steady live segment pulls',
+      { what: 'live fixture pulling segments before the update' },
+    );
+    await waitForState(
+      () => Promise.resolve({ ...fixtures.liveMediaGetsByHost }),
+      (counts) => counts[LIVE_MEDIA_ORIGINS[0]] > 0 && counts[LIVE_MEDIA_ORIGINS[1]] > 0
+        ? true
+        : 'waiting for both mirrors to receive takeover legs',
+      { what: 'both live mirrors receiving takeover legs before the update' },
+    );
+    await waitForState(
+      () => driver.evaluate(launcher, `(async () => {
+        const send = (message) => new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage(message, (response) => {
+            if (chrome.runtime.lastError !== undefined) {
+              reject(new Error(chrome.runtime.lastError.message));
+              return;
+            }
+            resolve(response);
+          });
+        });
+        const probe = await chrome.tabs.sendMessage(
+          ${liveTabId},
+          { version: ${STATUS_MESSAGE_VERSION}, type: 'diagnostics:session-id:get' },
+        );
+        if (probe?.ok !== true || typeof probe.sessionId !== 'string') {
+          throw new Error('live session id probe failed: ' + JSON.stringify(probe));
+        }
+        const summary = await send({ version: 1, type: 'logs:live-summary', sessionId: probe.sessionId });
+        if (summary?.ok !== true) throw new Error('live summary was rejected');
+        return summary.facts;
+      })()`),
+      (facts) => facts.serveCount > 0 && facts.engagement === 'engaged'
+        && facts.pairedAddressAvailable === true && facts.pairRejected === false
+        ? true
+        : `waiting for paired racing facts, got ${JSON.stringify(facts)}`,
+      { what: 'live takeover with paired racing visible in the production readout before the update' },
+    );
+    markScenario('扩展更新前的直播页：接管与双镜像竞速已在运行（生产读出与镜像计数双证）');
+
+    // 更新：重载同一播放源（扩展 id 不变，即商店更新对页面的形态）。旧 launcher
+    // 同属旧上下文，弃用并开新 launcher；旧直播页的内容脚本必须死掉。
+    const { id: reloadedId } = await driver.send('Extensions.loadUnpacked', { path: extensionDirectory });
+    assert.equal(reloadedId, extensionId, '同一播放源重载后扩展 id 不变');
+    const launcherAfter = await openLauncher(driver, extensionId);
+    await waitForState(
+      () => driver.evaluate(launcherAfter, `chrome.tabs.sendMessage(
+        ${liveTabId},
+        { version: ${STATUS_MESSAGE_VERSION}, type: 'readouts:get' },
+      ).then(() => 'alive', () => 'dead')`),
+      (value) => value === 'dead' ? true : 'old content script still answering',
+      { what: 'old live content script orphaned by the update' },
+    );
+    // 与第四组同理：新 launcher 抢走活动标签位后，后台标签页的 setInterval 被压到
+    // 约 1 Hz，先把直播页激活回来再开窗观察。
+    const activated = await driver.evaluate(launcherAfter, `chrome.tabs.update(${liveTabId}, { active: true }).then(() => true)`);
+    assert.equal(activated, true, '直播页重新激活失败');
+
+    // 观察窗：直播拉流（新分片）必须续上；两个镜像的接管腿计数都继续前进（竞速
+    // 没有随上下文退化成单路）；带 Range 的直达分片请求保持为零（页面拉取始终由
+    // 接管应答，没有任何一次拉流绕过下载层走原生通道）；控制台只允许持久化降级
+    // 这一类如实错误（扩展上下文作废后写库失败的既有信号，且必须出现作阳性对照）。
+    const pullsBefore = await driver.evaluate(liveSession, `window.__liveTakeover.responses`);
+    const getsBefore = { ...fixtures.liveMediaGetsByHost };
+    await delay(15000);
+    const post = await driver.evaluate(liveSession, `window.__liveTakeover === undefined ? null : JSON.parse(JSON.stringify(window.__liveTakeover))`);
+    assert.deepEqual(post.errors, [], `更新后直播拉流出错 ${JSON.stringify(post.errors)}`);
+    const pullsAfter = post.responses - pullsBefore;
+    assert.ok(pullsAfter >= 12, `更新后直播拉流没有续上：15 秒只前进了 ${pullsAfter} 次拉取`);
+    assert.ok(
+      fixtures.liveMediaGetsByHost[LIVE_MEDIA_ORIGINS[0]] > getsBefore[LIVE_MEDIA_ORIGINS[0]]
+        && fixtures.liveMediaGetsByHost[LIVE_MEDIA_ORIGINS[1]] > getsBefore[LIVE_MEDIA_ORIGINS[1]],
+      `更新后双镜像不再同时供给（重载时 ${JSON.stringify(getsBefore)}，现在 ${JSON.stringify(fixtures.liveMediaGetsByHost)}）：竞速疑似随扩展上下文退化成单路`,
+    );
+    assert.equal(
+      fixtures.liveMediaRangeGets,
+      0,
+      '出现携带 Range 的页面直达分片请求：分片拉取疑似绕过接管走了原生通道',
+    );
+    const persistenceErrorCount = consoleErrors
+      .filter((entry) => entry.text.includes('diagnostic persistence degraded')).length;
+    const unexpected = consoleErrors
+      .filter((entry) => !entry.text.includes('diagnostic persistence degraded'));
+    assert.deepEqual(unexpected, [], `更新后出现预期之外的扩展错误 ${JSON.stringify(unexpected)}`);
+    assert.ok(
+      persistenceErrorCount > 0,
+      '更新后没有任何持久化降级错误：日志写库失败的如实信号缺席，控制台捕获通道存疑',
+    );
+    markScenario('扩展更新时直播页正在拉流：拉流续上、双镜像继续竞速、分片拉取零直达，控制台只如实报日志持久化降级');
   } finally {
     await cleanup();
   }
@@ -2130,13 +2289,14 @@ console.log('popup window check provenance:', JSON.stringify({
   commitSha,
   buildId: provenance.buildId,
   chrome: chromeExecutablePath,
-  fixtures: { video: VIDEO_URL, live: LIVE_URL, other: OTHER_URL, nomedia: HOME_URL, liveMedia: LIVE_MEDIA_ORIGINS },
+  fixtures: { video: VIDEO_URL, live: LIVE_URL, liveUpdate: LIVE_UPDATE_URL, other: OTHER_URL, nomedia: HOME_URL, liveMedia: LIVE_MEDIA_ORIGINS },
 }));
 
 await runMultiWindowPack();
 await runPreExistingPagePack();
 await runSwitchPack();
 await runUpdateMidPlaybackPack();
+await runLiveUpdateMidStreamPack();
 await runNoMediaPagePack();
 await runLogScalePack();
 await runPartNavigationPack();
