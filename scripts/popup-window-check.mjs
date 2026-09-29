@@ -1329,9 +1329,13 @@ async function runLogScalePack() {
       summary: document.querySelector('[data-cdn-summary]').textContent,
       rows: [...document.querySelectorAll('[data-cdn-rows] tr')].map((row) => [...row.children].map((cell) => cell.textContent)),
     })`);
-    const beforeClick = await readCdnPanel();
-    assert.equal(beforeClick.filterValue, 'current', JSON.stringify(beforeClick));
-    assert.equal(beforeClick.buttonDisabled, false, JSON.stringify(beforeClick));
+    const beforeClick = await waitForState(
+      readCdnPanel,
+      (panel) => (panel.filterValue === 'current' && panel.buttonDisabled === false
+        ? true
+        : `focus logs page not initialized: ${JSON.stringify(panel)}`),
+      { what: 'focus logs page initial CDN state' },
+    );
     const cdnStart = Date.now();
     await driver.evaluate(focusSession, `document.querySelector('[data-cdn-refresh]').click()`);
     const cdnPanel = await waitForState(
