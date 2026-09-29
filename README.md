@@ -181,6 +181,8 @@ npm audit --omit=dev --json
 
 浏览器脚本明确使用系统 Chrome（可执行文件可用 `BILIBILI_E2E_CHROME` 环境变量指定，默认取系统安装路径），不回退到 Playwright Chromium。`npm run test:e2e` 使用临时 profile；真实播放验收使用 `npm run verify:browser -- --profile <专用登录 profile> --bv <BV号>`。验证输出目录包含 `events.json`、`console.json`、`network.json` 和 `summary.json`；`summary.json` 会记录 commit sha、buildId，以及 `pass`、`fail` 或 `INCONCLUSIVE` 和失败项。
 
+弹窗与日志页的窗口级检查是 `npm run test:popup-window`：直接启动系统 Chrome（`BILIBILI_E2E_CHROME` 指定可执行文件，未设置即报错），headless、`--mute-audio`、每组场景用新建的临时 profile；它面向 Windows 实机运行，不进 `npm test`。
+
 Playwright 启动的 Chrome 无法产生后台标签页：同窗口切换标签页、以及用 `Browser.setWindowBounds` 最小化窗口（已确认生效），页面都仍报 `visibilityState: 'visible'`，页面自身也收不到 `visibilitychange`；去掉 Playwright 默认传入的 `--disable-backgrounding-occluded-windows`、`--disable-renderer-backgrounding`、`--disable-background-timer-throttling` 三个参数亦无效。需要验证后台相关行为时，自行启动 Chrome 并用原生 CDP 驱动，通过 DevTools HTTP 端点的 `/json/activate/<targetId>` 切换标签页，并在每个阶段断言 `document.hidden`。
 
 Chrome 不再单独接受 `--load-extension`。加载未打包扩展走 CDP `Extensions.loadUnpacked`，即 `scripts/install-unpacked-extension.mjs` 的做法。
