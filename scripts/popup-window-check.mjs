@@ -307,6 +307,21 @@ const FIXTURE_CORS_HEADERS = [
   { name: 'Access-Control-Expose-Headers', value: 'Content-Range, Content-Length' },
 ];
 
+// 竞速败腿的请求在拦截里挂着被页面中止时，对应的 fulfill 会撞上 Invalid
+// InterceptionId（-32602）：这是竞速 fixture 的正常时序，不是拦截故障。容忍
+// 且只容忍这一种（其余参数错误照旧让进程死掉），每次发生都全量可见地记录。
+// 请求真的没来时（路径/配对写错了）没有任何记录兜底：场景断言会按超时如实失败。
+function fulfillLiveMedia(driver, sessionId, payload, label) {
+  void driver.send('Fetch.fulfillRequest', payload, sessionId).catch((error) => {
+    if (error?.code === -32602 && typeof error.message === 'string'
+      && error.message.includes('InterceptionId')) {
+      console.warn(`live media fulfill raced a page abort (${label})`);
+      return;
+    }
+    throw error;
+  });
+}
+
 async function installFixtureInterception(driver) {
   const stats = { updateSegmentGets: 0, liveMediaGets: 0 };
   const keyFor = (url) => {
@@ -374,15 +389,15 @@ async function installFixtureInterception(driver) {
     }
     if (kind === 'livemedia') {
       if (params.request.method === 'OPTIONS') {
-        void driver.send('Fetch.fulfillRequest', {
+        fulfillLiveMedia(driver, event.sessionId, {
           requestId: params.requestId, responseCode: 204, responseHeaders: FIXTURE_CORS_HEADERS,
-        }, event.sessionId);
+        }, 'OPTIONS');
         return;
       }
       const mediaUrl = new URL(params.request.url);
       if (mediaUrl.pathname.startsWith(LIVE_TAKEOVER_STREAM_DIRS.fail)) {
         // 镜像全灭场景：两条腿拿到相同的如实 502。
-        void driver.send('Fetch.fulfillRequest', {
+        fulfillLiveMedia(driver, event.sessionId, {
           requestId: params.requestId,
           responseCode: 502,
           responseHeaders: [
@@ -391,11 +406,11 @@ async function installFixtureInterception(driver) {
             { name: 'Content-Length', value: '0' },
           ],
           body: '',
-        }, event.sessionId);
+        }, 'fail mirror');
         return;
       }
       if (mediaUrl.pathname.endsWith('.m3u8')) {
-        void driver.send('Fetch.fulfillRequest', {
+        fulfillLiveMedia(driver, event.sessionId, {
           requestId: params.requestId,
           responseCode: 200,
           responseHeaders: [
@@ -404,7 +419,7 @@ async function installFixtureInterception(driver) {
             { name: 'Cache-Control', value: 'no-store' },
           ],
           body: Buffer.from('#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n', 'utf8').toString('base64'),
-        }, event.sessionId);
+        }, 'playlist');
         return;
       }
       // 分片应答：接管腿不带 Range（整段取回），页面视角带闭合 Range。字节按绝对
@@ -424,12 +439,12 @@ async function installFixtureInterception(driver) {
         { name: 'Cache-Control', value: 'no-store' },
       ];
       if (match !== null) headers.push({ name: 'Content-Range', value: `bytes ${start}-${end}/${LIVE_SEGMENT_BYTES}` });
-      void driver.send('Fetch.fulfillRequest', {
+      fulfillLiveMedia(driver, event.sessionId, {
         requestId: params.requestId,
         responseCode: match === null ? 200 : 206,
         responseHeaders: headers,
         body: body.toString('base64'),
-      }, event.sessionId);
+      }, `${mediaUrl.origin}${mediaUrl.pathname}`);
       return;
     }
     void driver.send('Fetch.fulfillRequest', {
