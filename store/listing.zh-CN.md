@@ -50,11 +50,11 @@
   | `storage` | 仅在 chrome.storage.local 保存两个用户开关（视频增强、直播增强各自启用/关闭），用于记住用户在扩展弹窗中的选择；不保存任何其他数据。 |
   | `unlimitedStorage` | 开发诊断日志保存在扩展自身 origin 的 IndexedDB 中，只保留最近 3 天（72 小时），超期记录自动删除；窗口内的日志只追加、不设条数或容量上限（见仓库 GOAL.md）。实测视频页每打开 1 小时约产生 7 MB，3 天窗口的占用仍可能明显大于浏览器默认配额，unlimitedStorage 移除该配额，使窗口内的日志能连续写入而不因配额写入失败。日志只在本机，用户可在日志页查看或导出，卸载扩展即全部删除。 |
   | 内容脚本 `https://www.bilibili.com/*` | 下载接管只在视频路由（/video/* 与 /list/watchlater*）启动：拦截播放器的媒体分片请求，由内存缓存应答或代为向 Bilibili 提供的镜像地址取回，并向播放器请求 120 秒缓冲。匹配整个站点是因为扩展在页面内跟随路由变化，脚本须在页面开始时（document_start）就位；在其他路由上不拦截任何请求，只在本地诊断日志记录一条页面路径。 |
-  | 内容脚本 `https://live.bilibili.com/*` | 在直播页接管播放器的 FLV 直播流，对 Bilibili 给出的同集群主备两路地址做前缀比对后并发竞速（不预取、不设缓冲目标）。 |
+  | 内容脚本 `https://live.bilibili.com/*` | 在直播页接管播放器的直播媒体下载：FLV 直播流与 HLS 直播分片（.m4s 与 .ts，.m3u8 播放列表照常放行），对 Bilibili 给出的同集群主备两路地址比对后并发竞速（不预取、不设缓冲目标）。 |
   | MAIN world 注入（`world: "MAIN"`） | 三个脚本必须运行在页面自身的 JavaScript 环境中：bank.js 包装页面的 fetch/XMLHttpRequest 才能接住播放器发出的媒体请求；source-buffer-shim.js 观察页面的 MediaSource/SourceBuffer 追加与移除，用于本地诊断；main-bridge.js 调用 Bilibili 播放器对象自带的缓冲设置（setStableBufferTime）。MAIN world 不提供 chrome.* API；读取偏好与写日志由 ISOLATED world 的 controller.js 完成。 |
 
   若后台只给一个“主机权限（Host permission）”合并栏，粘贴：
-  本扩展没有 host_permissions，只有两条内容脚本匹配：www.bilibili.com（仅在视频路由接管播放器的媒体分片下载并请求 120 秒缓冲，其他路由只记录本地诊断路径）与 live.bilibili.com（接管 FLV 直播流并对 Bilibili 自带的主备地址竞速）。媒体取数在页面上下文中进行，去向只有播放器自己请求的地址与 Bilibili 播放信息为同一文件列出的镜像地址。
+  本扩展没有 host_permissions，只有两条内容脚本匹配：www.bilibili.com（仅在视频路由接管播放器的媒体分片下载并请求 120 秒缓冲，其他路由只记录本地诊断路径）与 live.bilibili.com（接管 FLV 直播流与 HLS 直播分片（.m3u8 播放列表照常放行），并对 Bilibili 自带的主备地址竞速）。媒体取数在页面上下文中进行，去向只有播放器自己请求的地址与 Bilibili 播放信息为同一文件列出的镜像地址。
 - **远程代码（Remote Code）**：选择“否，我不使用远程代码”。全部 JavaScript 在构建时由 esbuild 从仓库源码打包；运行时不加载、不执行任何远程文件（源码中无 eval、无 new Function、无远程 script、无 importScripts）。
 - **数据使用（Data usage，收集哪些数据）**：User Data Policy 明确要求“只在本机处理或存储的数据也必须披露”，因此按本机实际处理勾选。类别定义摘自商店公开页面的原文。
 

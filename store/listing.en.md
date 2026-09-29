@@ -64,14 +64,14 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
   | `storage` | Stores exactly two user switches (video enhancement and live enhancement, each on/off) in chrome.storage.local so the popup preferences survive restarts. Nothing else is stored. |
   | `unlimitedStorage` | The development diagnostic log lives in the extension's own origin IndexedDB and keeps only the last 3 days (72 hours); older records are deleted automatically, and within the window the log is append-only and not capped by count or size (see GOAL.md in the repository). Measured on the developer's own browser, an open video page adds about 7 MB per hour, so even a 3-day window can exceed the browser's default storage quota; unlimitedStorage removes that quota so writes inside the window do not start failing at it. The log stays on the device; the user can view or export it on the log page, and uninstalling deletes everything. |
   | Content script `https://www.bilibili.com/*` | Download takeover starts only on video routes (/video/* and /list/watchlater*): it intercepts the player's media segment requests, answers them from the in-memory cache or fetches them from the mirror addresses Bilibili supplied, and asks the player for a 120-second buffer. The match covers the whole site because the extension follows in-page route changes and must be in place at document_start; on other routes it intercepts nothing and only records the page path in the local diagnostic log. |
-  | Content script `https://live.bilibili.com/*` | On live pages, takes over the player's FLV live stream and, after a prefix check, races the same-cluster primary/backup addresses Bilibili supplied (no prefetch, no buffer target). |
+  | Content script `https://live.bilibili.com/*` | On live pages, takes over the player's live media downloads: the FLV live stream and HLS live segments (.m4s and .ts; .m3u8 playlists pass through), and, after the pair check, races the same-cluster primary/backup addresses Bilibili supplied (no prefetch, no buffer target). |
   | MAIN world injection (`world: "MAIN"`) | Three scripts must run in the page's own JavaScript realm: bank.js wraps the page's fetch/XMLHttpRequest to catch the player's media requests; source-buffer-shim.js observes the page's MediaSource/SourceBuffer appends and removals for local diagnostics; main-bridge.js calls the Bilibili player object's own buffer setting (setStableBufferTime). The MAIN world exposes no chrome.* APIs; the ISOLATED-world controller.js reads the preference and writes the log. |
 
   If the dashboard shows a single combined "Host permission" field, paste:
   The extension requests no host_permissions; it has two content-script matches: www.bilibili.com
   (download takeover and a 120-second buffer request on video routes only; other routes only record
-  the page path in the local diagnostic log) and live.bilibili.com (FLV live-stream takeover, racing
-  Bilibili's own primary/backup addresses). Media fetches run in the page context and go only to the
+  the page path in the local diagnostic log) and live.bilibili.com (live-media takeover: FLV live streams and
+  HLS live segments, .m3u8 playlists passing through, racing Bilibili's own primary/backup addresses). Media fetches run in the page context and go only to the
   address the player requested and the mirror addresses Bilibili's playback info lists for the same
   file.
 - **Remote code**: select "No, I am not using remote code". All JavaScript is bundled from repository

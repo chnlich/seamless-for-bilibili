@@ -24,6 +24,8 @@ The design rests on three assumptions:
 
 It fixes the slow host, not the slow link: if your home connection itself is too narrow, the buffer keeps shrinking and the stall eventually comes anyway — the extension cannot prevent that. Stalls caused by the browser's decode side (buffer still full while playback freezes, for example hardware decode starving) are also outside its reach.
 
+The two live legs are not two independent servers in practice: measured 2026-09-29 (Windows, Chrome 154, room 7734200), the two mirror addresses resolve to the same IP pair behind one wildcard certificate (`*.bilivideo.com`), and for long stretches Chrome pools both legs into one HTTP/2 connection; the 152 raced segment pairs agreed within 0.11 ms of each other (matching the 0.2 ms median over 235 pairs in daily usage, against about 98 ms between video mirrors). Live racing is redundancy and byte checking on one server, not failover to a second one.
+
 About ten seconds after a tab goes to the background, Chrome stops video decoding and keeps only audio. That is the browser's power-saving behaviour; the extension neither changes it nor works around it (see the FAQ).
 
 ## How it works
