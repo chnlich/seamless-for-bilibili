@@ -5,7 +5,7 @@
 
 // 面板只报告它所附着的那个窗口的活动标签页：chrome.windows.getCurrent() 在弹窗里
 // 返回弹窗所属的窗口，在该窗口内取活动标签页。用 lastFocusedWindow 会把面板解析到
-// 另一个窗口的活动标签页（2026-09-28 用户实测：两个普通窗口时，弹窗开在直播房间
+// 另一个窗口的活动标签页（用户实测：两个普通窗口时，弹窗开在直播房间
 // 所在窗口，lastFocusedWindow 解析到的却是另一窗口的标签页，面板的来源标注因此被
 // 读成对当前窗口的错误判断）。
 export async function popupAttachedTab({ windowsApi, tabsApi }) {

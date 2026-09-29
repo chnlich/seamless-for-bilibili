@@ -2,7 +2,7 @@
 // 面板只按单个 session 统计（logs:cdn-summary 必须带 sessionId），而日志页能选的
 // session 只有「当前 session」（从弹窗的「打开开发日志」带 #sessionId 进入本页才存在）。
 // 选不到 session 时按钮禁用、状态行直说怎样才有 session 可读，不给「请选择一个
-// session」这种页面上根本没有可选列表的死路（2026-09-29 实测：无 #sessionId 打开
+// session」这种页面上根本没有可选列表的死路（实测：无 #sessionId 打开
 // 日志页时按钮必报此错，而下拉里只有 全部/当前 两项）。
 export const CDN_RANGE_MESSAGES = Object.freeze({
   idle: '尚未读取 CDN racing。',

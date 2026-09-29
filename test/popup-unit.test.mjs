@@ -615,7 +615,7 @@ function settleMacrotasks(rounds = 4) {
 }
 
 test('popup reports the active tab of its own window, never the last-focused window\'s', async () => {
-  // 回归锚（0e982f5 的缺陷，2026-09-28 用户实测）：两个普通窗口时，弹窗开在视频页
+  // 回归锚（0e982f5 的缺陷，用户实测）：两个普通窗口时，弹窗开在视频页
   // 所在窗口，lastFocusedWindow 解析到另一窗口的直播房间；本装配下 lastFocusedWindow
   // 查询固定返回直播标签页（id 2），按旧取法面板会显示直播内容。
   const behaviors = new Map([

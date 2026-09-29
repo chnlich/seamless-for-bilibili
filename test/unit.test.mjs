@@ -1468,7 +1468,7 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
 });
 
 // CDN 面板只按单个 session 统计，而页面能选的 session 只有当前 session：
-// 选不到 session 时按钮禁用、状态行直说路径（2026-09-29 实测按钮必报
+// 选不到 session 时按钮禁用、状态行直说路径（实测按钮必报
 // 「请选择一个 session」，页面上却无项可选，是条死路）。
 test('logs page CDN button follows the selectable session instead of dead-ending', async () => {
   const { CDN_RANGE_MESSAGES, cdnPanelState } = await import('../src/diagnostics/logs-view.js');

@@ -5,15 +5,15 @@
 ## Store listing（商店信息）标签页
 
 - **名称（item name）**：Seamless for Bilibili（来自 manifest `name`，商店后台与 manifest 保持一致；决定与理由见 README.md）。
-- **简短说明 / 简介摘要**：后台不单独填写，直接取 manifest `description`（113 字符 ≤ 132，按 Unicode 字符计）：
-  减少 Bilibili 视频与直播卡顿：同一内容同时从 Bilibili 自带的两个镜像地址下载，先到先用；视频页另请播放器保持 120 秒缓冲。代价是多用流量（直播双路约 1.3 到 2 倍）。数据不离开本机，不改播放操作。
+- **简短说明 / 简介摘要**：后台不单独填写，直接取 manifest `description`（118 字符 ≤ 132，按 Unicode 字符计）：
+  减少海外党看 Bilibili 视频与直播的卡顿：同一内容同时从 Bilibili 自带的两个镜像地址下载，先到先用；视频页另请播放器保持 120 秒缓冲。代价是多用流量（直播双路约 1.3 到 2 倍）。数据不离开本机，不改播放操作。
 - **详细说明**（粘贴即用）：
 
   ```text
-  减少 Bilibili 视频与直播的播放卡顿。独立第三方工具，与 Bilibili 无隶属或合作关系；Bilibili 及相关名称归其权利人所有。
+  海外党在 Bilibili 看视频或直播时经常卡，而自己的测速并不慢，本扩展为这种场景设计，减少 Bilibili 视频与直播的播放卡顿。视频在 1080p 画质、2 倍速播放下保持流畅。独立第三方工具，与 Bilibili 无隶属或合作关系；Bilibili 及相关名称归其权利人所有。
 
   【前提与局限】
-  本扩展基于三个前提：卡顿常来自 Bilibili 个别 CDN 节点慢或不稳定，而不是您自己的网络；Bilibili 自己的播放信息已经为同一份内容给出主备多个镜像地址；您的带宽高于视频码率、有余量同时下载两份。它救的是“慢节点”，救不了“慢线路”：家庭带宽本身不足时帮不上忙；浏览器解码跟不上造成的卡顿（缓冲已满仍然卡住，例如硬件解码断供）也不在它的能力范围内。
+  本扩展基于三个前提：卡顿常来自 Bilibili 个别 CDN 节点慢或不稳定，而不是您自己的网络；Bilibili 自己的播放信息已经为同一份内容给出主备多个镜像地址；您的带宽高于视频码率、有余量同时下载两份（2 倍速播放时播放器消耗数据的速度加倍，余量按两倍码率计）。它救的是“慢节点”，救不了“慢线路”：家庭带宽本身不足时帮不上忙；浏览器解码跟不上造成的卡顿（缓冲已满仍然卡住，例如硬件解码断供）也不在它的能力范围内。
 
   【视频页怎么做】
   接管播放器的媒体分片下载（fetch 与 XHR 两条通道）：每个 1 MiB 分片同时向 Bilibili 提供的两个镜像地址请求，先完整到达的生效，另一路取消；向前预取（窗口最多 48 个分片、并发 4）；分片只存内存（每个标签页上限 512 MiB），离开页面即释放，不写磁盘；每个视频向 Bilibili 原生播放器请求一次 120 秒缓冲。
@@ -32,7 +32,7 @@
   媒体分片只驻留内存。开发诊断日志只存扩展本地 IndexedDB：记录每个 Bilibili 页面的路径、视频编号、去掉参数的媒体地址、媒体请求耗时与结果、播放器事件（播放、暂停、拖动等）和缓冲状态；不记录 Cookie、账号、标题、页面文字、弹幕、签名参数或音视频字节。不上传、无遥测；导出仅在您主动选择文件时发生。权限只有 storage（记住两个开关：视频增强与直播增强）与 unlimitedStorage（写入 3 天窗口内的本地诊断日志），没有 host_permissions。全部源码开源：https://github.com/chnlich/seamless-for-bilibili
   ```
 
-- **类别**：娱乐（Entertainment）。依据商店类目说明，2023 年起旧“Productivity”大类已拆分，Entertainment 是面向影视观看者的类目，与本扩展只服务 Bilibili 看视频/直播最贴近；备选“工具（Tools）”。
+- **类别**：娱乐（Entertainment）。依据商店类目说明，旧“Productivity”大类已拆分，Entertainment 是面向影视观看者的类目，与本扩展只服务 Bilibili 看视频/直播最贴近；备选“工具（Tools）”。
 - **语言**：中文（简体）。manifest 未声明 `_locales`，因此当前只有一个默认语言列表；英译稿（[listing.en.md](listing.en.md)）留给未来增加 `_locales` 后作为 locale 专属列表使用。
 - **主页网址**：https://github.com/chnlich/seamless-for-bilibili
 - **支持网址**：https://github.com/chnlich/seamless-for-bilibili/issues
@@ -100,7 +100,7 @@ npm run package
 
 - 商店信息字段、本地化列表须对应 `_locales`：https://developer.chrome.com/docs/webstore/cws-dashboard-listing
 - 图片规格（图标 96×96 + 16px 透明边、截图、宣传图、必需项）：https://developer.chrome.com/docs/webstore/images
-- 类目列表与 2023 年类目调整：https://developer.chrome.com/docs/webstore/best-practices
+- 类目列表与类目调整：https://developer.chrome.com/docs/webstore/best-practices
 - 隐私规范标签页（单一用途、权限用途说明、远程代码、数据使用、隐私政策网址）：https://developer.chrome.com/docs/webstore/cws-dashboard-privacy
 - 测试说明标签页（非必需）：https://developer.chrome.com/docs/webstore/cws-dashboard-test-instructions
 - 数据类别定义（商店公开页面上的披露原文，以任一扩展的 privacy 页为例）：https://chromewebstore.google.com/detail/crxmouse-mouse-gestures/jlgkpaicikihijadgifklkbpdajbkhjo/privacy

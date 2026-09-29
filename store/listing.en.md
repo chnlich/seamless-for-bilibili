@@ -11,18 +11,18 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
 ## Store listing tab
 
 - **Item name**: Seamless for Bilibili (comes from the manifest `name`; the dashboard name stays
-  identical to it — decision in README.md).
+  identical to it, decision in README.md).
 - **Summary**: not a dashboard field; the dashboard takes the manifest `description`. The live summary
-  is the 113-character zh text. For a future `_locales/en` `description` (131 characters, counted as
+  is the 118-character zh text. For a future `_locales/en` `description` (131 characters, counted as
   Unicode characters, within the 132 limit):
   Fewer stalls on Bilibili video/live: races two of Bilibili's own mirrors; 120 s buffer on video. Uses extra data. Nothing uploaded.
 - **Detailed description** (paste-ready):
 
   ```text
-  Cuts playback stalling on Bilibili video and live pages. An independent third-party tool, not affiliated with or endorsed by Bilibili; Bilibili and related names are trademarks of their respective owner.
+  Video and live streams on Bilibili often stutter for viewers watching from outside mainland China, even when their own speed test looks fine: this extension is built for that situation and cuts playback stalling on Bilibili video and live pages. On video, playback stays smooth at 1080p with 2× playback speed. An independent third-party tool, not affiliated with or endorsed by Bilibili; Bilibili and related names are trademarks of their respective owner.
 
   Assumptions and limits
-  The extension rests on three assumptions: stalling often comes from one slow or unstable Bilibili CDN host, not from your own connection; Bilibili's own playback info already lists several primary/backup mirror addresses for the same content; and your bandwidth has headroom above the video bitrate, enough to download two copies at once. It rescues a slow host, not a slow link: if your home connection itself is too slow, it cannot help. Stalling caused by the browser's video decoder (the buffer is full and playback still stalls, e.g. hardware-decode underflow) is also outside what it can fix.
+  The extension rests on three assumptions: stalling often comes from one slow or unstable Bilibili CDN host, not from your own connection; Bilibili's own playback info already lists several primary/backup mirror addresses for the same content; and your bandwidth has headroom above the video bitrate, enough to download two copies at once (at 2× playback the player consumes data twice as fast, so the headroom is counted against twice the bitrate). It rescues a slow host, not a slow link: if your home connection itself is too slow, it cannot help. Stalling caused by the browser's video decoder (the buffer is full and playback still stalls, e.g. hardware-decode underflow) is also outside what it can fix.
 
   Video pages: how it works
   Takes over the player's media segment downloads (both the fetch and XHR channels): every 1 MiB segment is requested from two mirror addresses Bilibili supplied, at once; the first complete response wins and the other is cancelled. It prefetches ahead (window up to 48 segments, concurrency 4). Segments stay in memory only (up to 512 MiB per tab), are released when the page is left, and are never written to disk. Once per video it asks Bilibili's native player to keep a 120-second buffer.
@@ -33,15 +33,15 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
   What it never does, on either page type
   It uses no third-party addresses and never rewrites or substitutes Bilibili's addresses. It does not take over playback: play, pause, seeking, rate, quality, volume, and track choices stay with you and Bilibili's player.
 
-  The cost — please weigh against your data plan
-  Video: the bytes the losing leg already downloaded are discarded — about 12.6% steady-state waste in one real run (it varies per session; the CDN racing panel on the extension's log page shows the session's own wasted-byte ratio). The 120-second buffer and prefetch download ahead, so leaving a video early downloads more unwatched data than the native player would. Live: on an FLV stream both legs keep downloading at once, close to twice the stream's traffic; on HLS the racing is settled per segment, measured at about 28% waste in one real run (11 minutes, 668 segments), i.e. about 1.3 times the single-leg traffic. Memory: up to about 512 MiB of media cache per tab. Disk: the local diagnostic log keeps only the last 3 days (72 hours); older records are deleted automatically (measured on the developer's own browser: about 7 MB per hour a video page is open, so use is roughly bounded by the last 3 days); uninstalling deletes everything.
+  The cost: please weigh against your data plan
+  Video: the bytes the losing leg already downloaded are discarded: about 12.6% steady-state waste in one real run (it varies per session; the CDN racing panel on the extension's log page shows the session's own wasted-byte ratio). The 120-second buffer and prefetch download ahead, so leaving a video early downloads more unwatched data than the native player would. Live: on an FLV stream both legs keep downloading at once, close to twice the stream's traffic; on HLS the racing is settled per segment, measured at about 28% waste in one real run (11 minutes, 668 segments), i.e. about 1.3 times the single-leg traffic. Memory: up to about 512 MiB of media cache per tab. Disk: the local diagnostic log keeps only the last 3 days (72 hours); older records are deleted automatically (measured on the developer's own browser: about 7 MB per hour a video page is open, so use is roughly bounded by the last 3 days); uninstalling deletes everything.
   Switches: the popup carries two switches, both effective after a reload. "Video enhancement" applies to video pages only and "live enhancement" to live pages. To avoid the extra live traffic, turn off the live switch: the player then downloads natively, with no takeover and no racing on live pages, while video enhancement is unaffected.
 
   Data
   Media segments stay in memory. The development diagnostic log lives only in the extension's local IndexedDB: it records the path of each Bilibili page, video identifiers, media URLs without parameters, timings and results of media requests, player events (play, pause, seeking, and so on), and buffer state. It stores no cookies, account data, titles, page text, chat, signed parameters, or audio/video bytes. No upload, no telemetry; export happens only when you pick a file. Permissions are only storage (two switches: video enhancement and live enhancement) and unlimitedStorage (writing the local log inside its 3-day window); no host_permissions. Fully open source: https://github.com/chnlich/seamless-for-bilibili
   ```
 
-- **Category**: Entertainment. The old "Productivity" group was split up in the mid-2023 category
+- **Category**: Entertainment. The old "Productivity" group was split up in an earlier category
   revision; Entertainment is the category for viewers of TV and cinema content, the closest fit for
   an extension that serves only Bilibili video and live viewing. Fallback: Tools.
 - **Language**: the dashboard listing language for the default listing is 中文（简体）(zh-CN); add
@@ -77,25 +77,25 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
 - **Remote code**: select "No, I am not using remote code". All JavaScript is bundled from repository
   sources by esbuild at build time; nothing remote is loaded or executed at runtime (the sources
   contain no eval, new Function, remote script, or importScripts).
-- **Data usage — which data is collected**: the User Data Policy FAQ states that data processed or
+- **Data usage: which data is collected**: the User Data Policy FAQ states that data processed or
   stored only on the device must still be disclosed, so the boxes follow what the extension handles
   locally. Category definitions are quoted from the store's public disclosure pages.
 
   | Checkbox (store definition) | Answer | Reason |
   |---|---|---|
   | Web history ("The list of web pages a user has visited, as well as associated data such as page title and time of visit") | ✅ check | Every www.bilibili.com / live.bilibili.com page opened gets a log record with its path (query/hash stripped), video identifiers, and timestamps; no titles. On-device only, for defect diagnosis. |
-  | User activity ("For example: network monitoring, clicks, mouse position, scroll, or keystroke logging") | ✅ check | The log records the player's media requests (URL without parameters, mirror host, timing, bytes, result) — network monitoring — and player events such as play, pause, seeking, rate and volume changes. No click positions, mouse, scroll, or keystrokes. On-device only. |
+  | User activity ("For example: network monitoring, clicks, mouse position, scroll, or keystroke logging") | ✅ check | The log records the player's media requests (URL without parameters, mirror host, timing, bytes, result), which is network monitoring, and player events such as play, pause, seeking, rate and volume changes. No click positions, mouse, scroll, or keystrokes. On-device only. |
   | Website content ("For example: text, images, sounds, videos, or hyperlinks") | ✅ check | Media segments (audio/video bytes) pass through memory to feed the player; never written to disk, never logged, never sent anywhere. |
   | Personally identifiable information / Health / Financial and payment / Authentication / Personal communications / Location | ⬜ skip | The log explicitly stores no cookies, account data, titles, page text, chat, API bodies, audio/video bytes, frames, or screenshots; no location or IP is read; no form or password data is touched. |
 
-- **Data usage — compliance certifications**: check all three (the public listing shows them as: not
+- **Data usage: compliance certifications**: check all three (the public listing shows them as: not
   sold to third parties outside the approved use cases; not used or transferred for purposes unrelated
   to the item's core functionality; not used or transferred to determine creditworthiness or for
   lending). Reason: the extension has no external endpoint, so data never leaves the device; the only
   network requests it makes are the player's own media requests, to Bilibili's media addresses. If the
   dashboard shows a different number of statements, check each on the same reasoning.
 - **Privacy policy URL**: https://github.com/chnlich/seamless-for-bilibili/blob/main/PRIVACY.md
-  (the repository is public; the current PRIVACY.md must be on main before submitting — the URL is
+  (the repository is public; the current PRIVACY.md must be on main before submitting, and the URL is
   user-facing.)
 - **Limited Use statement**: not applicable. That requirement covers data received from Google APIs;
   this extension uses no Google APIs, so PRIVACY.md deliberately makes no such statement (it would
@@ -134,7 +134,7 @@ provide a repository zip separately; the published bundles are unminified and ca
 
 - Listing fields; localized listings map to `_locales`: https://developer.chrome.com/docs/webstore/cws-dashboard-listing
 - Image specs (96×96 artwork + 16px padding, screenshots, promo tiles, mandatory set): https://developer.chrome.com/docs/webstore/images
-- Category list and the mid-2023 category revision: https://developer.chrome.com/docs/webstore/best-practices
+- Category list and the category revision: https://developer.chrome.com/docs/webstore/best-practices
 - Privacy practices tab (single purpose, permission justifications, remote code, data usage, privacy policy URL): https://developer.chrome.com/docs/webstore/cws-dashboard-privacy
 - Test instructions tab (optional): https://developer.chrome.com/docs/webstore/cws-dashboard-test-instructions
 - Data category definitions (the store's public disclosure text, shown on any item's privacy page, e.g.): https://chromewebstore.google.com/detail/crxmouse-mouse-gestures/jlgkpaicikihijadgifklkbpdajbkhjo/privacy

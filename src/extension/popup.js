@@ -68,7 +68,7 @@ let panelTabId;
 
 // 开关保存等用户动作确认要留足可读时间：轮询每 500 ms 会清一次提示，
 // 普通状态提示随手清，动作确认至少停留 PREFERENCE_NOTICE_HOLD_MS，
-// 否则确认闪一下就消失，用户根本读不到（2026-09-29 检查脚本实测竞态）。
+// 否则确认闪一下就消失，用户根本读不到（检查脚本实测竞态）。
 const PREFERENCE_NOTICE_HOLD_MS = 4000;
 let noticeHoldUntil = 0;
 
@@ -167,7 +167,7 @@ async function refreshRace(sessionIdValue) {
 // 直播状态走 worker 端摘要（logs:live-summary）：worker 按 [sessionId, sequence]
 // 索引只读该 session 自己的事件并折叠事实，代价只随本 session 的大小增长。按全局
 // eventId 分页的 logs:events-page 在大库上要从 0 扫过其他 session 的全部记录才能
-// 凑齐第一页，直播状态会长时间停在「等待直播数据」（2026-09-28 用户实测）。
+// 凑齐第一页，直播状态会长时间停在「等待直播数据」（用户实测）。
 async function refreshLivePanel(sessionIdValue) {
   if (sessionIdValue === undefined || sessionIdValue === '未提供') {
     liveSessionId = sessionIdValue;
@@ -230,7 +230,7 @@ async function failPanel(message, { error } = {}) {
 
 // 面板只报告它所附着窗口的活动标签页（见 popup-tabs.js），不向其余标签页询问：
 // 另一个窗口仍在运行的增强与本面板无关，显示它只会被读成对当前窗口的错误判断
-// （2026-09-28 用户实测误读）。活动标签页不答（Receiver 缺失）时统一走未运行提示：
+// （用户实测误读）。活动标签页不答（Receiver 缺失）时统一走未运行提示：
 // 弹窗看不到标签页地址，无法可靠区分「非 Bilibili 页面」与「扩展安装或更新前就已
 // 打开的 Bilibili 页面」，合并成一句对两者都成立的提示（见 popup-view.js）。
 async function refresh() {
@@ -290,7 +290,7 @@ async function loadPreferences() {
 for (const name of PREFERENCES) {
   inputs.get(name).addEventListener('change', async (event) => {
     // event.currentTarget 只在事件派发期间有效：await 存储写完后再读它是 null，
-    // 确认提示与面板刷新会被静默吞掉（遗留缺陷，2026-09-29 弹窗 console 实测）。
+    // 确认提示与面板刷新会被静默吞掉（遗留缺陷，弹窗 console 实测）。
     const checked = event.currentTarget.checked;
     const affectsVideoPanel = await savePreferenceChange({
       name,
