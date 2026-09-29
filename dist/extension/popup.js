@@ -290,8 +290,15 @@
   var nextLiveQueryAt = 0;
   var pageUnavailable = true;
   var panelTabId;
-  function showNotice(text) {
+  var PREFERENCE_NOTICE_HOLD_MS = 4e3;
+  var noticeHoldUntil = 0;
+  function showNotice(text, { holdMs = 0 } = {}) {
     noticeElement.textContent = text;
+    noticeHoldUntil = holdMs > 0 ? Date.now() + holdMs : 0;
+  }
+  function clearTransientNotice() {
+    if (Date.now() < noticeHoldUntil) return;
+    showNotice("");
   }
   function renderVideoPanel2() {
     renderVideoPanel(document, bufferRefs, {
@@ -455,7 +462,7 @@
       applyPopupRoute(document, popupRoute);
     }
     pageUnavailable = false;
-    showNotice("");
+    clearTransientNotice();
     document.body.dataset.ready = "true";
     renderAll();
     await refreshRace(sessionId);
@@ -484,7 +491,7 @@
         liveEnabled = checked;
         renderLivePanel();
       }
-      showNotice(NO_PAGE_MESSAGES.preferenceSaved);
+      showNotice(NO_PAGE_MESSAGES.preferenceSaved, { holdMs: PREFERENCE_NOTICE_HOLD_MS });
     });
   }
   document.querySelector("[data-open-logs]").addEventListener("click", () => {

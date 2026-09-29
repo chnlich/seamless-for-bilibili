@@ -66,8 +66,20 @@ let nextLiveQueryAt = 0;
 let pageUnavailable = true;
 let panelTabId;
 
-function showNotice(text) {
+// 开关保存等用户动作确认要留足可读时间：轮询每 500 ms 会清一次提示，
+// 普通状态提示随手清，动作确认至少停留 PREFERENCE_NOTICE_HOLD_MS，
+// 否则确认闪一下就消失，用户根本读不到（2026-09-29 检查脚本实测竞态）。
+const PREFERENCE_NOTICE_HOLD_MS = 4000;
+let noticeHoldUntil = 0;
+
+function showNotice(text, { holdMs = 0 } = {}) {
   noticeElement.textContent = text;
+  noticeHoldUntil = holdMs > 0 ? Date.now() + holdMs : 0;
+}
+
+function clearTransientNotice() {
+  if (Date.now() < noticeHoldUntil) return;
+  showNotice('');
 }
 
 function renderVideoPanel() {
@@ -260,7 +272,7 @@ async function refresh() {
     applyPopupRoute(document, popupRoute);
   }
   pageUnavailable = false;
-  showNotice('');
+  clearTransientNotice();
   document.body.dataset.ready = 'true';
   renderAll();
   await refreshRace(sessionId);
@@ -278,7 +290,7 @@ async function loadPreferences() {
 for (const name of PREFERENCES) {
   inputs.get(name).addEventListener('change', async (event) => {
     // event.currentTarget 只在事件派发期间有效：await 存储写完后再读它是 null，
-    // 确认提示与面板刷新会被静默吞掉（2026-09-29 弹窗 console 实测）。
+    // 确认提示与面板刷新会被静默吞掉（遗留缺陷，2026-09-29 弹窗 console 实测）。
     const checked = event.currentTarget.checked;
     const affectsVideoPanel = await savePreferenceChange({
       name,
@@ -293,7 +305,7 @@ for (const name of PREFERENCES) {
       liveEnabled = checked;
       renderLivePanel();
     }
-    showNotice(NO_PAGE_MESSAGES.preferenceSaved);
+    showNotice(NO_PAGE_MESSAGES.preferenceSaved, { holdMs: PREFERENCE_NOTICE_HOLD_MS });
   });
 }
 

@@ -509,10 +509,14 @@ async function runSwitchPack() {
     await flipSwitch('liveEnabled');
     await waitForState(
       readState,
-      (state) => state.switchStates.liveEnabled === false,
-      { what: 'live switch toggle persisted' },
+      (state) => state.switchStates.liveEnabled === false && state.notice === NO_PAGE_MESSAGES.preferenceSaved,
+      { what: 'live switch toggle acknowledgement' },
     );
-    markScenario('拨动直播开关：开关状态写入存储');
+    // 确认必须留足可读时间：跨越几个 500 ms 轮询周期仍然在场，不被轮询随手清掉。
+    await delay(1600);
+    const heldNotice = await readState();
+    assert.equal(heldNotice.notice, NO_PAGE_MESSAGES.preferenceSaved, JSON.stringify(heldNotice));
+    markScenario('拨动直播开关：保存确认停留可读，并提示刷新后生效');
 
     await reloadPageByUrl(driver, LIVE_URL);
     await activate(world.liveTabId);
@@ -528,10 +532,10 @@ async function runSwitchPack() {
     await flipSwitch('vodEnabled');
     await waitForState(
       readState,
-      (state) => state.switchStates.vodEnabled === false,
-      { what: 'video switch toggle persisted' },
+      (state) => state.switchStates.vodEnabled === false && state.notice === NO_PAGE_MESSAGES.preferenceSaved,
+      { what: 'video switch toggle acknowledgement' },
     );
-    markScenario('拨动视频开关：开关状态写入存储');
+    markScenario('拨动视频开关：保存成功并提示刷新后生效');
 
     await reloadPageByUrl(driver, VIDEO_URL);
     await activate(world.videoTabId);
