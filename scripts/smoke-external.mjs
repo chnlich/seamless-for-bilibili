@@ -106,8 +106,13 @@ async function waitForVideoHint(context, extensionId, pathname, startAfterEventI
   const deadline = Date.now() + timeout;
   for (;;) {
     const stored = await readStoredEvents(context, extensionId, startAfterEventId);
+    // 站点会把 /video/<BV> 重定向到带尾斜杠的规范地址，session 存的是后者；
+    // 归一化尾斜杠后再比对，不然永远匹配不到 session。
+    const normalizedPathname = pathname.replace(/\/+$/, '');
     const sessionIds = new Set(stored.events
-      .filter((event) => event.code === 'route.session_started' && event.data?.pathname === pathname)
+      .filter((event) => event.code === 'route.session_started'
+        && typeof event.data?.pathname === 'string'
+        && event.data.pathname.replace(/\/+$/, '') === normalizedPathname)
       .map((event) => event.sessionId));
     const hint = stored.events
       .filter((event) => sessionIds.has(event.sessionId) && [

@@ -117,13 +117,21 @@ async function openBackgroundExtensionPage(context, extensionId, pagePath) {
 }
 
 async function verifyPopupReadouts(context, extensionId, videoPage) {
-  await videoPage.bringToFront();
   const popupPage = await openBackgroundExtensionPage(context, extensionId, 'popup.html');
+  // 无窗口模式下新标签开完即抢走活动标签：popup 开成后台标签后把视频页带回前台，
+  // popup 的轮询才能读到它的状态（headless 实测）。
+  await videoPage.bringToFront();
   try {
     await popupPage.waitForFunction(
       () => document.body?.dataset?.ready === 'true',
       undefined,
       { timeout: 20000 },
+    );
+    // 下载线路卡片由 logs:cdn-summary 异步填充（popup 每 500ms 轮询、查询限速 1 秒）。
+    await popupPage.waitForFunction(
+      () => document.querySelectorAll('.cdn-line').length >= 1,
+      undefined,
+      { timeout: 10000 },
     );
     const readout = await popupPage.evaluate(() => {
       const text = (selector) => document.querySelector(selector)?.textContent?.trim() ?? null;

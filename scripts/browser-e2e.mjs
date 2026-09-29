@@ -9,6 +9,8 @@ import { startConsoleCapture, triggerExtensionPositiveControl } from './console-
 import { readStoredEvents } from './extension-log-pull.mjs';
 import { installUnpackedExtension } from './install-unpacked-extension.mjs';
 import { readProvenance } from './provenance.mjs';
+import { READOUTS_VERSION } from '../src/extension/readouts.js';
+import { STATUS_MESSAGE_VERSION } from '../src/ui/panel.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extensionDirectory = path.join(root, 'dist', 'extension');
@@ -496,7 +498,8 @@ async function readAllStoredEvents(context, extensionId) {
   return (await logsReaderFor(context, extensionId)).readAllStoredEvents();
 }
 
-async function waitForStoredEvents(context, extensionId, predicate, timeout = 10000) {
+// 默认 30 秒：无窗口模式下诊断批次可能经历一次 SW 唤醒重试才落库，10 秒会误报超时。
+async function waitForStoredEvents(context, extensionId, predicate, timeout = 30000) {
   const reader = await logsReaderFor(context, extensionId);
   const deadline = Date.now() + timeout;
   for (;;) {
@@ -575,25 +578,33 @@ async function clickExport(page) {
 
 // 开关只能从 popup 页面本身切换：popup.html 开成标签页，操作它自己的复选框，
 // 让真实的保存路径（change 事件 → chrome.storage.local）被完整执行。
-async function togglePreferenceThroughPopup(context, extensionId, launcher, name, checked) {
-  const popupPage = await createBackgroundExtensionPage(
-    context,
-    launcher,
-    `chrome-extension://${extensionId}/popup.html`,
-  );
-  const input = popupPage.locator(`input[data-preference="${name}"]`);
-  await input.waitFor({ state: 'visible', timeout: 10000 });
-  await input.setChecked(checked);
-  const stored = await popupPage.evaluate(() => chrome.storage.local.get(null));
-  const rendered = await input.isChecked();
-  await popupPage.close();
-  return { stored, rendered };
+// 每次自建一个 logs.html 启动页（tabs API 只在扩展页可用），用完即关。
+async function togglePreferenceThroughPopup(context, extensionId, name, checked) {
+  const launcher = await context.newPage();
+  await launcher.goto(`chrome-extension://${extensionId}/logs.html`, { waitUntil: 'domcontentloaded' });
+  let popupPage;
+  try {
+    popupPage = await createBackgroundExtensionPage(context, launcher, `chrome-extension://${extensionId}/popup.html`);
+  } finally {
+    await launcher.close().catch(() => {});
+  }
+  try {
+    const input = popupPage.locator(`input[data-preference="${name}"]`);
+    await input.waitFor({ state: 'visible', timeout: 10000 });
+    await input.setChecked(checked);
+    const stored = await popupPage.evaluate(() => chrome.storage.local.get(null));
+    const rendered = await input.isChecked();
+    return { stored, rendered };
+  } finally {
+    await popupPage.close().catch(() => {});
+  }
 }
 
+// 接管记录 = bank.serve 与 bank.fetch.chunk（README 的判定口径）。
+// bank.inventory 是状态心跳，开关关闭时也照发（disabled: true），不算接管。
 function assertNoBankRecords(sessionEvents) {
   assert.deepEqual(
-    sessionEvents.filter((event) => ['bank.serve', 'bank.fetch.chunk', 'bank.inventory', 'bank.store']
-      .includes(event.code)),
+    sessionEvents.filter((event) => ['bank.serve', 'bank.fetch.chunk'].includes(event.code)),
     [],
   );
 }
@@ -699,16 +710,27 @@ try {
   assert.ok((await popupVideoPage.evaluate(() => window.__e2eAudit.silence())).every(({ muted, volume }) => muted && volume === 0));
   const popupLauncher = await context.newPage();
   await popupLauncher.goto(`chrome-extension://${extensionId}/logs.html`, { waitUntil: 'domcontentloaded' });
-  await popupVideoPage.bringToFront();
-  const videoLogsPagePromise = context.waitForEvent('page', {
-    predicate: (page) => page.url().includes('/logs.html'),
-  });
+  const pagesBeforeLogsTab = new Set(context.pages());
+  // 无窗口模式下 tabs.create 之后新标签即成为活动标签：先把 popup 开成后台标签，
+  // 再把视频页带回前台，popup 的 500ms 轮询才能读到视频页状态。
   const popupPage = await createBackgroundExtensionPage(
     context,
     popupLauncher,
     `chrome-extension://${extensionId}/popup.html?e2e-open-logs`,
   );
-  const videoLogsPage = await videoLogsPagePromise;
+  await popupVideoPage.bringToFront();
+  // tabs.create 的目标在建时还停在 about:blank，waitForEvent(page) 的 URL 谓词
+  // 会错过它；轮询 context.pages() 等这个新标签导航到 logs.html。
+  const videoLogsPage = await (async () => {
+    const deadline = Date.now() + 30000;
+    for (;;) {
+      const candidate = context.pages()
+        .find((page) => !pagesBeforeLogsTab.has(page) && page.url().includes('/logs.html'));
+      if (candidate !== undefined) return candidate;
+      if (Date.now() >= deadline) throw new Error('popup 打开的日志页标签没有出现');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  })();
   await videoLogsPage.waitForLoadState('domcontentloaded');
   assert.equal(await popupPage.evaluate(() => window.__e2ePopupLogsClicked), true);
   assert.equal(await popupPage.locator('[data-open-logs]').count(), 1);
@@ -778,12 +800,16 @@ try {
     const raw = document.documentElement.getAttribute('data-bilibili-buffer-shim-diagnostics');
     return raw !== null && JSON.parse(raw).sourceBufferRanges.some((track) => track.attached === true);
   });
+  // 媒体记录器跟随最大 video 元素（reconcile 每 500ms 一拍）：等它真正切到
+  // readout video（video.replaced），后面的 media.ended 才一定落在被记录的元素上。
+  await waitForStoredEvents(context, extensionId, (events) => events.some((event) =>
+    event.code === 'video.replaced' && event.sessionId === videoSessionId));
   await popupVideoPage.bringToFront();
   const readouts = await extensionTabSend(popupLauncher, {
-    version: 3,
+    version: STATUS_MESSAGE_VERSION,
     type: 'readouts:get',
   });
-  assert.equal(readouts.version, 3);
+  assert.equal(readouts.version, READOUTS_VERSION);
   assert.equal(readouts.diagnostics.sessionId, videoSessionId);
   assert.equal(readouts.routeKind, 'video');
   assert.equal(Number.isFinite(readouts.forwardSeconds), true);
@@ -904,7 +930,7 @@ try {
   await liveTakeoverPage.close();
 
   // ---- 视频增强开关关闭：popup 页面本身切换，保存路径真实执行 ----
-  const vodOffToggle = await togglePreferenceThroughPopup(context, extensionId, popupLauncher, 'vodEnabled', false);
+  const vodOffToggle = await togglePreferenceThroughPopup(context, extensionId, 'vodEnabled', false);
   assert.equal(vodOffToggle.stored.vodEnabled, false);
   assert.equal(vodOffToggle.rendered, false);
   const vodOffPage = await openFixture(
@@ -918,7 +944,8 @@ try {
   assert.deepEqual(await vodOffPage.evaluate(() => window.__fixture.calls), []);
   const vodOffSessionEvent = (await waitForStoredEvents(context, extensionId, (events) => events.some((event) =>
     event.code === 'route.session_started' && event.data?.pathname === '/video/BVswitch-vod-off'
-    && events.some((inner) => inner.sessionId === event.sessionId && inner.code === 'media.sample')))).events
+    && events.some((inner) => inner.sessionId === event.sessionId && inner.code === 'media.sample'
+      && Number.isFinite(inner.data?.currentTime) && inner.data.currentTime > 0)))).events
     .filter((event) => event.code === 'route.session_started' && event.data?.pathname === '/video/BVswitch-vod-off')
     .at(-1);
   const vodOffSessionEvents = sessionEventsOf(
@@ -951,7 +978,7 @@ try {
   markScenario('视频增强关闭时直播页仍接管');
   await liveOnVodOffPage.close();
 
-  const vodOnToggle = await togglePreferenceThroughPopup(context, extensionId, popupLauncher, 'vodEnabled', true);
+  const vodOnToggle = await togglePreferenceThroughPopup(context, extensionId, 'vodEnabled', true);
   assert.equal(vodOnToggle.stored.vodEnabled, true);
   const vodOnPage = await openFixture(
     context,
@@ -971,7 +998,7 @@ try {
   await vodOnPage.close();
 
   // ---- 直播增强开关关闭：镜像场景 ----
-  const liveOffToggle = await togglePreferenceThroughPopup(context, extensionId, popupLauncher, 'liveEnabled', false);
+  const liveOffToggle = await togglePreferenceThroughPopup(context, extensionId, 'liveEnabled', false);
   assert.equal(liveOffToggle.stored.liveEnabled, false);
   assert.equal(liveOffToggle.rendered, false);
   const liveOffPage = await openFixture(
@@ -1018,7 +1045,7 @@ try {
   markScenario('直播增强关闭时视频页仍接管');
   await videoOnLiveOffPage.close();
 
-  const liveOnToggle = await togglePreferenceThroughPopup(context, extensionId, popupLauncher, 'liveEnabled', true);
+  const liveOnToggle = await togglePreferenceThroughPopup(context, extensionId, 'liveEnabled', true);
   assert.equal(liveOnToggle.stored.liveEnabled, true);
   const liveOnAgainPage = await openFixture(
     context,
