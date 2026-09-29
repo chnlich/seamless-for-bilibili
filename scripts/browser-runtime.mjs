@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import net from 'node:net';
 
-export const DEFAULT_CHROME_EXECUTABLE_PATH = 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe';
+export const DEFAULT_CHROME_EXECUTABLE_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 export const CHROME_EXECUTABLE_ENVIRONMENT_VARIABLE = 'BILIBILI_E2E_CHROME';
 
 export async function findAvailablePort() {
@@ -19,6 +19,15 @@ export async function findAvailablePort() {
     server.close((error) => error === undefined ? resolve() : reject(error));
   });
   return port;
+}
+
+// 浏览器脚本默认无窗口运行（完整 Chrome，--headless，不是 chrome-headless-shell）；
+// 命令行传 --headed 才开一个可见窗口。开关只由命令行控制，不读任何环境变量。
+export function parseHeadedFlag(argv = process.argv.slice(2)) {
+  for (const value of argv) {
+    if (value !== '--headed') throw new Error(`unknown argument ${value}; only --headed is allowed`);
+  }
+  return argv.includes('--headed');
 }
 
 export async function resolveChromeExecutablePath({

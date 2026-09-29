@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { chromium } from 'playwright';
-import { findAvailablePort } from './browser-runtime.mjs';
+import { findAvailablePort, parseHeadedFlag } from './browser-runtime.mjs';
 import { readStoredEvents } from './extension-log-pull.mjs';
 import { installUnpackedExtension } from './install-unpacked-extension.mjs';
 import { assertInkPainted, decodePngFile } from './png-pixels.mjs';
@@ -39,6 +39,7 @@ const outDir = path.join(root, 'store-images-raw');
 await fs.mkdir(outDir, { recursive: true });
 
 // cmd.exe's `set VAR=value && next` keeps the space before && in the value; trim it.
+const headed = parseHeadedFlag();
 const chromeExecutablePath = process.env.BILIBILI_E2E_CHROME?.trim();
 if (chromeExecutablePath === undefined || chromeExecutablePath.length === 0) {
   throw new Error('set BILIBILI_E2E_CHROME to the Chrome executable; no silent fallback');
@@ -460,7 +461,7 @@ const report = {
     buildId: provenance.buildId,
     profileDirectory,
     chromeExecutablePath,
-    launchMode: 'spawn+connectOverCDP',
+    launchMode: headed ? 'spawn+connectOverCDP headed' : 'spawn+connectOverCDP headless',
   },
   videoUrl: VIDEO_URL,
   videoId: VIDEO_URL.match(/(BV[0-9A-Za-z]+)/)?.[1] ?? null,
@@ -475,6 +476,8 @@ log(`profile ${profileDirectory}, cdp port ${cdpPort}`);
 // Chrome is spawned by this run and ended by PID; the temp profile names every process.
 const chromeArguments = [
   '--mute-audio',
+  // 无窗口默认（完整 Chrome 的 --headless）；--headed 显式要一个可见窗口。
+  ...(headed ? [] : ['--headless']),
   '--enable-unsafe-extension-debugging',
   '--lang=zh-CN',
   '--force-device-scale-factor=2',

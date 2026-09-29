@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { findAvailablePort, resolveChromeExecutablePath } from './browser-runtime.mjs';
+import { findAvailablePort, parseHeadedFlag, resolveChromeExecutablePath } from './browser-runtime.mjs';
 import { startConsoleCapture, triggerExtensionPositiveControl } from './console-capture.mjs';
 import { readMaxEventId, readStoredEvents } from './extension-log-pull.mjs';
 import { installUnpackedExtension } from './install-unpacked-extension.mjs';
@@ -22,6 +22,7 @@ function parseArgs(argv) {
     startSeconds: 0,
     profile: undefined,
     outputDirectory: undefined,
+    headed: parseHeadedFlag(argv),
   };
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index];
@@ -92,32 +93,87 @@ function overlapReport(requests) {
   return report.sort((left, right) => right.requestedBytes - left.requestedBytes);
 }
 
-function resolutionKey(event) {
-  const resolution = event.data?.resolution;
-  if (!Number.isFinite(resolution?.width) || !Number.isFinite(resolution?.height)) return undefined;
-  return `${resolution.width}x${resolution.height}`;
+// popup 验证：popup.html 以后台标签打开（chrome.tabs.create active:false），等它读到
+// 当前视频页的状态（body[data-ready]），断言两个开关与缓冲、线路读数都来自当前构建。
+// 不点击播放器皮肤：播放从 media 元素启动，画质菜单不再被驱动。
+async function openBackgroundExtensionPage(context, extensionId, pagePath) {
+  const launcher = await context.newPage();
+  await launcher.goto(`chrome-extension://${extensionId}/logs.html`, { waitUntil: 'domcontentloaded' });
+  const [popupPage] = await Promise.all([
+    context.waitForEvent('page'),
+    launcher.evaluate((url) => new Promise((resolve, reject) => {
+      chrome.tabs.create({ url, active: false }, (tab) => {
+        if (chrome.runtime.lastError !== undefined) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(tab.id);
+      });
+    }), `chrome-extension://${extensionId}/${pagePath}`),
+  ]);
+  await popupPage.waitForLoadState('domcontentloaded');
+  await launcher.close();
+  return popupPage;
 }
 
-function latestSessionId(events, pathname) {
-  return events
-    .filter((event) => event.code === 'route.session_started' && event.data?.pathname === pathname)
-    .at(-1)?.sessionId;
-}
-
-async function waitForMediaSample(context, extensionId, startAfterEventId, pathname, predicate, timeout = 30000) {
-  const deadline = Date.now() + timeout;
-  for (;;) {
-    const stored = await readStoredEvents(context, extensionId, startAfterEventId);
-    const sessionId = latestSessionId(stored.events, pathname);
-    const samples = stored.events.filter((event) => event.code === 'media.sample' && event.sessionId === sessionId);
-    const sample = samples.find((candidate) => predicate(candidate));
-    if (sample !== undefined) return { sample, sessionId, stored };
-    if (Date.now() >= deadline) {
-      throw Object.assign(new Error(`media.sample condition was not observed for ${pathname}`), {
-        code: 'MEDIA_SAMPLE_TIMEOUT',
+async function verifyPopupReadouts(context, extensionId, videoPage) {
+  await videoPage.bringToFront();
+  const popupPage = await openBackgroundExtensionPage(context, extensionId, 'popup.html');
+  try {
+    await popupPage.waitForFunction(
+      () => document.body?.dataset?.ready === 'true',
+      undefined,
+      { timeout: 20000 },
+    );
+    const readout = await popupPage.evaluate(() => {
+      const text = (selector) => document.querySelector(selector)?.textContent?.trim() ?? null;
+      const switches = [...document.querySelectorAll('input[data-preference]')].map((input) => ({
+        preference: input.dataset.preference,
+        visible: input.offsetParent !== null,
+        checked: input.checked,
+      }));
+      const lines = [...document.querySelectorAll('.cdn-line')].map((line) => ({
+        name: line.querySelector('.cdn-name')?.textContent?.trim() ?? null,
+        health: line.querySelector('.cdn-health')?.textContent?.trim() ?? null,
+      }));
+      const stateLine = document.querySelector('[data-status-field="state"]');
+      return {
+        ready: document.body?.dataset?.ready ?? null,
+        notice: text('[data-notice]'),
+        switches,
+        bufferSeconds: text('[data-buffer-seconds]'),
+        bufferGoal: text('[data-buffer-goal]'),
+        targetLabel: text('[data-buffer-target-label]'),
+        targetValue: text('[data-target-value]'),
+        stateLineHidden: stateLine?.hidden ?? null,
+        livePanelHidden: document.querySelector('[data-live-panel]')?.hidden ?? null,
+        cdnLineCount: lines.length,
+        lines,
+      };
+    });
+    const failures = [];
+    if (readout.switches.map((entry) => entry.preference).sort().join(',') !== 'liveEnabled,vodEnabled') {
+      failures.push(`switches rendered as ${JSON.stringify(readout.switches)}`);
+    }
+    for (const entry of readout.switches) {
+      if (entry.visible !== true || entry.checked !== true) {
+        failures.push(`switch ${entry.preference} visible=${entry.visible} checked=${entry.checked}`);
+      }
+    }
+    if (!/^\d+ 秒$/.test(readout.bufferSeconds ?? '')) failures.push(`bufferSeconds=${readout.bufferSeconds}`);
+    if (!(readout.bufferGoal ?? '').includes('120')) failures.push(`bufferGoal=${readout.bufferGoal}`);
+    if (readout.stateLineHidden !== false || (readout.targetValue ?? '') === '') {
+      failures.push(`target state line hidden=${readout.stateLineHidden} value=${readout.targetValue}`);
+    }
+    if (readout.cdnLineCount < 1) failures.push(`cdn lines=${readout.cdnLineCount}`);
+    if (failures.length > 0) {
+      throw Object.assign(new Error(`popup readout failed: ${failures.join('; ')}`), {
+        code: 'POPUP_READOUT_FAILED',
       });
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    return readout;
+  } finally {
+    await popupPage.close();
   }
 }
 
@@ -279,7 +335,7 @@ const summary = {
     persistentProfile: options.profile !== undefined,
   },
   browser: {
-    headless: false,
+    headless: !options.headed,
     muteAudio: true,
     browserStarted: false,
   },
@@ -289,7 +345,7 @@ try {
   context = await chromium.launchPersistentContext(profileDirectory, {
     executablePath: chromeExecutablePath,
     cdpPort,
-    headless: false,
+    headless: !options.headed,
     args: [
       '--mute-audio',
       '--no-first-run',
@@ -395,7 +451,7 @@ try {
   });
 
   const pathname = new URL(page.url()).pathname;
-  summary.qualitySwitch = await switchQuality(context, extensionId, page, startAfterEventId, pathname);
+  summary.popup = await verifyPopupReadouts(context, extensionId, page);
   const sampled = [];
   const sampleCount = Math.max(2, Math.round(options.seconds / 5));
   for (let index = 0; index < sampleCount; index += 1) {
@@ -465,7 +521,7 @@ console.log(JSON.stringify({
   failures: summary.failures,
   blocked: summary.blocked,
   console: summary.console,
-  qualitySwitch: summary.qualitySwitch,
+  popup: summary.popup,
   playback: summary.playback,
   eventTotal: summary.eventTotal,
   mediaRequests: summary.mediaRequests,

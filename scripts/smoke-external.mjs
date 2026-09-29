@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { findAvailablePort, resolveChromeExecutablePath } from './browser-runtime.mjs';
+import { findAvailablePort, parseHeadedFlag, resolveChromeExecutablePath } from './browser-runtime.mjs';
 import { startConsoleCapture, triggerExtensionPositiveControl } from './console-capture.mjs';
 import { installUnpackedExtension } from './install-unpacked-extension.mjs';
 import { readMaxEventId, readStoredEvents } from './extension-log-pull.mjs';
@@ -247,6 +247,7 @@ async function runPage(context, extensionId, url) {
   }
 }
 
+const headed = parseHeadedFlag();
 const chromeExecutablePath = await resolveChromeExecutablePath();
 const cdpPort = await findAvailablePort();
 const profileDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'bilibili-external-smoke-'));
@@ -255,7 +256,7 @@ let consoleCapture;
 const report = {
   generatedAt: new Date().toISOString(),
   browser: {
-    headless: false,
+    headless: !headed,
     muteAudio: true,
     freshProfile: true,
     browserStarted: false,
@@ -266,7 +267,7 @@ try {
   context = await chromium.launchPersistentContext(profileDirectory, {
     executablePath: chromeExecutablePath,
     cdpPort,
-    headless: false,
+    headless: !headed,
     ignoreDefaultArgs: ['--disable-extensions'],
     args: [
       '--mute-audio',

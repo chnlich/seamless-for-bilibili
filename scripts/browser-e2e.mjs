@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { findAvailablePort, resolveChromeExecutablePath } from './browser-runtime.mjs';
+import { findAvailablePort, parseHeadedFlag, resolveChromeExecutablePath } from './browser-runtime.mjs';
 import { startConsoleCapture, triggerExtensionPositiveControl } from './console-capture.mjs';
 import { readStoredEvents } from './extension-log-pull.mjs';
 import { installUnpackedExtension } from './install-unpacked-extension.mjs';
@@ -149,6 +149,58 @@ const INVENTORY_PLAYURL_BODY = {
   },
 };
 const INVENTORY_ADVERTISED_REPRESENTATION_COUNT = 3;
+
+const LIVE_SEGMENT_URL = 'https://e2e-live.bilivideo.com/e2e/live-segment-1.m4s?signature=live';
+const LIVE_SEGMENT_PATH = new URL(LIVE_SEGMENT_URL).pathname;
+const LIVE_SEGMENT_TOTAL_SIZE = 1024 * 1024;
+
+const liveFixture = `<!doctype html><html><body><script>
+  window.__liveFixture = { responses: [], errors: [] };
+  async function pullSegment() {
+    try {
+      const response = await fetch(${JSON.stringify(LIVE_SEGMENT_URL)}, {
+        headers: { Range: 'bytes=0-${LIVE_SEGMENT_TOTAL_SIZE - 1}' },
+      });
+      const buffer = await response.arrayBuffer();
+      window.__liveFixture.responses.push({ status: response.status, bytes: buffer.byteLength });
+    } catch (error) {
+      window.__liveFixture.errors.push(String(error));
+    }
+  }
+  void pullSegment();
+  setInterval(() => {
+    if (window.__liveFixture.responses.length + window.__liveFixture.errors.length < 4) void pullSegment();
+  }, 400);
+</script></body></html>`;
+
+// 直播分片路由应答：页面请求带闭合 Range（播放器视角），接管腿不带 Range（整段取回）。
+async function liveRequestHandler(route) {
+  const request = route.request();
+  const requestUrl = new URL(request.url());
+  if (request.method() === 'OPTIONS') {
+    await route.fulfill({ status: 204, headers: inventoryCorsHeaders, body: '' });
+    return;
+  }
+  if (requestUrl.hostname === 'e2e-live.bilivideo.com' && requestUrl.pathname === LIVE_SEGMENT_PATH) {
+    const match = /^bytes=(\d+)-(\d+)$/.exec(request.headers().range || '');
+    const start = match === null ? 0 : Number(match[1]);
+    const requestedEnd = match === null ? LIVE_SEGMENT_TOTAL_SIZE - 1 : Number(match[2]);
+    const end = Math.min(requestedEnd, LIVE_SEGMENT_TOTAL_SIZE - 1);
+    const body = Buffer.alloc(end - start + 1, 0x2b);
+    await route.fulfill({
+      status: match === null ? 200 : 206,
+      headers: {
+        ...inventoryCorsHeaders,
+        'Content-Length': String(body.byteLength),
+        'Content-Range': `bytes ${start}-${end}/${LIVE_SEGMENT_TOTAL_SIZE}`,
+        'Content-Type': 'video/mp4',
+      },
+      body,
+    });
+    return;
+  }
+  await route.fulfill({ status: 204, body: '' });
+}
 
 const videoFixture = `<!doctype html><html><body><div id="stage"></div><script>
   const stage = document.querySelector('#stage');
@@ -378,11 +430,78 @@ async function extensionTabSend(page, message) {
   }), message);
 }
 
+// 开发日志读取复用一个长驻 logs.html 页面：绝不为每次轮询新开标签页。
+const logsReaders = new Map();
+async function logsReaderFor(context, extensionId) {
+  const existing = logsReaders.get(context);
+  if (existing !== undefined) return existing;
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/logs.html`, { waitUntil: 'domcontentloaded' });
+  let afterEventId = 0;
+  const allEvents = [];
+  const reader = {
+    page,
+    events: () => allEvents,
+    async readNewEvents() {
+      const result = await page.evaluate(async (cursor) => {
+        const send = (message) => new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage(message, (response) => {
+            if (chrome.runtime.lastError !== undefined) {
+              reject(new Error(chrome.runtime.lastError.message));
+              return;
+            }
+            resolve(response);
+          });
+        });
+        const snapshot = await send({ version: 1, type: 'logs:max-event-id' });
+        if (snapshot?.ok !== true || !Number.isInteger(snapshot.maxEventId) || snapshot.maxEventId < 0) {
+          throw new Error(snapshot?.error?.message || 'extension log snapshot was rejected');
+        }
+        const events = [];
+        let position = cursor;
+        for (;;) {
+          const response = await send({
+            version: 1,
+            type: 'logs:events-page',
+            limit: 250,
+            afterEventId: position,
+            maxEventId: snapshot.maxEventId,
+          });
+          if (response?.ok !== true) throw new Error(response?.error?.message || 'extension log page was rejected');
+          events.push(...response.events);
+          if (!response.hasMore) {
+            position = response.nextAfterEventId ?? snapshot.maxEventId;
+            break;
+          }
+          const next = response.nextAfterEventId ?? response.events.at(-1)?.eventId;
+          if (!Number.isInteger(next) || next <= position) throw new Error('log paging did not advance');
+          position = next;
+        }
+        return { events, maxEventId: snapshot.maxEventId };
+      }, afterEventId);
+      afterEventId = result.maxEventId;
+      allEvents.push(...result.events);
+      return result;
+    },
+    async readAllStoredEvents() {
+      await reader.readNewEvents();
+      return { events: [...allEvents] };
+    },
+  };
+  logsReaders.set(context, reader);
+  return reader;
+}
+
+async function readAllStoredEvents(context, extensionId) {
+  return (await logsReaderFor(context, extensionId)).readAllStoredEvents();
+}
+
 async function waitForStoredEvents(context, extensionId, predicate, timeout = 10000) {
+  const reader = await logsReaderFor(context, extensionId);
   const deadline = Date.now() + timeout;
   for (;;) {
-    const result = await readStoredEvents(context, extensionId);
-    if (predicate(result.events)) return result;
+    await reader.readNewEvents();
+    if (predicate(reader.events())) return { events: [...reader.events()] };
     if (Date.now() >= deadline) {
       throw new Error('等待 IndexedDB 日志条件超时');
     }
@@ -454,10 +573,41 @@ async function clickExport(page) {
   await page.locator('[data-export]').click();
 }
 
+// 开关只能从 popup 页面本身切换：popup.html 开成标签页，操作它自己的复选框，
+// 让真实的保存路径（change 事件 → chrome.storage.local）被完整执行。
+async function togglePreferenceThroughPopup(context, extensionId, launcher, name, checked) {
+  const popupPage = await createBackgroundExtensionPage(
+    context,
+    launcher,
+    `chrome-extension://${extensionId}/popup.html`,
+  );
+  const input = popupPage.locator(`input[data-preference="${name}"]`);
+  await input.waitFor({ state: 'visible', timeout: 10000 });
+  await input.setChecked(checked);
+  const stored = await popupPage.evaluate(() => chrome.storage.local.get(null));
+  const rendered = await input.isChecked();
+  await popupPage.close();
+  return { stored, rendered };
+}
+
+function assertNoBankRecords(sessionEvents) {
+  assert.deepEqual(
+    sessionEvents.filter((event) => ['bank.serve', 'bank.fetch.chunk', 'bank.inventory', 'bank.store']
+      .includes(event.code)),
+    [],
+  );
+}
+
+function sessionEventsOf(events, sessionStartedEvent) {
+  return events.filter((event) => event.sessionId === sessionStartedEvent?.sessionId);
+}
+
+const headed = parseHeadedFlag();
 const chromeExecutablePath = await resolveChromeExecutablePath();
 const cdpPort = await findAvailablePort();
 const provenance = await readProvenance({ rootDirectory: root, extensionDirectory });
 const profileDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'bilibili-e2e-profile-'));
+const MAX_TAB_OPENS = 60;
 const scenarios = [];
 const markScenario = (name) => {
   scenarios.push(name);
@@ -467,16 +617,28 @@ let context;
 let extensionId;
 let consoleCapture;
 try {
-  const launch = (profile) => chromium.launchPersistentContext(profile, {
-    executablePath: chromeExecutablePath,
-    cdpPort,
-    headless: false,
-    ignoreDefaultArgs: ['--disable-extensions'],
-    args: [
-      '--mute-audio',
-      '--enable-unsafe-extension-debugging',
-    ],
-  });
+  const launch = async (profile) => {
+    const created = await chromium.launchPersistentContext(profile, {
+      executablePath: chromeExecutablePath,
+      cdpPort,
+      headless: !headed,
+      ignoreDefaultArgs: ['--disable-extensions'],
+      args: [
+        '--mute-audio',
+        '--enable-unsafe-extension-debugging',
+      ],
+    });
+    const originalNewPage = created.newPage.bind(created);
+    let tabOpens = 0;
+    created.newPage = async (...args) => {
+      tabOpens += 1;
+      if (tabOpens > MAX_TAB_OPENS) {
+        throw new Error(`tab open ceiling exceeded (${MAX_TAB_OPENS} context.newPage() calls)`);
+      }
+      return originalNewPage(...args);
+    };
+    return created;
+  };
   context = await launch(profileDirectory);
   const browserVersion = context.browser().version();
   console.log(`browser e2e provenance: ${JSON.stringify({
@@ -498,7 +660,7 @@ try {
   await waitFor(videoPage, () => window.__fixture.calls.length === 1);
   assert.deepEqual(await videoPage.evaluate(() => window.__fixture.calls), [120]);
   assertNoForbiddenExtensionMediaWrites(await videoPage.evaluate(() => window.__e2eAudit.extensionOwnership()));
-  const videoEvents = await readStoredEvents(context, extensionId);
+  const videoEvents = await readAllStoredEvents(context, extensionId);
   const videoHint = videoEvents.events
     .filter((event) => event.code === 'video.buffer_hint.applied' && event.data?.targetSeconds === 120)
     .at(-1);
@@ -556,7 +718,7 @@ try {
       elements.map((element) => element.dataset.statusField)),
     ['state'],
   );
-  const videoSessionId = (await readStoredEvents(context, extensionId)).events
+  const videoSessionId = (await readAllStoredEvents(context, extensionId)).events
     .find((event) => event.code === 'route.session_started' && event.data?.pathname === '/video/BVpopup-fixture')?.sessionId;
   assert.equal(typeof videoSessionId, 'string');
   const inventoryFixture = await popupVideoPage.evaluate(() => window.__fixture.populateBankInventory());
@@ -651,7 +813,7 @@ try {
   const snapshotExport = await createExportPage(context, extensionId, '');
   await clickExport(snapshotExport);
   await waitFor(snapshotExport, () => window.__exportState.writes >= 1);
-  const endedCountBefore = (await readStoredEvents(context, extensionId)).events
+  const endedCountBefore = (await readAllStoredEvents(context, extensionId)).events
     .filter((event) => event.code === 'media.ended').length;
   await popupVideoPage.evaluate(() => window.__fixture.triggerUniqueMediaEvent());
   await waitForStoredEvents(
@@ -680,7 +842,7 @@ try {
   await failedExport.close();
   markScenario('日志 writer failure aborts the file');
 
-  const exportedEvents = (await readStoredEvents(context, extensionId)).events;
+  const exportedEvents = (await readAllStoredEvents(context, extensionId)).events;
   const eventCounts = Object.fromEntries(
     [...new Set(exportedEvents.map((event) => event.code))]
       .sort()
@@ -710,6 +872,167 @@ try {
     + ` admittedResources=${measuredInventoryEvent.data.resources.length}`);
 
   await popupVideoPage.close();
+
+  // ---- 直播 HLS 分片接管（夹具无配对地址 → 播放器所名地址单腿） ----
+  const liveTakeoverPage = await openFixture(
+    context,
+    'https://live.bilibili.com/6-e2e-live',
+    liveFixture,
+    liveRequestHandler,
+  );
+  await waitFor(liveTakeoverPage, () => window.__liveFixture === undefined
+    ? false
+    : window.__liveFixture.responses.length >= 1);
+  assert.ok((await liveTakeoverPage.evaluate(() => window.__liveFixture.responses))
+    .some((response) => response.status === 206 && response.bytes === LIVE_SEGMENT_TOTAL_SIZE),
+    JSON.stringify(await liveTakeoverPage.evaluate(() => window.__liveFixture)));
+  const liveTakeoverServe = (await waitForStoredEvents(context, extensionId, (events) => events.some((event) =>
+    event.code === 'bank.serve' && event.data?.result === 'hit'
+    && String(event.data?.reason ?? '').startsWith('live_hls')))).events
+    .filter((event) => event.code === 'bank.serve' && event.data?.result === 'hit'
+      && String(event.data?.reason ?? '').startsWith('live_hls')).at(-1);
+  const liveTakeoverSessionEvents = (await readAllStoredEvents(context, extensionId)).events
+    .filter((event) => event.sessionId === liveTakeoverServe.sessionId);
+  assert.ok(liveTakeoverSessionEvents.some((event) => event.code === 'route.session_started'
+    && event.data?.routeKind === 'live' && event.data?.pathname === '/6-e2e-live'));
+  assert.ok(liveTakeoverSessionEvents.some((event) => event.code === 'bank.fetch.chunk'
+    && event.data?.slot !== undefined));
+  assertNoForbiddenExtensionMediaWrites(
+    await liveTakeoverPage.evaluate(() => window.__e2eAudit.extensionOwnership()),
+  );
+  markScenario('直播 HLS 分片单腿接管');
+  await liveTakeoverPage.close();
+
+  // ---- 视频增强开关关闭：popup 页面本身切换，保存路径真实执行 ----
+  const vodOffToggle = await togglePreferenceThroughPopup(context, extensionId, popupLauncher, 'vodEnabled', false);
+  assert.equal(vodOffToggle.stored.vodEnabled, false);
+  assert.equal(vodOffToggle.rendered, false);
+  const vodOffPage = await openFixture(
+    context,
+    'https://www.bilibili.com/video/BVswitch-vod-off',
+    videoFixture,
+    inventoryRequestHandler,
+  );
+  await vodOffPage.evaluate(() => window.__fixture.start());
+  await waitFor(vodOffPage, () => window.__fixture.decodedFrames() > 0 && window.__fixture.decodedNonBlack());
+  assert.deepEqual(await vodOffPage.evaluate(() => window.__fixture.calls), []);
+  const vodOffSessionEvent = (await waitForStoredEvents(context, extensionId, (events) => events.some((event) =>
+    event.code === 'route.session_started' && event.data?.pathname === '/video/BVswitch-vod-off'
+    && events.some((inner) => inner.sessionId === event.sessionId && inner.code === 'media.sample')))).events
+    .filter((event) => event.code === 'route.session_started' && event.data?.pathname === '/video/BVswitch-vod-off')
+    .at(-1);
+  const vodOffSessionEvents = sessionEventsOf(
+    (await readAllStoredEvents(context, extensionId)).events,
+    vodOffSessionEvent,
+  );
+  assertNoBankRecords(vodOffSessionEvents);
+  assert.ok(vodOffSessionEvents.some((event) => event.code === 'preference.read'
+    && event.data?.name === 'vodEnabled' && event.data?.enabled === false));
+  const vodOffSampleTimes = vodOffSessionEvents
+    .filter((event) => event.code === 'media.sample')
+    .map((event) => event.data?.currentTime)
+    .filter((time) => Number.isFinite(time));
+  assert.ok(vodOffSampleTimes.length >= 2 && vodOffSampleTimes.at(-1) > vodOffSampleTimes[0],
+    JSON.stringify(vodOffSampleTimes));
+  markScenario('视频增强关闭：视频照常播放，下载层让路，无接管记录');
+  await vodOffPage.close();
+
+  // 同一 profile 里直播页不受视频开关影响：仍接管。
+  const liveOnVodOffPage = await openFixture(
+    context,
+    'https://live.bilibili.com/6-e2e-live-vod-off',
+    liveFixture,
+    liveRequestHandler,
+  );
+  await waitForStoredEvents(context, extensionId, (events) => events.some((event) =>
+    event.code === 'route.session_started' && event.data?.pathname === '/6-e2e-live-vod-off'
+    && events.some((inner) => inner.sessionId === event.sessionId
+      && inner.code === 'bank.serve' && inner.data?.result === 'hit')));
+  markScenario('视频增强关闭时直播页仍接管');
+  await liveOnVodOffPage.close();
+
+  const vodOnToggle = await togglePreferenceThroughPopup(context, extensionId, popupLauncher, 'vodEnabled', true);
+  assert.equal(vodOnToggle.stored.vodEnabled, true);
+  const vodOnPage = await openFixture(
+    context,
+    'https://www.bilibili.com/video/BVswitch-vod-on',
+    videoFixture,
+    inventoryRequestHandler,
+  );
+  await vodOnPage.evaluate(() => window.__fixture.start());
+  await waitFor(vodOnPage, () => window.__fixture.calls.length === 1);
+  assert.deepEqual(await vodOnPage.evaluate(() => window.__fixture.calls), [120]);
+  const vodOnInventory = await vodOnPage.evaluate(() => window.__fixture.populateBankInventory());
+  assert.equal(vodOnInventory.advertised.length, INVENTORY_ADVERTISED_REPRESENTATION_COUNT);
+  await waitForStoredEvents(context, extensionId, (events) => events.some((event) =>
+    event.code === 'route.session_started' && event.data?.pathname === '/video/BVswitch-vod-on'
+    && events.some((inner) => inner.sessionId === event.sessionId && inner.code === 'bank.fetch.chunk')));
+  markScenario('视频增强恢复开启：120 秒缓存目标与分片接管恢复');
+  await vodOnPage.close();
+
+  // ---- 直播增强开关关闭：镜像场景 ----
+  const liveOffToggle = await togglePreferenceThroughPopup(context, extensionId, popupLauncher, 'liveEnabled', false);
+  assert.equal(liveOffToggle.stored.liveEnabled, false);
+  assert.equal(liveOffToggle.rendered, false);
+  const liveOffPage = await openFixture(
+    context,
+    'https://live.bilibili.com/6-e2e-live-off',
+    liveFixture,
+    liveRequestHandler,
+  );
+  await waitFor(liveOffPage, () => window.__liveFixture.responses.length + window.__liveFixture.errors.length >= 3);
+  await waitForStoredEvents(context, extensionId, (events) => events.some((event) =>
+    event.code === 'route.session_started' && event.data?.pathname === '/6-e2e-live-off'
+    && events.some((inner) => inner.sessionId === event.sessionId
+      && (inner.code === 'media.sample' || inner.code === 'route.no_video'))), 15000)
+    .catch(() => { /* 无 video 的直播夹具可能只留下 session 与 no_video 记录 */ });
+  const liveOffSessionEvent = (await readAllStoredEvents(context, extensionId)).events
+    .filter((event) => event.code === 'route.session_started' && event.data?.pathname === '/6-e2e-live-off')
+    .at(-1);
+  assert.ok(liveOffSessionEvent);
+  const liveOffSessionEvents = sessionEventsOf(
+    (await readAllStoredEvents(context, extensionId)).events,
+    liveOffSessionEvent,
+  );
+  assertNoBankRecords(liveOffSessionEvents);
+  assert.ok(liveOffSessionEvents.some((event) => event.code === 'preference.read'
+    && event.data?.name === 'liveEnabled' && event.data?.enabled === false));
+  markScenario('直播增强关闭：分片原生放行，无接管记录');
+  await liveOffPage.close();
+
+  // 同一 profile 里视频页不受直播开关影响：仍接管。
+  const videoOnLiveOffPage = await openFixture(
+    context,
+    'https://www.bilibili.com/video/BVswitch-live-off',
+    videoFixture,
+    inventoryRequestHandler,
+  );
+  await videoOnLiveOffPage.evaluate(() => window.__fixture.start());
+  await waitFor(videoOnLiveOffPage, () => window.__fixture.calls.length === 1);
+  assert.deepEqual(await videoOnLiveOffPage.evaluate(() => window.__fixture.calls), [120]);
+  const liveOffInventory = await videoOnLiveOffPage.evaluate(() => window.__fixture.populateBankInventory());
+  assert.equal(liveOffInventory.advertised.length, INVENTORY_ADVERTISED_REPRESENTATION_COUNT);
+  await waitForStoredEvents(context, extensionId, (events) => events.some((event) =>
+    event.code === 'route.session_started' && event.data?.pathname === '/video/BVswitch-live-off'
+    && events.some((inner) => inner.sessionId === event.sessionId && inner.code === 'bank.fetch.chunk')));
+  markScenario('直播增强关闭时视频页仍接管');
+  await videoOnLiveOffPage.close();
+
+  const liveOnToggle = await togglePreferenceThroughPopup(context, extensionId, popupLauncher, 'liveEnabled', true);
+  assert.equal(liveOnToggle.stored.liveEnabled, true);
+  const liveOnAgainPage = await openFixture(
+    context,
+    'https://live.bilibili.com/6-e2e-live-on',
+    liveFixture,
+    liveRequestHandler,
+  );
+  await waitForStoredEvents(context, extensionId, (events) => events.some((event) =>
+    event.code === 'route.session_started' && event.data?.pathname === '/6-e2e-live-on'
+    && events.some((inner) => inner.sessionId === event.sessionId
+      && inner.code === 'bank.serve' && inner.data?.result === 'hit')));
+  markScenario('直播增强恢复开启：分片接管恢复');
+  await liveOnAgainPage.close();
+
   const consoleVerdict = consoleCapture.verdict();
   const extensionConsoleErrors = consoleCapture.events.filter((event) =>
     event.kind === 'console'
@@ -735,7 +1058,7 @@ try {
   context = await launch(profileDirectory);
   await context.addInitScript({ content: `(${silentAndAuditInit.toString()})()` });
   extensionId = await installUnpackedExtension(context.browser(), extensionDirectory);
-  const stored = await readStoredEvents(context, extensionId);
+  const stored = await readAllStoredEvents(context, extensionId);
   assert.ok(stored.events.some((event) => event.code === 'route.session_started'));
   markScenario('extension worker/browser restart reads persisted IndexedDB logs');
 
