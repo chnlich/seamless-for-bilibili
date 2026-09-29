@@ -221,6 +221,7 @@
     }
     return `${parsed.origin}${parsed.pathname}`;
   }
+  var PREFERENCE_NAMES = new Set(Object.values(EXTENSION_PREFERENCES));
 
   // src/bank/errors.js
   var BankFallbackError = class extends Error {

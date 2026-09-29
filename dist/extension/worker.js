@@ -587,13 +587,20 @@
       height: finiteOrUnknown(value.height)
     };
   }
-  function sanitizeField(field, value) {
+  var PREFERENCE_NAMES = new Set(Object.values(EXTENSION_PREFERENCES));
+  function scrubPreferenceName(value) {
+    return typeof value === "string" && PREFERENCE_NAMES.has(value) ? value : UNKNOWN_VALUE;
+  }
+  function sanitizeField(field, value, code) {
     if (field === "origin") return scrubOrigin(value);
     if (field === "pathname" || field === "streamPath") {
       if (typeof value !== "string" || !value.startsWith("/")) return UNKNOWN_VALUE;
       return scrubPathname(value);
     }
     if (["bvid", "part", "watchLaterItem"].includes(field)) return scrubIdentifier(value);
+    if (field === "name" && typeof code === "string" && code.startsWith("preference.")) {
+      return scrubPreferenceName(value);
+    }
     if (field === "source" || field === "previousSource" || field === "name") return scrubUrl(value);
     if (field === "bufferedRanges" || field === "seekableRanges" || field === "bufferedBefore" || field === "bufferedAfter") return safeRangeList(value);
     if (field === "sourceBufferRanges") return safeSourceBufferRanges(value);
@@ -651,7 +658,7 @@
     const result = {};
     for (const field of fields) {
       if (Object.prototype.hasOwnProperty.call(data, field)) {
-        result[field] = sanitizeField(field, data[field]);
+        result[field] = sanitizeField(field, data[field], code);
       }
     }
     return result;

@@ -209,6 +209,7 @@
 
   // src/diagnostics/privacy.js
   var UNKNOWN_VALUE = "未提供";
+  var PREFERENCE_NAMES = new Set(Object.values(EXTENSION_PREFERENCES));
 
   // src/extension/bridge-contract.js
   var SHIM_DIAGNOSTIC_ATTRIBUTE = "data-bilibili-buffer-shim-diagnostics";

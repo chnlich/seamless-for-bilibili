@@ -1094,6 +1094,30 @@ test('diagnostic catalog covers all required media events and preserves browser-
   );
 });
 
+test('preference events keep the switch name; non-switch names never pass', () => {
+  assert.deepEqual(sanitizeEventData('preference.read', { name: 'vodEnabled', enabled: false }), {
+    name: 'vodEnabled',
+    enabled: false,
+  });
+  assert.deepEqual(sanitizeEventData('preference.read', { name: 'liveEnabled', enabled: true }), {
+    name: 'liveEnabled',
+    enabled: true,
+  });
+  assert.deepEqual(sanitizeEventData('preference.changed', { name: 'vodEnabled', enabled: true }), {
+    name: 'vodEnabled',
+    enabled: true,
+  });
+  assert.equal(sanitizeEventData('preference.read', { name: 'liveEnabled ' }).name, '未提供');
+  assert.equal(sanitizeEventData('preference.read', { name: 'https://cdn.example/x.m4s' }).name, '未提供');
+  assert.equal(sanitizeEventData('preference.read', { name: 'otherSetting' }).name, '未提供');
+  assert.equal(sanitizeEventData('preference.read', { name: 42 }).name, '未提供');
+  // resource 类的 name 仍是 URL 字段，走 URL 清洗。
+  assert.equal(
+    sanitizeEventData('media.append', { source: 'https://cdn.example/seg.m4s?token=secret' }).source,
+    'https://cdn.example/seg.m4s',
+  );
+});
+
 test('log.error schema strips url signatures, truncates the message, and drops unknown fields', () => {
   const longMessage = `直播流前台接管失败: 直播流双腿取数失败 https://cdn.example/live.flv?token=secret ${'x'.repeat(220)}`;
   const sanitized = sanitizeEventData('log.error', {

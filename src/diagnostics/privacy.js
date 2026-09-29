@@ -1,3 +1,4 @@
+import { EXTENSION_PREFERENCES } from '../constants.js';
 import { allowedDataFields, assertEventCode, isSafePersistErrorCode } from './catalog.js';
 
 export const UNKNOWN_VALUE = '未提供';
@@ -234,13 +235,24 @@ function safeResolution(value) {
   };
 }
 
-function sanitizeField(field, value) {
+// preference 事件的 name 是开关名（固定两个），不是 URL：只能原样通过这两个值，
+// 其余一律“未提供”。resource 类的 name 才走 URL 清洗。
+const PREFERENCE_NAMES = new Set(Object.values(EXTENSION_PREFERENCES));
+
+function scrubPreferenceName(value) {
+  return typeof value === 'string' && PREFERENCE_NAMES.has(value) ? value : UNKNOWN_VALUE;
+}
+
+function sanitizeField(field, value, code) {
   if (field === 'origin') return scrubOrigin(value);
   if (field === 'pathname' || field === 'streamPath') {
     if (typeof value !== 'string' || !value.startsWith('/')) return UNKNOWN_VALUE;
     return scrubPathname(value);
   }
   if (['bvid', 'part', 'watchLaterItem'].includes(field)) return scrubIdentifier(value);
+  if (field === 'name' && typeof code === 'string' && code.startsWith('preference.')) {
+    return scrubPreferenceName(value);
+  }
   if (field === 'source' || field === 'previousSource' || field === 'name') return scrubUrl(value);
   if (field === 'bufferedRanges' || field === 'seekableRanges'
     || field === 'bufferedBefore' || field === 'bufferedAfter') return safeRangeList(value);
@@ -309,7 +321,7 @@ export function sanitizeEventData(code, data = {}) {
   const result = {};
   for (const field of fields) {
     if (Object.prototype.hasOwnProperty.call(data, field)) {
-      result[field] = sanitizeField(field, data[field]);
+      result[field] = sanitizeField(field, data[field], code);
     }
   }
   return result;
