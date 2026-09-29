@@ -53,7 +53,7 @@ Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome �
 - **120 秒申请状态**：向播放器申请 120 秒缓存的结果，分为已生效 / 等待生效 / 播放器不支持 / 申请失败四种。
 - **下载线路**：本次播放实际用到的每条 CDN 线路（通常两条），每条一个健康词（正常 / 有停滞 / 有错误 / 尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，分别是该线路首字节耗时的 P50 与 P90）。
 - **直播页**同一风格：同样的下载线路卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现直播媒体流）/ 等待直播数据）；直播没有缓冲条。
-- 弹窗只报告它所在窗口的活动标签页，其他窗口的页面不会显示在这里。活动标签页不是 Bilibili 增强页面、或页面上没有在播放的内容：卡片收起，只留一句提示。页面在扩展安装或更新之前就已打开时，旧页面里没有扩展脚本，弹窗会提示刷新这个页面；刷新后增强才会运行。
+- 弹窗只报告它所在窗口的活动标签页，其他窗口的页面不会显示在这里。活动标签页没有运行增强时（不是 Bilibili 页面、页面上没有在播放的内容、或页面在扩展安装或更新之前就已打开而旧页面里没有扩展脚本），卡片收起，只留一句提示；早于扩展存在的页面刷新一次后，增强才会运行。
 
 ![弹窗特写](store/images/popup-video.png)
 
@@ -139,7 +139,7 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 - popup 面向普通观众，只讲三件事：缓冲、下载线路、连接时间。视频页显示一条缓冲条和「已缓冲 N 秒 / 目标 120 秒」，数值是覆盖当前播放点的连续可播放前向秒数（`src/extension/popup.js:62-77`、`src/extension/popup-view.js`、`src/extension/readouts.js`）；下方一行报告向播放器申请 120 秒缓存的结果：已生效、等待生效、播放器不支持，或申请失败（`src/ui/panel.js`、`src/vod/controller.js` 的 `updateStatus`）。
 - popup 的「下载线路」卡片按镜像列出本次播放实际用到的每条 CDN 线路（通常两条），每条给一个健康状况词（正常、有停滞、有错误、尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，来自 `logs:cdn-summary` 的每镜像 TTFB P50/P90）（`src/extension/popup-view.js`、`src/diagnostics/cdn.js`、`src/diagnostics/worker.js`）。线路名是镜像主机名的可读短名。
 - 直播页（live.bilibili.com）同一风格：同样的「下载线路」卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现直播媒体流）/ 等待直播数据），由后台按 session 索引折叠 `bank.serve` 事件得出；直播不设缓冲目标，popup 不显示缓冲条（`src/extension/popup-live.js`、`src/extension/popup-view.js`）。popup 的路由判定优先使用内容侧自报的 `routeKind`，因为 popup 没有 `tabs` 权限、读不到标签页地址（`src/diagnostics/client.js` 的 `getStatus`、`src/extension/readouts.js`）。
-- popup 面板只读，不影响播放、不上传；内容侧错误只在存在时以一句人话显示。面板只报告它所附着窗口的活动标签页（`chrome.windows.getCurrent()` 定位窗口，在该窗口内取活动标签页），不向其余标签页询问；活动标签页没有内容脚本可答时按地址区分：匹配内容脚本 matches 的地址说明页面早于扩展安装或更新打开、旧文档不会补装脚本，提示刷新这个页面后增强才会运行，其余地址只显示一句未运行增强的提示（`src/extension/popup.js`、`src/extension/popup-tabs.js`、`src/extension/popup-view.js`）。popup 底部保留「打开开发日志」入口。日志页开头写明保留期限：日志只保留最近 3 天（72 小时），更早的记录自动删除。
+- popup 面板只读，不影响播放、不上传；内容侧错误只在存在时以一句人话显示。面板只报告它所附着窗口的活动标签页（`chrome.windows.getCurrent()` 定位窗口，在该窗口内取活动标签页），不向其余标签页询问。活动标签页没有内容脚本可答时只显示一句提示：弹窗没有 `tabs` 权限、看不到标签页地址（按 url 过滤也恒为空），分不出「非 Bilibili 页面」与「扩展安装或更新前就已打开的 Bilibili 页面」，两种情况下这句话都成立并给出刷新路径（`src/extension/popup.js`、`src/extension/popup-tabs.js`、`src/extension/popup-view.js`）。popup 底部保留「打开开发日志」入口。日志页开头写明保留期限：日志只保留最近 3 天（72 小时），更早的记录自动删除。
 - 所有 `media.*` 事件都附带同一帧周期聚合的 `frameTiming`，包括 presentedTotal、maxFrameGapMs、processingMs、displayLead、mediaStep 与 append 相关指标（`src/diagnostics/media.js`、`src/diagnostics/privacy.js:195-212`）。这些细节只进开发日志；popup 不再展示 readyState、networkState、轨道 ranges、库存计数或持久化状态等开发读数。
 - 下载层库存只列出本次播放实际参与的分轨（`resourceState` 或 `chunks` 中出现过的资源），不展示地址簿里的所有表示（`src/bank/inventory.js:103-107`）；它作为 `bank.inventory` 诊断事件进入开发日志。
 - 日志页提供 CDN 竞速面板，按镜像统计竞速进入、胜出、TTFB P50/P90、停滞与交付字节，并给出配对覆盖率与浪费字节率（`src/diagnostics/logs.js`、`src/diagnostics/worker.js`）。

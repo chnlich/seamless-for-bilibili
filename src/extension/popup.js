@@ -10,7 +10,7 @@ import {
   savePreferenceChange,
   storedPreferences,
 } from './popup-live.js';
-import { popupAttachedTab, tabOnEnhancementRoute } from './popup-tabs.js';
+import { popupAttachedTab } from './popup-tabs.js';
 import {
   NO_PAGE_MESSAGES,
   applyPageAvailability,
@@ -215,11 +215,11 @@ async function failPanel(message, { error } = {}) {
   showNotice(message);
 }
 
-// 面板只报告它所附着窗口的活动标签页（见 popup-tabs.js）。活动标签页不答
-// （Receiver 缺失）时分两种：地址匹配内容脚本 matches 的页面是扩展安装或更新前
-// 打开的，旧文档没有脚本可答，只能提示刷新后恢复；其余地址统一按未运行增强提示。
-// 不向其余标签页询问：另一个窗口仍在运行的增强与本面板无关，显示它只会被读成对
-// 当前窗口的错误判断（2026-09-28 用户实测误读）。
+// 面板只报告它所附着窗口的活动标签页（见 popup-tabs.js），不向其余标签页询问：
+// 另一个窗口仍在运行的增强与本面板无关，显示它只会被读成对当前窗口的错误判断
+// （2026-09-28 用户实测误读）。活动标签页不答（Receiver 缺失）时统一走未运行提示：
+// 弹窗看不到标签页地址，无法可靠区分「非 Bilibili 页面」与「扩展安装或更新前就已
+// 打开的 Bilibili 页面」，合并成一句对两者都成立的提示（见 popup-view.js）。
 async function refresh() {
   const active = await activeTab();
   const route = routeFor(latestReadouts, active?.url);
@@ -240,12 +240,7 @@ async function refresh() {
     polled = await pollTab(active);
   } catch (error) {
     if (error?.message === RECEIVER_MISSING) {
-      const staysUntilRefresh = await tabOnEnhancementRoute({
-        tabsApi: chrome.tabs,
-        windowId: active.windowId,
-        tabId: active.id,
-      });
-      await failPanel(staysUntilRefresh ? NO_PAGE_MESSAGES.pageNeedsRefresh : NO_PAGE_MESSAGES.noReceiver);
+      await failPanel(NO_PAGE_MESSAGES.noReceiver);
     } else {
       await failPanel(NO_PAGE_MESSAGES.readFailed, { error });
     }

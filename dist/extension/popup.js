@@ -98,19 +98,12 @@
     if (tabs.length !== 1 || !Number.isInteger(tabs[0].id)) return void 0;
     return tabs[0];
   }
-  async function tabOnEnhancementRoute({ tabsApi, windowId, tabId }) {
-    const matches = await tabsApi.query({ url: [...EXTENSION_MANIFEST.matches], windowId });
-    return matches.some((tab) => tab.id === tabId);
-  }
 
   // src/extension/popup-view.js
   var NO_PAGE_MESSAGES = Object.freeze({
     loading: "正在读取页面状态…",
     noTab: "请先打开一个 Bilibili 页面，再打开本面板。",
-    noReceiver: "这个页面没有运行 Bilibili 增强。请打开 Bilibili 的视频或直播页面。",
-    // 页面在扩展安装或更新之前就已打开：旧文档没有扩展脚本可答（更新还会作废旧
-    // 脚本），只有刷新页面后脚本才会注入。如实说刷新，不谎报成不受支持的页面。
-    pageNeedsRefresh: "这个页面在扩展安装或更新之前就已打开；刷新这个页面后，增强才会运行。",
+    noReceiver: "这个页面没有运行 Bilibili 增强。请打开 Bilibili 的视频或直播页面；如果页面在扩展安装或更新之前就已打开，刷新这个页面后增强才会运行。",
     readFailed: "读取页面状态失败，请稍后重开面板。",
     preferenceFailed: "读取设置失败，请稍后重开面板。",
     preferenceSaved: "已保存，刷新页面后生效。"
@@ -435,12 +428,7 @@
       polled = await pollTab(active);
     } catch (error) {
       if (error?.message === RECEIVER_MISSING) {
-        const staysUntilRefresh = await tabOnEnhancementRoute({
-          tabsApi: chrome.tabs,
-          windowId: active.windowId,
-          tabId: active.id
-        });
-        await failPanel(staysUntilRefresh ? NO_PAGE_MESSAGES.pageNeedsRefresh : NO_PAGE_MESSAGES.noReceiver);
+        await failPanel(NO_PAGE_MESSAGES.noReceiver);
       } else {
         await failPanel(NO_PAGE_MESSAGES.readFailed, { error });
       }

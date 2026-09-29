@@ -656,9 +656,10 @@ test('popup never adopts another window\'s enhanced tab when its own active tab 
   });
 });
 
-test('a pre-existing Bilibili page without the content script gets the reload hint', async () => {
-  // 页面在扩展安装或更新前就已打开：旧文档没有内容脚本可答，地址又匹配内容脚本
-  // matches，只能提示刷新，不得谎报成不受支持的页面。
+test('a pre-existing Bilibili page without the content script gets the truthful merged message', async () => {
+  // 页面在扩展安装或更新前就已打开：旧文档没有内容脚本可答。弹窗没有 tabs 权限、
+  // 看不到标签页地址，分不出这种情况与「非 Bilibili 页面」，统一的未运行提示对两种
+  // 情况都成立：说明刷新后增强才会运行，不谎称页面不受支持。
   const behaviors = new Map([[1, 'reject']]);
   const { chrome, calls } = popupChromeMock({
     currentWindowId: 10,
@@ -673,14 +674,9 @@ test('a pre-existing Bilibili page without the content script gets the reload hi
     const document = domWindow.document;
     assert.equal(document.body.dataset.ready, undefined);
     assert.equal(document.querySelector('main').classList.contains('no-page'), true);
-    assert.equal(document.querySelector('[data-notice]').textContent, NO_PAGE_MESSAGES.pageNeedsRefresh);
-    assert.notEqual(document.querySelector('[data-notice]').textContent, NO_PAGE_MESSAGES.noReceiver);
-    // 分类经 url 过滤完成：问过（url + windowId），不读标签页地址字段，也不需要 tabs 权限。
-    assert.equal(
-      calls.queries.some((options) => Array.isArray(options.url) && options.windowId === 10),
-      true,
-      '应当按内容脚本 matches 做 url 过滤分类',
-    );
+    assert.equal(document.querySelector('[data-notice]').textContent, NO_PAGE_MESSAGES.noReceiver);
+    assert.ok(NO_PAGE_MESSAGES.noReceiver.includes('刷新'), '提示必须给出刷新路径');
+    assert.ok(NO_PAGE_MESSAGES.noReceiver.includes('视频或直播'), '提示不得谎称页面不受支持');
   });
 });
 
@@ -699,6 +695,8 @@ test('a non-Bilibili active tab keeps the plain not-running message', async () =
     const document = domWindow.document;
     assert.equal(document.querySelector('main').classList.contains('no-page'), true);
     assert.equal(document.querySelector('[data-notice]').textContent, NO_PAGE_MESSAGES.noReceiver);
+    // 没必要且没有权限做的 url 过滤查询不得出现。
+    assert.equal(calls.queries.some((options) => Array.isArray(options.url)), false);
   });
 });
 

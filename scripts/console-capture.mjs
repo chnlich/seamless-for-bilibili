@@ -81,7 +81,7 @@ function targetRecord(targetId, targetInfo) {
   };
 }
 
-class ChromeCdpTransport {
+export class ChromeCdpTransport {
   constructor(socket) {
     this.socket = socket;
     this.nextId = 0;
@@ -173,7 +173,7 @@ class ChromeCdpTransport {
   }
 }
 
-async function connectToChrome(remoteDebuggingPort) {
+export async function connectToChrome(remoteDebuggingPort) {
   if (!Number.isInteger(remoteDebuggingPort) || remoteDebuggingPort <= 0) {
     throw new Error('remote debugging port is invalid');
   }
