@@ -597,3 +597,44 @@ test('popup does not probe other tabs while the active tab answers', async () =>
     );
   });
 });
+
+test('an in-flight probe never flashes the not-running line on overlapping polls', async () => {
+  const behaviors = new Map([
+    [1, (message) => {
+      if (message.type === 'readouts:get') return liveReadouts();
+      if (message.type === 'status:get') return { version: 2, ok: true, state: '未提供' };
+      throw new Error(`意外消息 ${message.type}`);
+    }],
+    [2, 'reject'],
+  ]);
+  const { chrome } = popupChromeMock({
+    activeTabIds: () => [{ id: 2, active: true }],
+    allTabIds: () => [{ id: 1, lastAccessed: 100 }, { id: 2, active: true, lastAccessed: 200 }],
+    tabBehaviors: behaviors,
+  });
+  // 全标签页探测放慢到 700ms：500ms 轮询会在探测进行中再触发一次。
+  const originalQuery = chrome.tabs.query.bind(chrome.tabs);
+  chrome.tabs.query = async (options) => {
+    const result = await originalQuery(options);
+    if (options.lastFocusedWindow !== true) await new Promise((resolve) => setTimeout(resolve, 700));
+    return result;
+  };
+  const observed = [];
+  await withPopupAssembly(chrome, async (domWindow) => {
+    const deadline = Date.now() + 1600;
+    while (Date.now() < deadline) {
+      observed.push({
+        elapsed: Date.now() % 100000,
+        notice: domWindow.document.querySelector('[data-notice]')?.textContent ?? null,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    await settleMacrotasks();
+  });
+  assert.equal(
+    observed.some((sample) => sample.notice === NO_PAGE_MESSAGES.noReceiver),
+    false,
+    '探测进行中或探测未决时不得显示「没有运行增强」',
+  );
+  assert.equal(observed.at(-1)?.notice, PROBED_TAB_NOTICE);
+});

@@ -217,9 +217,14 @@ function tabRecency(tab) {
   return Number.isFinite(tab.lastAccessed) ? tab.lastAccessed : 0;
 }
 
+// 探测进行中的标记：500ms 轮询不等前一次。探测未决时本拍保持面板现状，
+// 不落进任何提示（避免把「还在问别的标签页」显示成「没有运行增强」）。
+const PROBE_PENDING = Symbol('probe-pending');
+
 async function findEnhancedTab(triedTabIds) {
+  if (probeInFlight) return PROBE_PENDING;
   const cacheUsable = lastProbeResult !== undefined && !triedTabIds.has(lastProbeResult.tab.id);
-  if (probeInFlight || (Date.now() < nextProbeAt && cacheUsable)) return lastProbeResult;
+  if (Date.now() < nextProbeAt && cacheUsable) return lastProbeResult;
   probeInFlight = true;
   try {
     const tabs = await chrome.tabs.query({});
@@ -254,6 +259,7 @@ async function collectPanelState(active) {
   const tried = new Set([active.id]);
   for (;;) {
     const probe = await findEnhancedTab(tried);
+    if (probe === PROBE_PENDING) return PROBE_PENDING;
     if (probe === undefined) return undefined;
     tried.add(probe.tab.id);
     try {
@@ -299,6 +305,7 @@ async function refresh() {
   let polled;
   try {
     const collected = await collectPanelState(active);
+    if (collected === PROBE_PENDING) return;
     if (collected === undefined) {
       // 活动标签页没有运行增强，其他标签页也都查无：按原样提示。
       await failPanel(NO_PAGE_MESSAGES.noReceiver);

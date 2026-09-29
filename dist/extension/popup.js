@@ -399,9 +399,11 @@
   function tabRecency(tab) {
     return Number.isFinite(tab.lastAccessed) ? tab.lastAccessed : 0;
   }
+  var PROBE_PENDING = Symbol("probe-pending");
   async function findEnhancedTab(triedTabIds) {
+    if (probeInFlight) return PROBE_PENDING;
     const cacheUsable = lastProbeResult !== void 0 && !triedTabIds.has(lastProbeResult.tab.id);
-    if (probeInFlight || Date.now() < nextProbeAt && cacheUsable) return lastProbeResult;
+    if (Date.now() < nextProbeAt && cacheUsable) return lastProbeResult;
     probeInFlight = true;
     try {
       const tabs = await chrome.tabs.query({});
@@ -431,6 +433,7 @@
     const tried = /* @__PURE__ */ new Set([active.id]);
     for (; ; ) {
       const probe = await findEnhancedTab(tried);
+      if (probe === PROBE_PENDING) return PROBE_PENDING;
       if (probe === void 0) return void 0;
       tried.add(probe.tab.id);
       try {
@@ -474,6 +477,7 @@
     let polled;
     try {
       const collected = await collectPanelState(active);
+      if (collected === PROBE_PENDING) return;
       if (collected === void 0) {
         await failPanel(NO_PAGE_MESSAGES.noReceiver);
         return;
