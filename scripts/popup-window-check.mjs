@@ -1023,6 +1023,74 @@ async function runNoMediaPagePack() {
     );
     markScenario('同一标签页导航到视频页：面板跟随，收起无媒体提示');
 
+    // 站内单页导航（同文档 pushState，不重载页面，真实站最普遍的走法）：内容侧路由轮询
+    // 发现地址变化后旧记录结束、新记录开始；全程开着的弹窗保持如实视频布局，不闪「未运行」。
+    const sessionProbe = () => driver.evaluate(launcher, `(async () => {
+      try {
+        const response = await chrome.tabs.sendMessage(${world.homeTabId}, { version: ${STATUS_MESSAGE_VERSION}, type: 'diagnostics:session-id:get' });
+        return response.sessionId ?? null;
+      } catch (error) {
+        return null;
+      }
+    })()`);
+    const sessionBefore = await waitForState(
+      sessionProbe,
+      (value) => typeof value === 'string' ? true : `session ${JSON.stringify(value)}`,
+      { what: 'content-side session on the video page before the in-page navigation' },
+    );
+    await driver.evaluate(homeSession, `history.pushState({}, '', '/video/BVwin-check-spa/')`);
+    const sessionAfter = await waitForState(
+      sessionProbe,
+      (value) => typeof value === 'string' && value !== sessionBefore ? true : `session ${JSON.stringify(value)}`,
+      { what: 'content-side session rotation after the in-page navigation' },
+    );
+    await probeRoute('video');
+    const spaShown = await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
+        && state.livePanelHidden === true
+        && state.bufferCardHidden === false
+        && state.bufferNoteHidden === true
+        && state.cdnCard === cdnEmptyMessage
+        ? true
+        : 'expected the popup to stay truthful across the in-page navigation',
+      { what: 'open popup across an in-page (pushState) navigation between video pages' },
+    );
+    assert.equal(spaShown.ownActiveTabIds[0], world.homeTabId, JSON.stringify(spaShown));
+    markScenario('站内单页导航到另一视频地址（同文档不重载）：内容侧换新记录，弹窗如实跟随不闪未运行');
+
+    // 弹窗的「打开开发日志」在点击时重新询问内容侧：换记录之后入口指向新 session。
+    await driver.evaluate(popupSession, `document.querySelector('[data-open-logs]').click()`);
+    const [spaLogsTarget] = await waitForState(
+      async () => (await driver.targets())
+        .filter((info) => info.type === 'page' && info.url.startsWith(`${logsPagePrefix}#sessionId=`)),
+      (candidates) => candidates.length === 1 ? true : `expected 1 popup-opened logs page, got ${candidates.length}`,
+      { what: 'popup-opened logs page after the in-page navigation' },
+    );
+    assert.equal(spaLogsTarget.url, `${logsPagePrefix}#sessionId=${sessionAfter}`,
+      '弹窗的日志入口必须指向单页导航后的新记录');
+    markScenario('单页导航换新记录后：弹窗日志入口指向新 session');
+
+    // 关掉弹出的日志页，活动标签页回到视频页，弹窗面板恢复。
+    await driver.evaluate(launcher, `(async () => {
+      const me = await chrome.tabs.getCurrent();
+      const active = await chrome.tabs.query({ active: true, windowId: me.windowId });
+      if (active.length !== 1 || active[0].id === me.id
+        || active[0].id === ${world.homeTabId} || active[0].id === ${world.popupTabId}) {
+        throw new Error('expected the popup-opened logs page to be the only active tab');
+      }
+      await chrome.tabs.remove(active[0].id);
+      await chrome.tabs.update(${world.homeTabId}, { active: true });
+    })()`);
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
+        && state.livePanelHidden === true && state.bufferCardHidden === false
+        ? true
+        : `expected the popup to recover after its logs page was closed`,
+      { what: 'popup recovery after the popup-opened logs page closes' },
+    );
+
     // 同一标签页导航到直播页：切直播布局，如实报等待直播数据。
     await driver.send('Page.navigate', { url: LIVE_URL }, homeSession);
     await probeRoute('live');
