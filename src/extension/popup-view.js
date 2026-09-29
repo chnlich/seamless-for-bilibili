@@ -7,6 +7,16 @@
 // 安装或更新前就已打开」，所以这一句必须对两种情况都成立：给出未运行的事实、
 // 打开视频或直播页的建议，以及早于扩展存在的页面需要刷新一次的事实，不谎称
 // 页面不受支持（2026-09-28 用户实测：刷新提示被谎报覆盖过）。
+// 开关关闭时的面板措辞集中在这里（popup.js、检查脚本与单测共用）。
+// 视频目标行换成「开关：已关闭」：申请措辞只在开关开着时成立；
+// 直播接管行在没有接管事实时直说开关已关闭，不再停在「等待直播数据」
+// （开关关闭时接管按设计永不介入，再报等待就是让面板空等）。
+export const SWITCH_OFF_TEXT = Object.freeze({
+  videoLabel: '视频增强开关',
+  videoOffValue: '已关闭',
+  liveOff: '直播增强开关已关闭',
+});
+
 export const NO_PAGE_MESSAGES = Object.freeze({
   loading: '正在读取页面状态…',
   noTab: '请先打开一个 Bilibili 页面，再打开本面板。',
@@ -56,7 +66,7 @@ export function targetStateText({ hasVideo, stateLabel, enhancementEnabled }) {
   if (hasVideo !== true) return '';
   const mapped = TARGET_STATE_WORDS[stateLabel];
   if (mapped !== undefined) return mapped;
-  return enhancementEnabled === false ? '增强开关已关闭' : '等待增强启动';
+  return enhancementEnabled === false ? SWITCH_OFF_TEXT.videoOffValue : '等待增强启动';
 }
 
 // 没有内容脚本可问的页面上，卡片整体收起，只留一句友好提示。
@@ -82,6 +92,8 @@ export function renderVideoPanel(
   { forwardSeconds, snapshot, enhancementEnabled, targetSeconds },
 ) {
   const hasVideo = Number.isFinite(forwardSeconds);
+  // 开关关闭时从未向播放器申请缓存目标，申请措辞与目标后缀一起收起，
+  // 只保留观测事实（缓冲数字是播放器自己的缓冲，仍然成立）。
   renderBuffer(documentObject, refs, {
     forwardSeconds,
     targetSeconds,
@@ -90,21 +102,24 @@ export function renderVideoPanel(
       stateLabel: snapshot?.state,
       enhancementEnabled,
     }),
-    targetLabel: `已向播放器申请 ${targetSeconds} 秒缓存`,
+    targetLabel: enhancementEnabled === false
+      ? SWITCH_OFF_TEXT.videoLabel
+      : `已向播放器申请 ${targetSeconds} 秒缓存`,
+    goalSuffix: enhancementEnabled === false ? '' : undefined,
   });
   const error = surfaceErrorText(snapshot);
   refs.errorLine.hidden = error === undefined;
   refs.errorLine.textContent = error ?? '';
 }
 
-export function renderLiveTakeover(refs, { facts, error } = {}) {
-  refs.takeover.textContent = error !== undefined ? '直播状态读取失败' : liveTakeoverText(facts);
+export function renderLiveTakeover(refs, { facts, error, liveEnabled } = {}) {
+  refs.takeover.textContent = error !== undefined ? '直播状态读取失败' : liveTakeoverText(facts, { liveEnabled });
 }
 
 export function renderBuffer(
   documentObject,
   refs,
-  { forwardSeconds, targetSeconds, stateText, targetLabel },
+  { forwardSeconds, targetSeconds, stateText, targetLabel, goalSuffix },
 ) {
   const hasVideo = Number.isFinite(forwardSeconds) && Number.isFinite(targetSeconds) && targetSeconds > 0;
   if (hasVideo) {
@@ -112,7 +127,7 @@ export function renderBuffer(
     refs.fill.style.width = `${percent}%`;
     refs.bar.classList.toggle('reached', forwardSeconds >= targetSeconds);
     refs.seconds.textContent = `${Math.round(forwardSeconds)} 秒`;
-    refs.goal.textContent = `/ 目标 ${Math.round(targetSeconds)} 秒`;
+    refs.goal.textContent = goalSuffix ?? `/ 目标 ${Math.round(targetSeconds)} 秒`;
     refs.note.hidden = true;
     refs.note.textContent = '';
   } else {
@@ -159,14 +174,19 @@ export function renderCdnLines(documentObject, container, { rows, message } = {}
   container.append(empty);
 }
 
-export function liveTakeoverText(facts) {
-  if (!facts || facts.serveCount === 0) return '等待直播数据';
-  if (facts.engagement === 'engaged') {
-    if (facts.pairedAddressAvailable && !facts.pairRejected) return '正在按两条线路竞速下载';
-    // 未配到备用线路，或备用线路前缀比对不一致被撤销，都只剩播放器所名的一路。
-    return '单路接管（无可用备用线路）';
+export function liveTakeoverText(facts, { liveEnabled } = {}) {
+  if (facts && facts.serveCount > 0) {
+    if (facts.engagement === 'engaged') {
+      if (facts.pairedAddressAvailable && !facts.pairRejected) return '正在按两条线路竞速下载';
+      // 未配到备用线路，或备用线路前缀比对不一致被撤销，都只剩播放器所名的一路。
+      return '单路接管（无可用备用线路）';
+    }
+    if (facts.engagement === 'failed') return '接管请求失败';
+    // 只有放行事件（例如播放器未使用直播媒体流）时，接管从未介入，不能谎报成接管。
+    return '未接管（未发现直播媒体流）';
   }
-  if (facts.engagement === 'failed') return '接管请求失败';
-  // 只有放行事件（例如播放器未使用直播媒体流）时，接管从未介入，不能谎报成接管。
-  return '未接管（未发现直播媒体流）';
+  // 没有任何接管事实：开关关闭就是接管不介入的原因（让路规则不产生 bank.serve），
+  // 直说开关；开关开着时才有可能等到数据。
+  if (liveEnabled === false) return SWITCH_OFF_TEXT.liveOff;
+  return '等待直播数据';
 }

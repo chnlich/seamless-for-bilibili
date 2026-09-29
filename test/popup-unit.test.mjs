@@ -17,6 +17,7 @@ import {
 } from '../src/extension/popup-live.js';
 import {
   NO_PAGE_MESSAGES,
+  SWITCH_OFF_TEXT,
   applyPageAvailability,
   cdnLinesView,
   connectionText,
@@ -233,7 +234,7 @@ test('target state words cover applied, waiting, unsupported, failed, and toggle
   assert.equal(targetStateText({ hasVideo: true, stateLabel: '等待', enhancementEnabled: true }), '等待生效');
   assert.equal(targetStateText({ hasVideo: true, stateLabel: '不支持', enhancementEnabled: true }), '播放器不支持，未生效');
   assert.equal(targetStateText({ hasVideo: true, stateLabel: '失败', enhancementEnabled: true }), '申请失败');
-  assert.equal(targetStateText({ hasVideo: true, stateLabel: '未提供', enhancementEnabled: false }), '增强开关已关闭');
+  assert.equal(targetStateText({ hasVideo: true, stateLabel: '未提供', enhancementEnabled: false }), SWITCH_OFF_TEXT.videoOffValue);
   assert.equal(targetStateText({ hasVideo: true, stateLabel: '未提供', enhancementEnabled: true }), '等待增强启动');
   assert.equal(targetStateText({ hasVideo: false, stateLabel: '失败', enhancementEnabled: true }), '');
 });
@@ -256,6 +257,38 @@ test('video panel shows an error only when the page reported one', () => {
   });
   assert.equal(refs.errorLine.hidden, false);
   assert.equal(refs.errorLine.textContent, '原生缓存提示调用失败');
+});
+
+test('video panel with the switch off states the switch instead of claiming a buffer request', () => {
+  // 开关关闭时从未向播放器申请缓存目标：目标后缀与「已向播放器申请」措辞一起收起，
+  // 缓冲数字仍是观测事实（播放器自己的缓冲），只去掉关于扩展行为的假陈述。
+  const document = popupDocument();
+  const refs = popupRefs(document);
+  renderVideoPanel(document, refs, {
+    forwardSeconds: 30,
+    snapshot: { state: '未提供', error: '未提供' },
+    enhancementEnabled: false,
+    targetSeconds: 120,
+  });
+  assert.equal(refs.stateLine.hidden, false);
+  assert.equal(refs.targetLabel.textContent, SWITCH_OFF_TEXT.videoLabel);
+  assert.equal(refs.targetValue.textContent, SWITCH_OFF_TEXT.videoOffValue);
+  assert.equal(refs.seconds.textContent, '30 秒');
+  assert.equal(refs.goal.textContent, '');
+});
+
+test('video panel with the switch on keeps the request label and goal suffix', () => {
+  const document = popupDocument();
+  const refs = popupRefs(document);
+  renderVideoPanel(document, refs, {
+    forwardSeconds: 30,
+    snapshot: { state: '已应用', error: '未提供' },
+    enhancementEnabled: true,
+    targetSeconds: 120,
+  });
+  assert.equal(refs.targetLabel.textContent, '已向播放器申请 120 秒缓存');
+  assert.equal(refs.targetValue.textContent, '已生效');
+  assert.equal(refs.goal.textContent, '/ 目标 120 秒');
 });
 
 test('surface error text ignores placeholders and empty messages', () => {
@@ -354,6 +387,23 @@ test('live takeover wording covers racing, single line, failure, pass-through, a
   assert.equal(liveTakeoverText(undefined), '等待直播数据');
 });
 
+test('live takeover with the switch off and no takeover facts states the switch instead of waiting', () => {
+  // 开关关闭时接管按设计永不介入（README 下载层让路规则不产生 bank.serve）：
+  // 再说「等待直播数据」就是让面板空等，直说开关已关闭。
+  assert.equal(liveTakeoverText(emptyLiveFacts(), { liveEnabled: false }), SWITCH_OFF_TEXT.liveOff);
+  assert.equal(liveTakeoverText(undefined, { liveEnabled: false }), SWITCH_OFF_TEXT.liveOff);
+  assert.equal(liveTakeoverText(emptyLiveFacts(), { liveEnabled: true }), '等待直播数据');
+});
+
+test('live takeover facts win over a switch-off that has not been refreshed yet', () => {
+  // 改动在刷新页面后生效：刷新前接管仍在运行，面板继续报接管事实，不抢戏报开关。
+  const facts = emptyLiveFacts();
+  foldLiveEvents(facts, [
+    { code: 'bank.serve', data: { result: 'hit', reason: 'live_stream', pairedAddressAvailable: true } },
+  ]);
+  assert.equal(liveTakeoverText(facts, { liveEnabled: false }), '正在按两条线路竞速下载');
+});
+
 test('hls segment takeover folds through the same live facts as the flv stream', () => {
   const racing = emptyLiveFacts();
   foldLiveEvents(racing, [
@@ -398,6 +448,8 @@ test('live takeover renders the plain line and degrades on read errors', () => {
   assert.equal(refs.takeover.textContent, '正在按两条线路竞速下载');
   renderLiveTakeover(refs, { facts: emptyLiveFacts(), error: '日志分页没有向前推进' });
   assert.equal(refs.takeover.textContent, '直播状态读取失败');
+  renderLiveTakeover(refs, { facts: emptyLiveFacts(), liveEnabled: false });
+  assert.equal(refs.takeover.textContent, SWITCH_OFF_TEXT.liveOff);
 });
 
 test('pages without the content script collapse the cards down to one friendly line', () => {

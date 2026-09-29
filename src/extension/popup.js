@@ -48,6 +48,7 @@ const inputs = new Map(
 
 let popupRoute = POPUP_ROUTE.VIDEO;
 let enhancementEnabled = true;
+let liveEnabled = true;
 let latestReadouts;
 let latestSnapshot;
 let latestForwardSeconds;
@@ -83,7 +84,7 @@ function renderRacePanel() {
 }
 
 function renderLivePanel() {
-  renderLiveTakeover(liveRefs, { facts: liveFacts, error: liveError });
+  renderLiveTakeover(liveRefs, { facts: liveFacts, error: liveError, liveEnabled });
 }
 
 function renderAll() {
@@ -271,6 +272,7 @@ async function loadPreferences() {
   const stored = storedPreferences(values);
   for (const name of PREFERENCES) inputs.get(name).checked = stored[name];
   enhancementEnabled = stored[EXTENSION_PREFERENCES.vodEnabled];
+  liveEnabled = stored[EXTENSION_PREFERENCES.liveEnabled];
 }
 
 for (const name of PREFERENCES) {
@@ -286,6 +288,10 @@ for (const name of PREFERENCES) {
     if (affectsVideoPanel) {
       enhancementEnabled = checked;
       renderVideoPanel();
+    }
+    if (name === EXTENSION_PREFERENCES.liveEnabled) {
+      liveEnabled = checked;
+      renderLivePanel();
     }
     showNotice(NO_PAGE_MESSAGES.preferenceSaved);
   });

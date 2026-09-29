@@ -4,7 +4,9 @@
 // 所在窗口，而弹窗开在视频页所在窗口，断言弹窗只报告自己窗口的活动标签页。
 // 同时覆盖：非 Bilibili 活动标签页、扩展更新后打开弹窗、页面早于扩展安装打开；
 // 这三种没有内容脚本可答的情形共享同一句如实提示（弹窗没有 tabs 权限、看不到地址，
-// 无法区分三者，提示对三者都成立并给出刷新路径）。
+// 无法区分三者，提示对三者都成立并给出刷新路径）。第三组覆盖两个开关：默认开启、
+// 拨动后的保存提示、关闭并刷新页面后面板如实报开关已关闭（直播不空等数据、视频不
+// 谎称申请过缓存目标）、拨回并刷新后面板恢复。
 //
 //   node scripts/popup-window-check.mjs      （Windows；系统 Chrome 由 BILIBILI_E2E_CHROME 指定）
 //
@@ -22,8 +24,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectToChrome } from './console-capture.mjs';
 import { readProvenance } from './provenance.mjs';
-import { NO_PAGE_MESSAGES } from '../src/extension/popup-view.js';
+import { NO_PAGE_MESSAGES, SWITCH_OFF_TEXT } from '../src/extension/popup-view.js';
 import { STATUS_MESSAGE_VERSION } from '../src/ui/panel.js';
+import { VOD_CONFIG } from '../src/constants.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extensionDirectory = path.join(root, 'dist', 'extension');
@@ -35,7 +38,7 @@ if (chromeExecutablePath === undefined || chromeExecutablePath.length === 0) {
 const VIDEO_URL = 'https://www.bilibili.com/video/BVwin-check/';
 const LIVE_URL = 'https://live.bilibili.com/6-win-check';
 const OTHER_URL = 'https://example.com/popup-window-check';
-const FIXTURE_HTML = (kind) => `<!doctype html><html><head><meta charset="utf-8"><title>win-check ${kind}</title></head><body>popup-window-check ${kind} fixture</body></html>`;
+const FIXTURE_HTML = (kind) => `<!doctype html><html><head><meta charset="utf-8"><title>win-check ${kind}</title></head><body>${kind === 'video' ? '<video id="v" muted playsinline></video>' : ''}popup-window-check ${kind} fixture</body></html>`;
 
 const scenarios = [];
 const markScenario = (name) => {
@@ -213,13 +216,27 @@ const POPUP_STATE_EXPRESSION = `(async () => {
     ownActiveTabIds: ownActive.map((tab) => tab.id),
     lastFocusedTabIds: lastFocused.map((tab) => tab.id),
     switches: document.querySelectorAll('input[data-preference]').length,
+    switchStates: Object.fromEntries([...document.querySelectorAll('input[data-preference]')].map((input) => [input.dataset.preference, input.checked])),
     ready: document.body.dataset.ready ?? null,
     noPage: q('main').classList.contains('no-page'),
     notice: q('[data-notice]').textContent,
     livePanelHidden: q('[data-live-panel]').hidden,
     bufferCardHidden: q('[aria-label="缓冲"]').hidden,
+    takeover: q('[data-live-takeover]').textContent,
+    stateLineHidden: q('[data-status-field="state"]').hidden,
+    targetLabel: q('[data-buffer-target-label]').textContent,
+    targetValue: q('[data-target-value]').textContent,
+    bufferSeconds: q('[data-buffer-seconds]').textContent,
+    bufferGoal: q('[data-buffer-goal]').textContent,
   };
 })()`;
+
+async function reloadPageByUrl(driver, url) {
+  const target = await driver.findPageByUrl(url);
+  const sessionId = await driver.attach(target.targetId);
+  await driver.send('Page.enable', {}, sessionId);
+  await driver.send('Page.reload', {}, sessionId);
+}
 
 async function popupStateReader(driver, popupUrl) {
   const target = await driver.findPageByUrl(popupUrl);
@@ -437,6 +454,130 @@ async function runPreExistingPagePack() {
   }
 }
 
+// 第三组：两个开关的用户场景（全新 profile = 首次安装状态）。同一窗口里视频页、
+// 直播页与后台弹窗并存，切活动标签页改变弹窗的报告对象；开关在弹窗 DOM 上点击，
+// 与真实用户同一入口，之后走 CDP 刷新页面（开关改动在刷新后生效）。
+async function runSwitchPack() {
+  const { driver, cleanup } = await setupBrowser('popup-window-check-b-');
+  try {
+    const { id: extensionId } = await driver.send('Extensions.loadUnpacked', { path: extensionDirectory });
+    const popupUrl = `chrome-extension://${extensionId}/popup.html`;
+    const launcher = await openLauncher(driver, extensionId);
+    const world = await driver.evaluate(launcher, `(async () => {
+      const me = await chrome.tabs.getCurrent();
+      const videoTab = await chrome.tabs.create({ url: ${JSON.stringify(VIDEO_URL)}, windowId: me.windowId, active: false });
+      const liveTab = await chrome.tabs.create({ url: ${JSON.stringify(LIVE_URL)}, windowId: me.windowId, active: false });
+      const popupTab = await chrome.tabs.create({ url: ${JSON.stringify(popupUrl)}, windowId: me.windowId, active: false });
+      await chrome.tabs.update(videoTab.id, { active: true });
+      const readout = async (tabId) => {
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          try {
+            const response = await chrome.tabs.sendMessage(tabId, { version: ${STATUS_MESSAGE_VERSION}, type: 'readouts:get' });
+            return response.routeKind ?? null;
+          } catch (error) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+        }
+        throw new Error(\`content script never answered readouts for tab \${tabId}\`);
+      };
+      const videoKind = await readout(videoTab.id);
+      const liveKind = await readout(liveTab.id);
+      return { windowId: me.windowId, videoTabId: videoTab.id, liveTabId: liveTab.id, popupTabId: popupTab.id, videoKind, liveKind };
+    })()`);
+    assert.equal(world.videoKind, 'video', JSON.stringify(world));
+    assert.equal(world.liveKind, 'live', JSON.stringify(world));
+    console.log('switch world:', JSON.stringify(world));
+
+    const readState = await popupStateReader(driver, popupUrl);
+    const popupTarget = await driver.findPageByUrl(popupUrl);
+    const popupSession = await driver.attach(popupTarget.targetId);
+    const flipSwitch = async (name) => {
+      await driver.evaluate(popupSession, `document.querySelector('input[data-preference="${name}"]').click()`);
+    };
+    const activate = async (tabId) => {
+      await driver.evaluate(launcher, `chrome.tabs.update(${tabId}, { active: true })`);
+    };
+
+    const readyVideo = await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.noPage === false && state.bufferCardHidden === false,
+      { what: 'popup on the video fixture after first install' },
+    );
+    assert.deepEqual(readyVideo.switchStates, { vodEnabled: true, liveEnabled: true });
+    markScenario('首次安装：两个开关默认开启，面板正常显示');
+
+    await flipSwitch('liveEnabled');
+    await waitForState(
+      readState,
+      (state) => state.switchStates.liveEnabled === false,
+      { what: 'live switch toggle persisted' },
+    );
+    markScenario('拨动直播开关：开关状态写入存储');
+
+    await reloadPageByUrl(driver, LIVE_URL);
+    await activate(world.liveTabId);
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.livePanelHidden === false && state.takeover === SWITCH_OFF_TEXT.liveOff
+        ? true
+        : 'expected the takeover line to state the off switch instead of waiting for data',
+      { what: 'live takeover line with the live switch off' },
+    );
+    markScenario('关闭直播增强并刷新页面后：接管行直说开关已关闭，不再空报等待直播数据');
+
+    await flipSwitch('vodEnabled');
+    await waitForState(
+      readState,
+      (state) => state.switchStates.vodEnabled === false,
+      { what: 'video switch toggle persisted' },
+    );
+    markScenario('拨动视频开关：开关状态写入存储');
+
+    await reloadPageByUrl(driver, VIDEO_URL);
+    await activate(world.videoTabId);
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.bufferCardHidden === false
+        && state.stateLineHidden === false
+        && state.targetLabel === SWITCH_OFF_TEXT.videoLabel
+        && state.targetValue === SWITCH_OFF_TEXT.videoOffValue
+        && state.bufferGoal === ''
+        ? true
+        : 'expected the switch-off state line without a claimed buffer target',
+      { what: 'video panel with the video switch off' },
+    );
+    markScenario('关闭视频增强并刷新页面后：状态行只报开关已关闭，不再谎称已申请缓存目标');
+
+    await flipSwitch('liveEnabled');
+    await flipSwitch('vodEnabled');
+    await reloadPageByUrl(driver, VIDEO_URL);
+    await activate(world.videoTabId);
+    const goalText = `/ 目标 ${VOD_CONFIG.stableBufferSeconds} 秒`;
+    const requestLabel = `已向播放器申请 ${VOD_CONFIG.stableBufferSeconds} 秒缓存`;
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.bufferCardHidden === false
+        && state.targetLabel === requestLabel
+        && state.bufferGoal === goalText
+        ? true
+        : 'expected the request label and goal to come back',
+      { what: 'video panel after switching back on' },
+    );
+    await reloadPageByUrl(driver, LIVE_URL);
+    await activate(world.liveTabId);
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.livePanelHidden === false && state.takeover === '等待直播数据'
+        ? true
+        : 'expected the takeover line back to waiting for live data',
+      { what: 'live takeover line after switching back on' },
+    );
+    markScenario('两个开关拨回开启并刷新页面后：面板恢复申请措辞与等待直播数据');
+  } finally {
+    await cleanup();
+  }
+}
+
 const provenance = await readProvenance();
 const commitSha = process.env.BILIBILI_E2E_COMMIT_SHA ?? provenance.commitSha ?? provenance.commitShaReason ?? 'unknown';
 console.log('popup window check provenance:', JSON.stringify({
@@ -448,6 +589,7 @@ console.log('popup window check provenance:', JSON.stringify({
 
 await runMultiWindowPack();
 await runPreExistingPagePack();
+await runSwitchPack();
 
 console.log(`popup window check passed: ${scenarios.length} scenarios`);
 for (const scenario of scenarios) console.log(`- ${scenario}`);

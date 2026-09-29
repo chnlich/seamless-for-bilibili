@@ -178,8 +178,8 @@
     refs.errorLine.hidden = error === void 0;
     refs.errorLine.textContent = error ?? "";
   }
-  function renderLiveTakeover(refs, { facts, error, liveEnabled } = {}) {
-    refs.takeover.textContent = error !== void 0 ? "直播状态读取失败" : liveTakeoverText(facts, { liveEnabled });
+  function renderLiveTakeover(refs, { facts, error, liveEnabled: liveEnabled2 } = {}) {
+    refs.takeover.textContent = error !== void 0 ? "直播状态读取失败" : liveTakeoverText(facts, { liveEnabled: liveEnabled2 });
   }
   function renderBuffer(documentObject, refs, { forwardSeconds, targetSeconds, stateText, targetLabel, goalSuffix }) {
     const hasVideo = Number.isFinite(forwardSeconds) && Number.isFinite(targetSeconds) && targetSeconds > 0;
@@ -233,7 +233,7 @@
     empty.textContent = message === void 0 || message === "" ? "还没有线路数据" : message;
     container.append(empty);
   }
-  function liveTakeoverText(facts, { liveEnabled } = {}) {
+  function liveTakeoverText(facts, { liveEnabled: liveEnabled2 } = {}) {
     if (facts && facts.serveCount > 0) {
       if (facts.engagement === "engaged") {
         if (facts.pairedAddressAvailable && !facts.pairRejected) return "正在按两条线路竞速下载";
@@ -242,7 +242,7 @@
       if (facts.engagement === "failed") return "接管请求失败";
       return "未接管（未发现直播媒体流）";
     }
-    if (liveEnabled === false) return SWITCH_OFF_TEXT.liveOff;
+    if (liveEnabled2 === false) return SWITCH_OFF_TEXT.liveOff;
     return "等待直播数据";
   }
 
@@ -273,6 +273,7 @@
   );
   var popupRoute = POPUP_ROUTE.VIDEO;
   var enhancementEnabled = true;
+  var liveEnabled = true;
   var latestReadouts;
   var latestSnapshot;
   var latestForwardSeconds;
@@ -304,7 +305,7 @@
     renderCdnLines(document, cdnLinesElement, cdnLinesView(raceSummary, raceError, raceQueryInFlight));
   }
   function renderLivePanel() {
-    renderLiveTakeover(liveRefs, { facts: liveFacts, error: liveError });
+    renderLiveTakeover(liveRefs, { facts: liveFacts, error: liveError, liveEnabled });
   }
   function renderAll() {
     applyPageAvailability(document, !pageUnavailable);
@@ -465,6 +466,7 @@
     const stored = storedPreferences(values);
     for (const name of PREFERENCES) inputs.get(name).checked = stored[name];
     enhancementEnabled = stored[EXTENSION_PREFERENCES.vodEnabled];
+    liveEnabled = stored[EXTENSION_PREFERENCES.liveEnabled];
   }
   for (const name of PREFERENCES) {
     inputs.get(name).addEventListener("change", async (event) => {
@@ -477,6 +479,10 @@
       if (affectsVideoPanel) {
         enhancementEnabled = checked;
         renderVideoPanel2();
+      }
+      if (name === EXTENSION_PREFERENCES.liveEnabled) {
+        liveEnabled = checked;
+        renderLivePanel();
       }
       showNotice(NO_PAGE_MESSAGES.preferenceSaved);
     });
