@@ -638,3 +638,40 @@ test('an in-flight probe never flashes the not-running line on overlapping polls
   );
   assert.equal(observed.at(-1)?.notice, PROBED_TAB_NOTICE);
 });
+
+test('video popup feeds the status:get snapshot to the target-state line', async () => {
+  // 回归锚：status:get 拿到的 snapshot 必须进入 video 面板的申请状态行
+  // （一度在面板装配里取回但未接上，状态行永远停在「等待增强启动」）。
+  const behaviors = new Map([
+    [1, (message) => {
+      if (message.type === 'readouts:get') {
+        return {
+          version: 2,
+          routeKind: 'video',
+          forwardSeconds: 80,
+          diagnostics: { sessionId: 'session-video-1' },
+        };
+      }
+      if (message.type === 'status:get') return { version: 2, ok: true, state: '已应用', error: '未提供' };
+      if (message.type === 'diagnostics:session-id:get') return { version: 2, ok: true, sessionId: 'session-video-1' };
+      throw new Error(`意外消息 ${message.type}`);
+    }],
+  ]);
+  const { chrome, calls } = popupChromeMock({
+    activeTabIds: () => [{ id: 1, active: true }],
+    allTabIds: () => [{ id: 1, active: true }],
+    tabBehaviors: behaviors,
+  });
+  await withPopupAssembly(chrome, async (domWindow) => {
+    await settleMacrotasks();
+    const document = domWindow.document;
+    assert.equal(document.body.dataset.ready, 'true');
+    assert.equal(document.querySelector('[data-target-value]').textContent, '已生效');
+    assert.equal(document.querySelector('[data-status-field="state"]').hidden, false);
+    assert.equal(document.querySelector('[data-status-field="error"]').hidden, true);
+    assert.deepEqual(
+      calls.tabMessages.filter((call) => call.type === 'status:get').map((call) => call.tabId),
+      [1],
+    );
+  });
+});

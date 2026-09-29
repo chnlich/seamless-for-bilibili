@@ -489,6 +489,7 @@
       return;
     }
     latestReadouts = polled.readouts;
+    latestSnapshot = polled.snapshot;
     latestForwardSeconds = Number.isFinite(polled.readouts?.forwardSeconds) ? polled.readouts.forwardSeconds : void 0;
     sessionId = polled.readouts?.diagnostics?.sessionId;
     panelTabId = sourceTab.id;

@@ -318,6 +318,7 @@ async function refresh() {
     return;
   }
   latestReadouts = polled.readouts;
+  latestSnapshot = polled.snapshot;
   latestForwardSeconds = Number.isFinite(polled.readouts?.forwardSeconds)
     ? polled.readouts.forwardSeconds
     : undefined;
