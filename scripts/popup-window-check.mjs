@@ -31,6 +31,14 @@
 // headless，Extensions.loadUnpacked 同源重载）：重载会把扩展自己的页面全部关掉，
 // 更新前打开的日志页标签随之消失，没有失效页面留下来说错话；内容标签页保留。
 // 本组断言这个关闭行为、内容页的保留，以及重开后日志页读同一 session 照常成功。
+// 第九组覆盖直播接管产生真实 bank.serve 事实之后的弹窗填数态（商店截图
+// popup-live.png 的同款面板区，此前只被真实站点截图看过、从未在浏览器里断言）：
+// 双镜像竞速、单路接管、只拉播放列表的未接管、镜像全灭的接管失败，四种结局的
+// 接管行与线路卡镜像行填数都要如实。竞速场景用生产版内嵌 playinfo blob
+// （__NEPTUNE_IS_MY_WAIFU__，serveLiveSegment 配对查找 miss 时的兜底读取路径）
+// 给出双镜像地址，首段身份门整体比对后放开竞速；失败场景两个镜像都答 502。
+// 断言的期望值一律从 src 的既有导出（liveTakeoverText、cdnLinesView、
+// shortMirrorName）推导，失败场景页面控制台的如实报错充当阳性对照。
 //
 //   node scripts/popup-window-check.mjs      （Windows；系统 Chrome 由 BILIBILI_E2E_CHROME 指定）
 //
@@ -49,7 +57,7 @@ import { fileURLToPath } from 'node:url';
 import { connectToChrome } from './console-capture.mjs';
 import { readProvenance } from './provenance.mjs';
 import {
-  NO_PAGE_MESSAGES, SWITCH_OFF_TEXT, cdnLinesView, liveTakeoverText,
+  NO_PAGE_MESSAGES, SWITCH_OFF_TEXT, cdnLinesView, liveTakeoverText, shortMirrorName,
 } from '../src/extension/popup-view.js';
 import { emptyLiveFacts } from '../src/extension/popup-live.js';
 import { CDN_RANGE_MESSAGES } from '../src/diagnostics/logs-view.js';
@@ -99,6 +107,86 @@ const UPDATE_FIXTURE_HTML = `<!doctype html><html><head><meta charset="utf-8"><t
   setInterval(pullOnce, 100);
   window.player = { __core() { return { setStableBufferTime() {} }; } };
 </script></body></html>`;
+// 第九组的直播接管填数场景：四个房间四种接管结局，两个镜像主机由固定写法承担
+// （e2e-live 与 e2e-live-b）。竞速与失败场景靠内嵌 playinfo blob 走生产版地址簿路径，
+// url_info 组的 base_url 挂在 codec 层（详见 src/bank/live.js urlFromLiveUrlInfo）。
+const LIVE_RACE_URL = 'https://live.bilibili.com/7-race-win-check';
+const LIVE_SINGLE_URL = 'https://live.bilibili.com/7-single-win-check';
+const LIVE_PLAYLIST_URL = 'https://live.bilibili.com/7-playlist-win-check';
+const LIVE_FAIL_URL = 'https://live.bilibili.com/7-fail-win-check';
+const LIVE_MEDIA_ORIGINS = ['https://e2e-live.bilivideo.com', 'https://e2e-live-b.bilivideo.com'];
+const LIVE_SEGMENT_BYTES = 256 * 1024;
+const LIVE_TAKEOVER_STREAM_DIRS = Object.freeze({
+  race: '/e2e/live-stream/',
+  single: '/e2e/single-stream/',
+  playlist: '/e2e/playlist-stream/',
+  fail: '/e2e/fail-stream/',
+});
+
+function livePlayinfoBlob(streamDir) {
+  return {
+    playurl_info: {
+      playurl: {
+        stream: [{
+          protocol_name: 'http_hls',
+          format: [{
+            codec: [{
+              base_url: `${streamDir}index.m3u8`,
+              url_info: [
+                { host: LIVE_MEDIA_ORIGINS[0], extra: 'signature=live-a', stream_ttl: 1 },
+                { host: LIVE_MEDIA_ORIGINS[1], extra: 'signature=live-b', stream_ttl: 1 },
+              ],
+            }],
+          }],
+        }],
+      },
+    },
+  };
+}
+
+// race：内嵌双镜像 playinfo 后整段拉流（页面视角闭合 Range，接管腿不带 Range 取整段）；
+// single：无地址簿，只有播放器所名地址单腿；playlist：只拉播放列表（pass）；fail：
+// 拉流不断重试但镜像全灭（502），用作接管失败与控制台如实报错的场景。
+const LIVE_TAKEOVER_FIXTURE_HTML = (variant) => `<!doctype html><html><head><meta charset="utf-8"><title>win-check live ${variant}</title></head><body>
+<script>
+  ${variant === 'race' || variant === 'fail' ? `window.__NEPTUNE_IS_MY_WAIFU__ = ${JSON.stringify(livePlayinfoBlob(LIVE_TAKEOVER_STREAM_DIRS[variant]))};` : ''}
+  window.__liveTakeover = { responses: 0, errors: [] };
+  const streamDir = ${JSON.stringify(LIVE_TAKEOVER_STREAM_DIRS[variant])};
+  const mediaOrigin = ${JSON.stringify(LIVE_MEDIA_ORIGINS[0])};
+  const totalBytes = ${LIVE_SEGMENT_BYTES};
+  async function pullSegment(index) {
+    const url = mediaOrigin + streamDir + 'seg-' + index + '.m4s?signature=live';
+    try {
+      const response = await fetch(url, { headers: { Range: 'bytes=0-' + (totalBytes - 1) } });
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength !== totalBytes) throw new Error('short read: ' + buffer.byteLength);
+      const view = new Uint8Array(buffer);
+      for (const probe of [0, totalBytes >> 1, totalBytes - 1]) {
+        if (view[probe] !== probe % 251) throw new Error('byte mismatch at ' + probe);
+      }
+      window.__liveTakeover.responses += 1;
+    } catch (error) {
+      window.__liveTakeover.errors.push(String((error && error.message) || error));
+    }
+  }
+  async function pullPlaylist(index) {
+    try {
+      const response = await fetch(mediaOrigin + streamDir + 'index.m3u8?signature=live&n=' + index);
+      await response.text();
+      window.__liveTakeover.responses += 1;
+    } catch (error) {
+      window.__liveTakeover.errors.push(String((error && error.message) || error));
+    }
+  }
+  (async () => {
+    const attempts = ${variant === 'fail' ? 8 : 3};
+    for (let index = 0; index < attempts; index += 1) {
+      await (${variant === 'playlist' ? 'pullPlaylist' : 'pullSegment'})(index + 1);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  })();
+</script></body></html>`;
+
 const FIXTURE_HTML = (kind) => `<!doctype html><html><head><meta charset="utf-8"><title>win-check ${kind}</title></head><body>${kind === 'video' ? '<video id="v" muted playsinline></video>' : ''}popup-window-check ${kind} fixture</body></html>`;
 
 const scenarios = [];
@@ -220,14 +308,19 @@ const FIXTURE_CORS_HEADERS = [
 ];
 
 async function installFixtureInterception(driver) {
-  const stats = { updateSegmentGets: 0 };
+  const stats = { updateSegmentGets: 0, liveMediaGets: 0 };
   const keyFor = (url) => {
     if (url.startsWith(VIDEO_URL)) return 'video';
+    if (url.startsWith(LIVE_RACE_URL)) return 'liverace';
+    if (url.startsWith(LIVE_SINGLE_URL)) return 'livesingle';
+    if (url.startsWith(LIVE_PLAYLIST_URL)) return 'liveplaylist';
+    if (url.startsWith(LIVE_FAIL_URL)) return 'livefail';
     if (url.startsWith(LIVE_URL)) return 'live';
     if (url.startsWith(OTHER_URL)) return 'other';
     if (url.startsWith(HOME_URL)) return 'nomedia';
     if (url.startsWith(UPDATE_VIDEO_URL)) return 'update';
     if (url.startsWith(UPDATE_SEGMENT_URL)) return 'segment';
+    if (LIVE_MEDIA_ORIGINS.some((origin) => url.startsWith(`${origin}/e2e/`))) return 'livemedia';
     return undefined;
   };
   await driver.send('Fetch.enable', {
@@ -238,6 +331,12 @@ async function installFixtureInterception(driver) {
       { urlPattern: `${HOME_URL}*`, requestStage: 'Request' },
       { urlPattern: `${UPDATE_VIDEO_URL}*`, requestStage: 'Request' },
       { urlPattern: `${UPDATE_SEGMENT_URL}*`, requestStage: 'Request' },
+      { urlPattern: `${LIVE_RACE_URL}*`, requestStage: 'Request' },
+      { urlPattern: `${LIVE_SINGLE_URL}*`, requestStage: 'Request' },
+      { urlPattern: `${LIVE_PLAYLIST_URL}*`, requestStage: 'Request' },
+      { urlPattern: `${LIVE_FAIL_URL}*`, requestStage: 'Request' },
+      { urlPattern: 'https://e2e-live.bilivideo.com/e2e/*', requestStage: 'Request' },
+      { urlPattern: 'https://e2e-live-b.bilivideo.com/e2e/*', requestStage: 'Request' },
     ],
   });
   driver.on('Fetch.requestPaused', (event) => {
@@ -273,6 +372,66 @@ async function installFixtureInterception(driver) {
       }, event.sessionId);
       return;
     }
+    if (kind === 'livemedia') {
+      if (params.request.method === 'OPTIONS') {
+        void driver.send('Fetch.fulfillRequest', {
+          requestId: params.requestId, responseCode: 204, responseHeaders: FIXTURE_CORS_HEADERS,
+        }, event.sessionId);
+        return;
+      }
+      const mediaUrl = new URL(params.request.url);
+      if (mediaUrl.pathname.startsWith(LIVE_TAKEOVER_STREAM_DIRS.fail)) {
+        // 镜像全灭场景：两条腿拿到相同的如实 502。
+        void driver.send('Fetch.fulfillRequest', {
+          requestId: params.requestId,
+          responseCode: 502,
+          responseHeaders: [
+            ...FIXTURE_CORS_HEADERS,
+            { name: 'Content-Type', value: 'video/mp4' },
+            { name: 'Content-Length', value: '0' },
+          ],
+          body: '',
+        }, event.sessionId);
+        return;
+      }
+      if (mediaUrl.pathname.endsWith('.m3u8')) {
+        void driver.send('Fetch.fulfillRequest', {
+          requestId: params.requestId,
+          responseCode: 200,
+          responseHeaders: [
+            ...FIXTURE_CORS_HEADERS,
+            { name: 'Content-Type', value: 'application/vnd.apple.mpegurl' },
+            { name: 'Cache-Control', value: 'no-store' },
+          ],
+          body: Buffer.from('#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n', 'utf8').toString('base64'),
+        }, event.sessionId);
+        return;
+      }
+      // 分片应答：接管腿不带 Range（整段取回），页面视角带闭合 Range。字节按绝对
+      // 位移确定性生成，两个镜像主机天然一致，首段身份门的整体比对即通过。
+      const rangeHeader = (params.request.headers.Range ?? params.request.headers.range ?? '');
+      const match = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader);
+      const start = match === null ? 0 : Number(match[1]);
+      stats.liveMediaGets += 1;
+      assert.ok(start < LIVE_SEGMENT_BYTES, `live segment request out of range: ${params.request.url}`);
+      const end = Math.min(match === null ? LIVE_SEGMENT_BYTES - 1 : Number(match[2]), LIVE_SEGMENT_BYTES - 1);
+      const body = Buffer.alloc(end - start + 1);
+      for (let index = 0; index < body.length; index += 1) body[index] = (start + index) % 251;
+      const headers = [
+        ...FIXTURE_CORS_HEADERS,
+        { name: 'Content-Type', value: 'video/mp4' },
+        { name: 'Content-Length', value: String(body.length) },
+        { name: 'Cache-Control', value: 'no-store' },
+      ];
+      if (match !== null) headers.push({ name: 'Content-Range', value: `bytes ${start}-${end}/${LIVE_SEGMENT_BYTES}` });
+      void driver.send('Fetch.fulfillRequest', {
+        requestId: params.requestId,
+        responseCode: match === null ? 200 : 206,
+        responseHeaders: headers,
+        body: body.toString('base64'),
+      }, event.sessionId);
+      return;
+    }
     void driver.send('Fetch.fulfillRequest', {
       requestId: params.requestId,
       responseCode: 200,
@@ -280,10 +439,20 @@ async function installFixtureInterception(driver) {
         { name: 'Content-Type', value: 'text/html; charset=utf-8' },
         { name: 'Cache-Control', value: 'no-store' },
       ],
-      body: Buffer.from(kind === 'update' ? UPDATE_FIXTURE_HTML : FIXTURE_HTML(kind), 'utf8').toString('base64'),
+      body: Buffer.from(fixtureHtmlFor(kind), 'utf8').toString('base64'),
     }, event.sessionId);
   });
   return stats;
+}
+
+// 页面 fixture 分发：四种直播接管结局各有自己的页面，其余沿用原样。
+function fixtureHtmlFor(kind) {
+  if (kind === 'update') return UPDATE_FIXTURE_HTML;
+  if (kind === 'liverace') return LIVE_TAKEOVER_FIXTURE_HTML('race');
+  if (kind === 'livesingle') return LIVE_TAKEOVER_FIXTURE_HTML('single');
+  if (kind === 'liveplaylist') return LIVE_TAKEOVER_FIXTURE_HTML('playlist');
+  if (kind === 'livefail') return LIVE_TAKEOVER_FIXTURE_HTML('fail');
+  return FIXTURE_HTML(kind);
 }
 
 async function findInitialPage(driver) {
@@ -1787,6 +1956,158 @@ async function runStaleLogsPack() {
   }
 }
 
+// ---- 第九组：直播接管四态的弹窗填数与线路卡镜像行（见文件头说明） ----
+
+async function runLiveTakeoverStatesPack() {
+  const { driver, cleanup } = await setupBrowser('popup-window-check-e-');
+  try {
+    const { id: extensionId } = await driver.send('Extensions.loadUnpacked', { path: extensionDirectory });
+    const popupUrl = `chrome-extension://${extensionId}/popup.html`;
+    const launcher = await openLauncher(driver, extensionId);
+    // 弹窗 tab 与直播 tab 同窗口（第五组同手法）：面板只报告自己窗口的活动标签页。
+    const world = await driver.evaluate(launcher, `(async () => {
+      const popupTab = await chrome.tabs.create({ url: ${JSON.stringify(popupUrl)}, active: false });
+      return { windowId: popupTab.windowId };
+    })()`);
+    console.log('live-takeover world:', JSON.stringify(world));
+    const activateLiveTab = (url) => driver.evaluate(launcher, `(async () => {
+      const tab = await chrome.tabs.create({ url: ${JSON.stringify(url)}, windowId: ${world.windowId}, active: true });
+      return tab.id;
+    })()`);
+    const readState = await popupStateReader(driver, popupUrl);
+    const popupTarget = await driver.findPageByUrl(popupUrl);
+    const popupSession = await driver.attach(popupTarget.targetId);
+    const popupErrors = [];
+    driver.on('Runtime.consoleAPICalled', (message) => {
+      if (message.sessionId !== popupSession || message.params.type !== 'error') return;
+      const text = (message.params.args || [])
+        .map((arg) => arg.value ?? arg.description ?? '')
+        .join(' ');
+      popupErrors.push({ kind: 'console', text });
+    });
+    driver.on('Runtime.exceptionThrown', (message) => {
+      if (message.sessionId !== popupSession) return;
+      const details = message.params.exceptionDetails ?? {};
+      popupErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
+    });
+
+    // 期望值全部从 src 的既有导出推导：liveTakeoverText 的事实折叠、cdnLinesView
+    // 的空态、shortMirrorName 的线路短名。本组检查装配出来的面板，不是文案字面。
+    const liveEnabledOn = { liveEnabled: true };
+    const raceText = liveTakeoverText(
+      { serveCount: 1, engagement: 'engaged', pairedAddressAvailable: true, pairRejected: false },
+      liveEnabledOn,
+    );
+    const singleText = liveTakeoverText(
+      { serveCount: 1, engagement: 'engaged', pairedAddressAvailable: false, pairRejected: false },
+      liveEnabledOn,
+    );
+    const unhandledText = liveTakeoverText(
+      { serveCount: 1, engagement: undefined, pairedAddressAvailable: false, pairRejected: false },
+      liveEnabledOn,
+    );
+    const failedText = liveTakeoverText(
+      { serveCount: 1, engagement: 'failed', pairedAddressAvailable: false, pairRejected: false },
+      liveEnabledOn,
+    );
+    const emptyLinesMessage = cdnLinesView({ sampleCount: 0, summary: { rows: [] } }, undefined, false).message;
+    const nameA = shortMirrorName('e2e-live.bilivideo.com');
+    const nameB = shortMirrorName('e2e-live-b.bilivideo.com');
+    const countMatches = (text, pattern) => (text.match(pattern) ?? []).length;
+
+    // 竞速：内嵌 playinfo 给出双镜像地址簿，首段身份门比过（字节确定性一致）后放开
+    // 竞速。接管行如实报双镜像竞速；线路卡两行镜像如实报正常与连接时间，不出现 NaN。
+    await activateLiveTab(LIVE_RACE_URL);
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
+        && state.livePanelHidden === false && state.bufferCardHidden === true
+        && state.takeover === raceText
+        && state.cdnCard.includes(nameA) && state.cdnCard.includes(nameB)
+        && countMatches(state.cdnCard, /正常/g) === 2
+        && countMatches(state.cdnCard, /通常 \d+ 毫秒/g) === 2
+        && !state.cdnCard.includes('NaN')
+        ? true
+        : `expected the racing takeover state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
+      { timeoutMs: 30000, what: 'popup showing live racing takeover' },
+    );
+    markScenario('直播接管竞速中：弹窗接管行如实报双镜像竞速，线路卡两行镜像如实报健康状况与连接时间');
+
+    // 单路：无地址簿，只有播放器所名地址，接管行如实报无可用备用线路，线路卡只有一行。
+    await activateLiveTab(LIVE_SINGLE_URL);
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
+        && state.livePanelHidden === false && state.bufferCardHidden === true
+        && state.takeover === singleText
+        && state.cdnCard.includes(nameA) && !state.cdnCard.includes(nameB)
+        && countMatches(state.cdnCard, /正常/g) === 1
+        && !state.cdnCard.includes('NaN')
+        ? true
+        : `expected the single-leg takeover state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
+      { timeoutMs: 30000, what: 'popup showing single-leg live takeover' },
+    );
+    markScenario('直播单路接管：弹窗接管行如实报无可用备用线路，线路卡一行镜像如实');
+
+    // 只拉播放列表：接管从未介入（只有 pass 事实），如实报未接管，线路卡如实报还没有数据。
+    await activateLiveTab(LIVE_PLAYLIST_URL);
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
+        && state.livePanelHidden === false && state.bufferCardHidden === true
+        && state.takeover === unhandledText
+        && state.cdnCard === emptyLinesMessage
+        ? true
+        : `expected the playlist-only state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
+      { timeoutMs: 30000, what: 'popup showing playlist-only live page' },
+    );
+    markScenario('直播页面只拉播放列表：弹窗接管行如实报未接管，线路卡如实报还没有数据');
+
+    // 镜像全灭：两条腿的 502 如实落到面板（接管请求失败、线路卡有错误），页面控制台
+    // 按既有口径全量如实报错，这份报错同时充当了本组捕获通道的阳性对照。
+    await activateLiveTab(LIVE_FAIL_URL);
+    const failTarget = await driver.findPageByUrl(LIVE_FAIL_URL);
+    const failSession = await driver.attach(failTarget.targetId);
+    const livePageErrors = [];
+    driver.on('Runtime.consoleAPICalled', (message) => {
+      if (message.sessionId !== failSession || message.params.type !== 'error') return;
+      const text = (message.params.args || [])
+        .map((arg) => arg.value ?? arg.description ?? '')
+        .join(' ');
+      livePageErrors.push({ kind: 'console', text });
+    });
+    driver.on('Runtime.exceptionThrown', (message) => {
+      if (message.sessionId !== failSession) return;
+      const details = message.params.exceptionDetails ?? {};
+      livePageErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
+    });
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
+        && state.livePanelHidden === false && state.bufferCardHidden === true
+        && state.takeover === failedText
+        && countMatches(state.cdnCard, /有错误/g) === 2
+        && state.cdnCard.includes('还没有连接记录')
+        && !state.cdnCard.includes('NaN')
+        ? true
+        : `expected the failed takeover state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
+      { timeoutMs: 30000, what: 'popup showing failed live takeover' },
+    );
+    markScenario('直播镜像全灭接管失败：弹窗接管行如实报接管请求失败，线路卡两行如实报有错误');
+    await waitForState(
+      () => Promise.resolve(livePageErrors),
+      (errors) => errors.some((entry) => entry.text.includes('媒体分片前台取数失败') || entry.text.includes('BankNetworkError'))
+        ? true
+        : `no honest live failure error captured yet: ${JSON.stringify(errors)}`,
+      { timeoutMs: 15000, what: 'honest full-rate live failure errors in the page console' },
+    );
+    assert.deepEqual(popupErrors, [], `直播组弹窗控制台出现预期外的扩展错误 ${JSON.stringify(popupErrors)}`);
+    markScenario('直播接管失败如实报到页面控制台（阳性对照），全组弹窗控制台零预期外扩展错误');
+  } finally {
+    await cleanup();
+  }
+}
+
 const provenance = await readProvenance();
 
 const commitSha = process.env.BILIBILI_E2E_COMMIT_SHA ?? provenance.commitSha ?? provenance.commitShaReason ?? 'unknown';
@@ -1794,7 +2115,7 @@ console.log('popup window check provenance:', JSON.stringify({
   commitSha,
   buildId: provenance.buildId,
   chrome: chromeExecutablePath,
-  fixtures: { video: VIDEO_URL, live: LIVE_URL, other: OTHER_URL, nomedia: HOME_URL },
+  fixtures: { video: VIDEO_URL, live: LIVE_URL, other: OTHER_URL, nomedia: HOME_URL, liveMedia: LIVE_MEDIA_ORIGINS },
 }));
 
 await runMultiWindowPack();
@@ -1805,6 +2126,7 @@ await runNoMediaPagePack();
 await runLogScalePack();
 await runPartNavigationPack();
 await runStaleLogsPack();
+await runLiveTakeoverStatesPack();
 
 console.log(`popup window check passed: ${scenarios.length} scenarios`);
 for (const scenario of scenarios) console.log(`- ${scenario}`);
