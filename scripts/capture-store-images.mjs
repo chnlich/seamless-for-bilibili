@@ -57,6 +57,13 @@ const MAX_POPUP_OPENS_PER_SCENARIO = 30;
 
 const RACING_STATUS_TEXT = '正在按两条线路竞速下载';
 
+// Headless Chrome's virtual screen defaults to 800x600 device px, which
+// --force-device-scale-factor=2 turns into 400x300 CSS px: measured on Chrome 154, the popup
+// anchored at y 76 was clamped to a 220 CSS px viewport. --screen-info raises the virtual
+// screen to 1920x1200 CSS px, and the same popup then grows to Chrome's own 600 CSS px popup
+// ceiling, above the 435 CSS px video popup document.
+const HEADLESS_SCREEN = { width: 3840, height: 2400 };
+
 const muteGuardInit = `(() => {
   const silence = (element) => {
     if (!(element instanceof HTMLMediaElement)) return;
@@ -477,7 +484,7 @@ log(`profile ${profileDirectory}, cdp port ${cdpPort}`);
 const chromeArguments = [
   '--mute-audio',
   // 无窗口默认（完整 Chrome 的 --headless）；--headed 显式要一个可见窗口。
-  ...(headed ? [] : ['--headless']),
+  ...(headed ? [] : ['--headless', `--screen-info={0,0 ${HEADLESS_SCREEN.width}x${HEADLESS_SCREEN.height}}`]),
   '--enable-unsafe-extension-debugging',
   '--lang=zh-CN',
   '--force-device-scale-factor=2',
@@ -535,6 +542,16 @@ let wakerTargetId;
 const budget = { popupOpens: 0 };
 try {
   await raw.connect();
+  // Preflight: a Chrome that ignores --screen-info clamps the headless popup again.
+  const screenAvailable = await context.pages()[0].evaluate(() => ({ width: screen.availWidth, height: screen.availHeight }));
+  report.provenance.screenAvailable = screenAvailable;
+  log('screen available (CSS px)', JSON.stringify(screenAvailable));
+  if (!headed && (screenAvailable.width !== HEADLESS_SCREEN.width / 2 || screenAvailable.height !== HEADLESS_SCREEN.height / 2)) {
+    throw new Error(
+      `the headless screen reads ${screenAvailable.width}x${screenAvailable.height} CSS px, expected`
+      + ` ${HEADLESS_SCREEN.width / 2}x${HEADLESS_SCREEN.height / 2}: --screen-info was not applied and the popup would be clamped`,
+    );
+  }
   await context.addInitScript({ content: muteGuardInit });
   const extensionId = await installUnpackedExtension(browser, extensionDirectory);
   report.provenance.extensionId = extensionId;
@@ -659,8 +676,10 @@ try {
   // Backstop: end only chrome.exe processes whose command line names THIS run's temp
   // profile. Never by image name: the user's daily Chrome shares the image name.
   if (process.platform === 'win32') {
+    // A PowerShell single-quoted string takes backslashes literally; doubling them made the
+    // -like pattern match no command line at all.
     const killScript = `
-      $dir = '${profileDirectory.replace(/\\/g, '\\\\')}'
+      $dir = '${profileDirectory.replace(/'/g, "''")}'
       $procs = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.CommandLine -like "*$dir*" }
       foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
       @($procs).Count

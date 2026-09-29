@@ -17,7 +17,7 @@
 1. 用捕获脚本得到原始截图到仓库根的 `store-images-raw/`（不提交，已在仓库 .gitignore 中忽略：页面截图含第三方内容）：
 
    ```sh
-   npm ci && npm run build && npm run capture:store-images -- --headed
+   npm ci && npm run build && npm run capture:store-images
    ```
 
    脚本在 `scripts/capture-store-images.mjs`：在 Windows 上用系统 Chrome（`BILIBILI_E2E_CHROME` 指定路径）
@@ -26,7 +26,7 @@
    捕获明暗两态（暗色经 `prefers-color-scheme` 模拟）与弹窗背后的页面，写出上表输入
    `video-popup-light.png`、`live-popup-light.png`、`video-page.png`、`live-page.png` 与 `report.json`
    （含 commit、buildId、Chrome 版本、视频与房间号、直播格式 FLV/HLS、明暗两态弹窗读数）。
-   读数迟迟不出现就报错退出，绝不静默截一张空弹窗；`--headed` 必须显式带上（不带则 headless 的虚拟屏幕装不下弹窗，见下方教训）；弹窗截图前断言弹窗视口装下整个文档，写出后再解码 PNG
+   读数迟迟不出现就报错退出，绝不静默截一张空弹窗。默认无窗口运行（完整 Chrome 的 `--headless`），不再需要 `--headed`：headless 的虚拟屏幕默认 800×600 设备像素，2× 缩放下只剩 400×300 CSS px，弹窗锚在 y=76 处被钳到 220 CSS px 视口；脚本加 `--screen-info={0,0 3840x2400}` 后实测（Chrome 154）可用屏幕为 1920×1200 CSS px，同一弹窗长到 Chrome 自身 600 CSS px 的弹窗高度上限，高于视频弹窗 435 CSS px 的文档；启动后先读 `screen.availWidth`/`availHeight` 断言该开关生效。弹窗截图前断言弹窗视口装下整个文档，写出后再解码 PNG
    断言「打开开发日志」区域有墨迹，任一不满足即报错退出；测试浏览器只按 PID 结束（其命令行含本次临时 profile 路径）。
 2. `node store/images/src/compose.mjs` → 弹窗特写按原始捕获的完整尺寸原样导出（不做裁切），并渲染上表全部 PNG。
    每张图渲染前自检：弹窗、说明语和文字块不出画，说明语不压弹窗，标题只在词边界换行，背景页面截图必须加载成功；任一不满足即报错退出。
