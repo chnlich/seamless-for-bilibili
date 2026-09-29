@@ -3391,6 +3391,9 @@ test('hls fetch gate compares the first raced pair in full, then races first-com
   assert.equal(serve.data.result, 'hit');
   assert.equal(serve.data.reason, 'live_hls_segment');
   assert.equal(serve.data.pairedAddressAvailable, true);
+  // 与视频页 bank.serve 命中同形：mirror 记播放器所名地址的主机（竞速各腿的主机记在
+  // bank.fetch.chunk），不随胜出腿改变。
+  assert.equal(serve.data.mirror, new URL(HLS_SEGMENT_URL).hostname);
   let chunks = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
   assert.deepEqual(
     chunks.map(({ data }) => [data.slot, data.result, data.bytes, data.chunkIndex]),
@@ -3421,6 +3424,12 @@ test('hls fetch gate compares the first raced pair in full, then races first-com
     chunks.map(({ data }) => [data.slot, data.result, data.bytes]),
     [[1, 'fetched', 4], [0, 'lost_race', 0]],
   );
+  // 备址（另一主机）胜出的分片：bank.serve 命中仍记播放器所名主机，与视频页一致；
+  // 胜出腿的主机在 bank.fetch.chunk 上。
+  const secondServe = windowObject.messages.filter((message) => message.code === 'bank.serve').at(-1);
+  assert.equal(secondServe.data.reason, 'live_hls_segment');
+  assert.equal(secondServe.data.mirror, new URL(HLS_SEGMENT_NEXT_URL).hostname);
+  assert.equal(chunks[0].data.mirror, new URL(pairNext).hostname);
   bank.destroy();
 });
 

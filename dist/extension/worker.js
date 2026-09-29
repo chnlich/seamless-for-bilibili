@@ -991,13 +991,49 @@
     };
   }
 
+  // src/extension/popup-live.js
+  var POPUP_ROUTE = Object.freeze({ VIDEO: "video", LIVE: "live" });
+  function emptyLiveFacts() {
+    return {
+      serveCount: 0,
+      engagement: void 0,
+      pairedAddressAvailable: false,
+      pairRejected: false
+    };
+  }
+  function liveServeClass(result) {
+    if (result === "hit") return "engaged";
+    if (result === "failed") return "failed";
+    return "pass";
+  }
+  function foldLiveEvent(facts, event) {
+    if (event?.code === "live.stream.stitch") {
+      if (event?.data?.mismatch === true) facts.pairRejected = true;
+      return facts;
+    }
+    if (event?.code !== "bank.serve") return facts;
+    const data = event?.data !== null && typeof event?.data === "object" ? event.data : {};
+    facts.serveCount += 1;
+    const klass = liveServeClass(data.result);
+    if (klass === "engaged") {
+      facts.engagement = "engaged";
+      facts.pairedAddressAvailable = data.pairedAddressAvailable === true;
+      facts.pairRejected = false;
+    } else if (klass === "failed") {
+      facts.engagement = "failed";
+    }
+    return facts;
+  }
+
   // src/diagnostics/worker.js
   var BATCH_TYPE = "diagnostic:events";
   var READ_TYPES = /* @__PURE__ */ new Set([
     "logs:max-event-id",
     "logs:sessions-page",
     "logs:events-page",
-    "logs:cdn-summary"
+    "logs:session-events-page",
+    "logs:cdn-summary",
+    "logs:live-summary"
   ]);
   function storageError(code, message, cause) {
     return Object.assign(new Error(message, { cause }), { code });
@@ -1177,7 +1213,9 @@
       "logs:max-event-id": ["type", "version", "sessionId"],
       "logs:sessions-page": ["type", "version", "limit", "afterSessionId", "maxEventId", "sessionId"],
       "logs:events-page": ["type", "version", "limit", "afterEventId", "maxEventId", "sessionId"],
-      "logs:cdn-summary": ["type", "version", "sessionId"]
+      "logs:session-events-page": ["type", "version", "limit", "afterSequence", "maxEventId", "sessionId"],
+      "logs:cdn-summary": ["type", "version", "sessionId"],
+      "logs:live-summary": ["type", "version", "sessionId"]
     }[message.type];
     if (Object.keys(message).some((field) => !allowed.includes(field))) {
       throw storageError("MESSAGE_INVALID", "日志读取消息包含未允许字段");
@@ -1187,8 +1225,16 @@
         throw storageError("MESSAGE_INVALID", `${field} 无效`);
       }
     }
-    if (message.type === "logs:cdn-summary" && (typeof message.sessionId !== "string" || message.sessionId.length === 0)) {
-      throw storageError("MESSAGE_INVALID", "CDN summary sessionId 无效");
+    if ((message.type === "logs:cdn-summary" || message.type === "logs:live-summary") && (typeof message.sessionId !== "string" || message.sessionId.length === 0)) {
+      throw storageError("MESSAGE_INVALID", "sessionId 无效");
+    }
+    if (message.type === "logs:session-events-page") {
+      if (typeof message.sessionId !== "string" || message.sessionId.length === 0) {
+        throw storageError("MESSAGE_INVALID", "sessionId 无效");
+      }
+      if (!Number.isInteger(message.afterSequence) || message.afterSequence < 0) {
+        throw storageError("AFTER_SEQUENCE_INVALID", "afterSequence 无效");
+      }
     }
     return message;
   }
@@ -1353,11 +1399,81 @@
       transaction.onerror = () => reject(transaction.error || new Error("读取 CDN summary 事务失败"));
     });
   }
+  async function readSessionEventsPage(message, indexedDbObject) {
+    const limit = positiveLimit(message.limit);
+    const maxEventId = validMaxEventId(message.maxEventId);
+    const database = await openLogDatabase(indexedDbObject);
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(EVENT_STORE, "readonly");
+      const index = transaction.objectStore(EVENT_STORE).index(EVENT_INDEX);
+      const request = index.openCursor(
+        IDBKeyRange.bound([message.sessionId, message.afterSequence + 1], [message.sessionId, Number.MAX_SAFE_INTEGER])
+      );
+      const events = [];
+      let nextAfterSequence = message.afterSequence;
+      request.onerror = () => reject(request.error || new Error("读取 session 事件分页失败"));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor === null) {
+          resolve({ events, hasMore: false, nextAfterSequence });
+          return;
+        }
+        const event = cursor.value;
+        const eventId = cursor.primaryKey ?? event.eventId;
+        if (Number.isInteger(eventId) && eventId > maxEventId) {
+          resolve({ events, hasMore: false, nextAfterSequence });
+          return;
+        }
+        events.push(event);
+        nextAfterSequence = event.sequence;
+        if (events.length >= limit) {
+          resolve({ events, hasMore: true, nextAfterSequence });
+          return;
+        }
+        cursor.continue();
+      };
+      transaction.oncomplete = () => database.close();
+      transaction.onerror = () => reject(transaction.error || new Error("读取 session 事件分页事务失败"));
+    });
+  }
+  async function readLiveSummary(message, indexedDbObject) {
+    const database = await openLogDatabase(indexedDbObject);
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(EVENT_STORE, "readonly");
+      const index = transaction.objectStore(EVENT_STORE).index(EVENT_INDEX);
+      const request = index.openCursor(
+        IDBKeyRange.bound([message.sessionId, 0], [message.sessionId, Number.MAX_SAFE_INTEGER])
+      );
+      const facts = emptyLiveFacts();
+      let maxEventId = 0;
+      let sampleCount = 0;
+      request.onerror = () => reject(request.error || new Error("读取直播状态事件失败"));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor === null) {
+          resolve({ maxEventId, sampleCount, facts });
+          return;
+        }
+        const event = cursor.value;
+        const eventId = cursor.primaryKey ?? event.eventId;
+        if (Number.isInteger(eventId) && eventId > maxEventId) maxEventId = eventId;
+        if (event.code === "bank.serve" || event.code === "live.stream.stitch") {
+          sampleCount += 1;
+          foldLiveEvent(facts, event);
+        }
+        cursor.continue();
+      };
+      transaction.oncomplete = () => database.close();
+      transaction.onerror = () => reject(transaction.error || new Error("读取直播状态事务失败"));
+    });
+  }
   async function readLogs(message, indexedDbObject) {
     validateReadMessage(message);
     if (message.type === "logs:max-event-id") return readMaxEventId(message, indexedDbObject);
     if (message.type === "logs:sessions-page") return readSessionsPage(message, indexedDbObject);
     if (message.type === "logs:cdn-summary") return readCdnSummary(message, indexedDbObject);
+    if (message.type === "logs:live-summary") return readLiveSummary(message, indexedDbObject);
+    if (message.type === "logs:session-events-page") return readSessionEventsPage(message, indexedDbObject);
     return readEventsPage(message, indexedDbObject);
   }
   function schedulePrune() {

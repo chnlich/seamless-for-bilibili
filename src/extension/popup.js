@@ -5,7 +5,6 @@ import {
   POPUP_ROUTE,
   applyPopupRoute,
   emptyLiveFacts,
-  foldLiveEvents,
   popupRouteForTabUrl,
   preferenceNames,
   savePreferenceChange,
@@ -13,6 +12,7 @@ import {
 } from './popup-live.js';
 import {
   NO_PAGE_MESSAGES,
+  PROBED_TAB_NOTICE,
   applyPageAvailability,
   cdnLinesView,
   renderCdnLines,
@@ -59,11 +59,15 @@ let raceQueryInFlight = false;
 let nextRaceQueryAt = 0;
 let liveSessionId;
 let liveFacts = emptyLiveFacts();
-let liveAfterEventId = 0;
 let liveError;
 let liveQueryInFlight = false;
 let nextLiveQueryAt = 0;
 let pageUnavailable = true;
+let panelTabId;
+let panelFromOtherTab = false;
+let probeInFlight = false;
+let nextProbeAt = 0;
+let lastProbeResult;
 
 function showNotice(text) {
   noticeElement.textContent = text;
@@ -153,11 +157,14 @@ async function refreshRace(sessionIdValue) {
   }
 }
 
+// 直播状态走 worker 端摘要（logs:live-summary）：worker 按 [sessionId, sequence]
+// 索引只读该 session 自己的事件并折叠事实，代价只随本 session 的大小增长。按全局
+// eventId 分页的 logs:events-page 在大库上要从 0 扫过其他 session 的全部记录才能
+// 凑齐第一页，直播状态会长时间停在「等待直播数据」（2026-09-28 用户实测）。
 async function refreshLivePanel(sessionIdValue) {
   if (sessionIdValue === undefined || sessionIdValue === '未提供') {
     liveSessionId = sessionIdValue;
     liveFacts = emptyLiveFacts();
-    liveAfterEventId = 0;
     liveError = undefined;
     renderLivePanel();
     return;
@@ -165,7 +172,6 @@ async function refreshLivePanel(sessionIdValue) {
   if (liveSessionId !== sessionIdValue) {
     liveSessionId = sessionIdValue;
     liveFacts = emptyLiveFacts();
-    liveAfterEventId = 0;
     liveError = undefined;
     nextLiveQueryAt = 0;
   }
@@ -173,29 +179,9 @@ async function refreshLivePanel(sessionIdValue) {
   liveQueryInFlight = true;
   renderLivePanel();
   try {
-    const max = await sendLogsRead({ type: 'logs:max-event-id', sessionId: sessionIdValue });
-    let afterEventId = liveAfterEventId;
-    for (;;) {
-      const page = await sendLogsRead({
-        type: 'logs:events-page',
-        limit: 250,
-        afterEventId,
-        maxEventId: max.maxEventId,
-        sessionId: sessionIdValue,
-      });
-      if (liveSessionId !== sessionIdValue) return;
-      foldLiveEvents(liveFacts, page.events);
-      if (!page.hasMore) {
-        afterEventId = page.nextAfterEventId;
-        break;
-      }
-      const nextAfterEventId = page.nextAfterEventId ?? page.events.at(-1)?.eventId;
-      if (!Number.isInteger(nextAfterEventId) || nextAfterEventId <= afterEventId) {
-        throw new Error('日志分页没有向前推进');
-      }
-      afterEventId = nextAfterEventId;
-    }
-    liveAfterEventId = afterEventId;
+    const response = await sendLogsRead({ type: 'logs:live-summary', sessionId: sessionIdValue });
+    if (liveSessionId !== sessionIdValue) return;
+    liveFacts = response.facts;
     liveError = undefined;
   } catch (error) {
     if (liveSessionId === sessionIdValue) liveError = error?.message || String(error);
@@ -215,49 +201,129 @@ function routeFor(readouts, tabUrl) {
   return popupRouteForTabUrl(tabUrl);
 }
 
+async function pollTab(tab) {
+  const readouts = await sendTabMessage(tab.id, 'readouts:get');
+  const snapshot = popupRoute === POPUP_ROUTE.VIDEO
+    ? await sendTabMessage(tab.id, 'status:get')
+    : undefined;
+  return { readouts, snapshot };
+}
+
+// 活动标签页没有运行增强时不代表增强没在运行：用户点开别的标签页（或从别的窗口
+// 打开面板）时，正在看的那一页仍在接管下载。向其余标签页询问（readouts:get 只发
+// 给本扩展自己的内容脚本，其余标签页立即拒绝），有应答就如实显示那一页并注明来源，
+// 全都查无时才按「这个页面没有运行增强」提示。1 秒节流与结果缓存与其他读数一致。
+function tabRecency(tab) {
+  return Number.isFinite(tab.lastAccessed) ? tab.lastAccessed : 0;
+}
+
+async function findEnhancedTab(triedTabIds) {
+  const cacheUsable = lastProbeResult !== undefined && !triedTabIds.has(lastProbeResult.tab.id);
+  if (probeInFlight || (Date.now() < nextProbeAt && cacheUsable)) return lastProbeResult;
+  probeInFlight = true;
+  try {
+    const tabs = await chrome.tabs.query({});
+    const candidates = tabs
+      .filter((tab) => Number.isInteger(tab.id) && !triedTabIds.has(tab.id))
+      .sort((left, right) => tabRecency(right) - tabRecency(left));
+    const answers = await Promise.allSettled(
+      candidates.map((tab) => sendTabMessage(tab.id, 'readouts:get')),
+    );
+    lastProbeResult = undefined;
+    for (const [index, answer] of answers.entries()) {
+      if (answer.status === 'fulfilled') {
+        lastProbeResult = { tab: candidates[index], readouts: answer.value };
+        break;
+      }
+    }
+    return lastProbeResult;
+  } finally {
+    probeInFlight = false;
+    nextProbeAt = Date.now() + 1000;
+  }
+}
+
+// 面板数据来源：优先活动标签页；它没有运行增强时按最近访问顺序询问其余标签页，
+// 有应答的页面照常显示（并注明来源），全都查无时返回 undefined。
+async function collectPanelState(active) {
+  try {
+    return { tab: active, polled: await pollTab(active) };
+  } catch (error) {
+    if (error?.message !== RECEIVER_MISSING) throw error;
+  }
+  const tried = new Set([active.id]);
+  for (;;) {
+    const probe = await findEnhancedTab(tried);
+    if (probe === undefined) return undefined;
+    tried.add(probe.tab.id);
+    try {
+      return { tab: probe.tab, polled: await pollTab(probe.tab) };
+    } catch (error) {
+      lastProbeResult = undefined;
+      nextProbeAt = 0;
+      if (error?.message !== RECEIVER_MISSING) throw error;
+    }
+  }
+}
+
+async function failPanel(message, { error } = {}) {
+  pageUnavailable = true;
+  panelTabId = undefined;
+  panelFromOtherTab = false;
+  resetPageData();
+  latestReadouts = undefined;
+  await refreshRace(undefined);
+  if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(undefined);
+  renderAll();
+  if (error !== undefined) console.error('[BilibiliBuffer] 读取页面状态失败', error);
+  showNotice(message);
+}
+
 async function refresh() {
-  const tab = await activeTab();
-  const route = routeFor(latestReadouts, tab?.url);
+  const active = await activeTab();
+  const route = routeFor(latestReadouts, active?.url);
   if (route !== popupRoute) {
     popupRoute = route;
     applyPopupRoute(document, route);
   }
-  if (tab === undefined) {
+  if (active === undefined) {
     pageUnavailable = true;
+    panelTabId = undefined;
+    panelFromOtherTab = false;
     resetPageData();
     renderAll();
     showNotice(NO_PAGE_MESSAGES.noTab);
     return;
   }
+  let sourceTab;
+  let polled;
   try {
-    const readouts = await sendTabMessage(tab.id, 'readouts:get');
-    latestReadouts = readouts;
-    latestForwardSeconds = Number.isFinite(readouts?.forwardSeconds) ? readouts.forwardSeconds : undefined;
-    sessionId = readouts?.diagnostics?.sessionId;
-    latestSnapshot = popupRoute === POPUP_ROUTE.VIDEO
-      ? await sendTabMessage(tab.id, 'status:get')
-      : undefined;
-  } catch (error) {
-    if (error?.message === RECEIVER_MISSING) {
-      pageUnavailable = true;
-      resetPageData();
-      await refreshRace(undefined);
-      if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(undefined);
-      renderAll();
-      showNotice(NO_PAGE_MESSAGES.noReceiver);
+    const collected = await collectPanelState(active);
+    if (collected === undefined) {
+      // 活动标签页没有运行增强，其他标签页也都查无：按原样提示。
+      await failPanel(NO_PAGE_MESSAGES.noReceiver);
       return;
     }
-    resetPageData();
-    latestReadouts = undefined;
-    await refreshRace(undefined);
-    if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(undefined);
-    renderAll();
-    console.error('[BilibiliBuffer] 读取页面状态失败', error);
-    showNotice(NO_PAGE_MESSAGES.readFailed);
+    sourceTab = collected.tab;
+    polled = collected.polled;
+  } catch (error) {
+    await failPanel(NO_PAGE_MESSAGES.readFailed, { error });
     return;
   }
+  latestReadouts = polled.readouts;
+  latestForwardSeconds = Number.isFinite(polled.readouts?.forwardSeconds)
+    ? polled.readouts.forwardSeconds
+    : undefined;
+  sessionId = polled.readouts?.diagnostics?.sessionId;
+  panelTabId = sourceTab.id;
+  panelFromOtherTab = sourceTab.id !== active.id;
+  const readoutsRoute = routeFor(latestReadouts, active?.url);
+  if (readoutsRoute !== popupRoute) {
+    popupRoute = readoutsRoute;
+    applyPopupRoute(document, popupRoute);
+  }
   pageUnavailable = false;
-  showNotice('');
+  showNotice(panelFromOtherTab ? PROBED_TAB_NOTICE : '');
   document.body.dataset.ready = 'true';
   renderAll();
   await refreshRace(sessionId);
@@ -290,9 +356,10 @@ document.querySelector('[data-open-logs]').addEventListener('click', () => {
   void (async () => {
     let fragment = '';
     try {
-      const tab = await activeTab();
-      if (tab !== undefined) {
-        const response = await sendTabMessage(tab.id, 'diagnostics:session-id:get');
+      // 日志带上面板正在显示的那个标签页的 session（活动标签页没有运行增强时，
+      // 面板显示的是探测到的仍在运行增强的标签页）。
+      if (panelTabId !== undefined) {
+        const response = await sendTabMessage(panelTabId, 'diagnostics:session-id:get');
         fragment = logSessionFragment(response.sessionId);
       }
       await chrome.tabs.create({ url: chrome.runtime.getURL(`logs.html${fragment}`) });

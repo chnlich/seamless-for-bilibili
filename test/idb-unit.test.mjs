@@ -465,3 +465,203 @@ test('an export already in progress keeps its snapshot range and tolerates rows 
   assert.deepEqual(exportedSessions.sort(), ['session-export-new', 'session-export-old']);
   assert.equal(pageReads, 2, '被清空的范围内没有多余分页');
 });
+
+test('live summary folds a recent session takeover facts in a store holding many other sessions', async () => {
+  const indexedDb = new FakeIndexedDB();
+  // 先塞 30 个别的 session、每个 250 条事件，模拟真实大库：目标 session 的记录
+  // 位于这些记录之后，摘要读取不得依赖对它们的扫描结果。
+  for (let noiseIndex = 0; noiseIndex < 30; noiseIndex += 1) {
+    const noise = session(`session-live-noise-${noiseIndex}`, `/noise-${noiseIndex}`);
+    await appendBatch(
+      message(noise, Array.from({ length: 250 }, (_v, index) => event(noise.sessionId, index + 1))),
+      sender(100 + noiseIndex, `/noise-${noiseIndex}`),
+      indexedDb,
+    );
+  }
+  const target = session('session-live-target', '/live');
+  await appendBatch(message(target, [
+    event(target.sessionId, 1),
+    event(target.sessionId, 2, 'bank.serve', {
+      source: 'https://d1--ov-gotcha207.bilivideo.com/live-bvc/1/x.m4s',
+      mirror: 'd1--ov-gotcha207.bilivideo.com',
+      result: 'hit',
+      reason: 'live_hls_segment',
+      pairedAddressAvailable: true,
+    }),
+    event(target.sessionId, 3, 'bank.serve', {
+      source: 'https://d1--ov-gotcha207.bilivideo.com/live-bvc/1/index.m3u8',
+      mirror: 'd1--ov-gotcha207.bilivideo.com',
+      result: 'pass',
+      reason: 'live_hls_playlist',
+    }),
+    event(target.sessionId, 4, 'live.stream.stitch', {
+      streamPath: '/live-bvc/1/x.m4s',
+      bytesChecked: 4,
+      mismatch: true,
+      phase: 'segment',
+    }),
+    event(target.sessionId, 5, 'bank.serve', {
+      source: 'https://d1--ov-gotcha207.bilivideo.com/live-bvc/1/x.m4s',
+      mirror: 'd1--ov-gotcha207.bilivideo.com',
+      result: 'failed',
+      reason: 'live_hls_segment_failed',
+      errorName: 'BankNetworkError',
+    }),
+    event(target.sessionId, 6, 'bank.serve', {
+      source: 'https://d1--ov-gotcha207.bilivideo.com/live-bvc/1/x.m4s',
+      mirror: 'd1--ov-gotcha207.bilivideo.com',
+      result: 'hit',
+      reason: 'live_hls_segment',
+      pairedAddressAvailable: true,
+    }),
+    event(target.sessionId, 7, 'live.stream.stitch', {
+      streamPath: '/live-bvc/1/x.m4s',
+      bytesChecked: 8,
+      mismatch: true,
+      phase: 'stream',
+    }),
+  ]), sender(200, '/live'), indexedDb);
+
+  const summary = await readLogs({
+    type: 'logs:live-summary',
+    version: 1,
+    sessionId: target.sessionId,
+  }, indexedDb);
+  assert.deepEqual(summary.facts, {
+    serveCount: 4,
+    engagement: 'engaged',
+    pairedAddressAvailable: true,
+    pairRejected: true,
+  });
+  assert.equal(summary.sampleCount, 6, 'sampleCount 只统计 bank.serve 与 live.stream.stitch');
+  assert.equal(Number.isInteger(summary.maxEventId) && summary.maxEventId > 0, true);
+
+  // 空 session 返回零值事实，不抛错。
+  const quiet = session('session-live-quiet', '/quiet');
+  await appendBatch(message(quiet, [event(quiet.sessionId, 1)]), sender(201, '/quiet'), indexedDb);
+  const empty = await readLogs({
+    type: 'logs:live-summary',
+    version: 1,
+    sessionId: quiet.sessionId,
+  }, indexedDb);
+  assert.deepEqual(empty.facts, { serveCount: 0, engagement: undefined, pairedAddressAvailable: false, pairRejected: false });
+  assert.equal(empty.sampleCount, 0);
+});
+
+test('live summary rejects a message without a sessionId', async () => {
+  const indexedDb = new FakeIndexedDB();
+  await assert.rejects(
+    readLogs({ type: 'logs:live-summary', version: 1 }, indexedDb),
+    /sessionId 无效/,
+  );
+});
+
+test('session events page reads one session through the index with snapshot cutoff and deletion tolerance', async () => {
+  const indexedDb = new FakeIndexedDB();
+  const older = session('session-page-older', '/older');
+  await appendBatch(
+    message(older, Array.from({ length: 300 }, (_v, index) => event(older.sessionId, index + 1))),
+    sender(1, '/older'),
+    indexedDb,
+  );
+  const target = session('session-page-target', '/target');
+  await appendBatch(
+    message(target, Array.from({ length: 40 }, (_v, index) => event(target.sessionId, index + 1, 'media.sample', {
+      eventType: 'progress',
+      currentTime: index,
+    }))),
+    sender(2, '/target'),
+    indexedDb,
+  );
+
+  const snapshot = await readLogs({ type: 'logs:max-event-id', version: 1 }, indexedDb);
+  // 快照固定在目标 session 第 20 条之后：先查它的 eventId。
+  const targetEvents = await readLogs({
+    type: 'logs:session-events-page',
+    version: 1,
+    limit: 250,
+    afterSequence: 0,
+    maxEventId: snapshot.maxEventId,
+    sessionId: target.sessionId,
+  }, indexedDb);
+  const cutoffEventId = targetEvents.events[19].eventId;
+
+  // 分页只返回该 session 自己的事件，按 sequence 顺序，别的 session 不混入。
+  const collected = [];
+  let afterSequence = 0;
+  for (;;) {
+    const page = await readLogs({
+      type: 'logs:session-events-page',
+      version: 1,
+      limit: 7,
+      afterSequence,
+      maxEventId: snapshot.maxEventId,
+      sessionId: target.sessionId,
+    }, indexedDb);
+    collected.push(...page.events);
+    if (!page.hasMore) break;
+    assert.equal(Number.isInteger(page.nextAfterSequence) && page.nextAfterSequence > afterSequence, true);
+    afterSequence = page.nextAfterSequence;
+  }
+  assert.equal(collected.length, 40);
+  assert.deepEqual(collected.map((stored) => stored.sequence), Array.from({ length: 40 }, (_v, index) => index + 1));
+  assert.equal(collected.every((stored) => stored.sessionId === target.sessionId), true);
+
+  // 快照截断：maxEventId 固定在第 20 条时，只返回前 20 条。
+  const cutoffPage = await readLogs({
+    type: 'logs:session-events-page',
+    version: 1,
+    limit: 250,
+    afterSequence: 0,
+    maxEventId: cutoffEventId,
+    sessionId: target.sessionId,
+  }, indexedDb);
+  assert.deepEqual(cutoffPage.events.map((stored) => stored.sequence), Array.from({ length: 20 }, (_v, index) => index + 1));
+  assert.equal(cutoffPage.hasMore, false);
+
+  // 日志清理删除范围内的记录时分页原样跳过（走 fake IDB 的底层连接）。
+  const doomed = collected.filter((stored) => stored.sequence === 5 || stored.sequence === 6);
+  await new Promise((resolve, reject) => {
+    const transaction = indexedDb.database.transaction('events', 'readwrite');
+    const store = transaction.objectStore('events');
+    for (const stored of doomed) store.delete(stored.eventId);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+  });
+
+  const afterDelete = [];
+  afterSequence = 0;
+  for (;;) {
+    const page = await readLogs({
+      type: 'logs:session-events-page',
+      version: 1,
+      limit: 7,
+      afterSequence,
+      maxEventId: snapshot.maxEventId,
+      sessionId: target.sessionId,
+    }, indexedDb);
+    afterDelete.push(...page.events);
+    if (!page.hasMore) break;
+    afterSequence = page.nextAfterSequence;
+  }
+  assert.deepEqual(
+    afterDelete.map((stored) => stored.sequence),
+    Array.from({ length: 40 }, (_v, index) => index + 1).filter((sequence) => sequence !== 5 && sequence !== 6),
+  );
+});
+
+test('session events page rejects missing sessionId or invalid afterSequence', async () => {
+  const indexedDb = new FakeIndexedDB();
+  await assert.rejects(
+    readLogs({
+      type: 'logs:session-events-page', version: 1, limit: 10, afterSequence: 0, maxEventId: 5,
+    }, indexedDb),
+    /sessionId 无效/,
+  );
+  await assert.rejects(
+    readLogs({
+      type: 'logs:session-events-page', version: 1, limit: 10, afterSequence: -1, maxEventId: 5, sessionId: 's',
+    }, indexedDb),
+    /afterSequence 无效/,
+  );
+});

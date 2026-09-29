@@ -5,13 +5,16 @@ import { normalizeEventForStorage } from './privacy.js';
 import { sessionWithTabId, validateSession } from './session.js';
 import { serializeError } from '../extension/bridge-contract.js';
 import { aggregateCdnEvents } from './cdn.js';
+import { emptyLiveFacts, foldLiveEvent } from '../extension/popup-live.js';
 
 const BATCH_TYPE = 'diagnostic:events';
 const READ_TYPES = new Set([
   'logs:max-event-id',
   'logs:sessions-page',
   'logs:events-page',
+  'logs:session-events-page',
   'logs:cdn-summary',
+  'logs:live-summary',
 ]);
 
 function storageError(code, message, cause) {
@@ -202,7 +205,9 @@ function validateReadMessage(message) {
     'logs:max-event-id': ['type', 'version', 'sessionId'],
     'logs:sessions-page': ['type', 'version', 'limit', 'afterSessionId', 'maxEventId', 'sessionId'],
     'logs:events-page': ['type', 'version', 'limit', 'afterEventId', 'maxEventId', 'sessionId'],
+    'logs:session-events-page': ['type', 'version', 'limit', 'afterSequence', 'maxEventId', 'sessionId'],
     'logs:cdn-summary': ['type', 'version', 'sessionId'],
+    'logs:live-summary': ['type', 'version', 'sessionId'],
   }[message.type];
   if (Object.keys(message).some((field) => !allowed.includes(field))) {
     throw storageError('MESSAGE_INVALID', '日志读取消息包含未允许字段');
@@ -212,9 +217,17 @@ function validateReadMessage(message) {
       throw storageError('MESSAGE_INVALID', `${field} 无效`);
     }
   }
-  if (message.type === 'logs:cdn-summary'
+  if ((message.type === 'logs:cdn-summary' || message.type === 'logs:live-summary')
     && (typeof message.sessionId !== 'string' || message.sessionId.length === 0)) {
-    throw storageError('MESSAGE_INVALID', 'CDN summary sessionId 无效');
+    throw storageError('MESSAGE_INVALID', 'sessionId 无效');
+  }
+  if (message.type === 'logs:session-events-page') {
+    if (typeof message.sessionId !== 'string' || message.sessionId.length === 0) {
+      throw storageError('MESSAGE_INVALID', 'sessionId 无效');
+    }
+    if (!Number.isInteger(message.afterSequence) || message.afterSequence < 0) {
+      throw storageError('AFTER_SEQUENCE_INVALID', 'afterSequence 无效');
+    }
   }
   return message;
 }
@@ -396,11 +409,92 @@ async function readCdnSummary(message, indexedDbObject) {
   });
 }
 
+// 单个 session 的事件分页走 [sessionId, sequence] 索引：代价只随该 session 自身的
+// 事件数增长，与库里其他 session 的记录量无关（logs:events-page 按全局 eventId 扫
+// 全库，只为过滤出单个 session 时会把别的 session 的记录也反复反序列化）。
+// 同一 session 内 sequence 与 eventId 同随写入递增，因此快照截断沿用 eventId 比较；
+// 日志清理删掉的记录由游标自然跳过，快照之外的新增记录不进入本次读取。
+async function readSessionEventsPage(message, indexedDbObject) {
+  const limit = positiveLimit(message.limit);
+  const maxEventId = validMaxEventId(message.maxEventId);
+  const database = await openLogDatabase(indexedDbObject);
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(EVENT_STORE, 'readonly');
+    const index = transaction.objectStore(EVENT_STORE).index(EVENT_INDEX);
+    const request = index.openCursor(
+      IDBKeyRange.bound([message.sessionId, message.afterSequence + 1], [message.sessionId, Number.MAX_SAFE_INTEGER]),
+    );
+    const events = [];
+    let nextAfterSequence = message.afterSequence;
+    request.onerror = () => reject(request.error || new Error('读取 session 事件分页失败'));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (cursor === null) {
+        resolve({ events, hasMore: false, nextAfterSequence });
+        return;
+      }
+      const event = cursor.value;
+      const eventId = cursor.primaryKey ?? event.eventId;
+      if (Number.isInteger(eventId) && eventId > maxEventId) {
+        // 同 session 内 eventId 随 sequence 递增，越过快照后不再有范围内的记录。
+        resolve({ events, hasMore: false, nextAfterSequence });
+        return;
+      }
+      events.push(event);
+      nextAfterSequence = event.sequence;
+      if (events.length >= limit) {
+        resolve({ events, hasMore: true, nextAfterSequence });
+        return;
+      }
+      cursor.continue();
+    };
+    transaction.oncomplete = () => database.close();
+    transaction.onerror = () => reject(transaction.error || new Error('读取 session 事件分页事务失败'));
+  });
+}
+
+// 直播接管状态摘要：与 logs:cdn-summary 同形，按 [sessionId, sequence] 索引只读该
+// session 自己的事件并折叠出 popup 直播卡需要的只读事实，避免按全局 eventId 全库
+// 扫描（大库上那会让直播状态长时间停在「等待直播数据」）。
+async function readLiveSummary(message, indexedDbObject) {
+  const database = await openLogDatabase(indexedDbObject);
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(EVENT_STORE, 'readonly');
+    const index = transaction.objectStore(EVENT_STORE).index(EVENT_INDEX);
+    const request = index.openCursor(
+      IDBKeyRange.bound([message.sessionId, 0], [message.sessionId, Number.MAX_SAFE_INTEGER]),
+    );
+    const facts = emptyLiveFacts();
+    let maxEventId = 0;
+    let sampleCount = 0;
+    request.onerror = () => reject(request.error || new Error('读取直播状态事件失败'));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (cursor === null) {
+        resolve({ maxEventId, sampleCount, facts });
+        return;
+      }
+      const event = cursor.value;
+      const eventId = cursor.primaryKey ?? event.eventId;
+      if (Number.isInteger(eventId) && eventId > maxEventId) maxEventId = eventId;
+      if (event.code === 'bank.serve' || event.code === 'live.stream.stitch') {
+        sampleCount += 1;
+        foldLiveEvent(facts, event);
+      }
+      cursor.continue();
+    };
+    transaction.oncomplete = () => database.close();
+    transaction.onerror = () => reject(transaction.error || new Error('读取直播状态事务失败'));
+  });
+}
+
 async function readLogs(message, indexedDbObject) {
   validateReadMessage(message);
   if (message.type === 'logs:max-event-id') return readMaxEventId(message, indexedDbObject);
   if (message.type === 'logs:sessions-page') return readSessionsPage(message, indexedDbObject);
   if (message.type === 'logs:cdn-summary') return readCdnSummary(message, indexedDbObject);
+  if (message.type === 'logs:live-summary') return readLiveSummary(message, indexedDbObject);
+  if (message.type === 'logs:session-events-page') return readSessionEventsPage(message, indexedDbObject);
   return readEventsPage(message, indexedDbObject);
 }
 

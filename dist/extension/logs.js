@@ -139,22 +139,41 @@
     }
   }
   async function forEachEventPage(send2, sessionId, maxEventId, callback) {
-    let afterEventId = 0;
+    if (sessionId === void 0) {
+      let afterEventId = 0;
+      for (; ; ) {
+        const response = await send2({
+          type: "logs:events-page",
+          limit: 250,
+          afterEventId,
+          maxEventId
+        });
+        await callback(response.events);
+        if (!response.hasMore) break;
+        const nextAfterEventId = response.nextAfterEventId ?? response.events.at(-1)?.eventId;
+        if (!Number.isInteger(nextAfterEventId) || nextAfterEventId <= afterEventId) {
+          throw new Error("日志分页没有向前推进");
+        }
+        afterEventId = nextAfterEventId;
+      }
+      return;
+    }
+    let afterSequence = 0;
     for (; ; ) {
       const response = await send2({
-        type: "logs:events-page",
+        type: "logs:session-events-page",
         limit: 250,
-        afterEventId,
+        afterSequence,
         maxEventId,
-        ...sessionId === void 0 ? {} : { sessionId }
+        sessionId
       });
       await callback(response.events);
       if (!response.hasMore) break;
-      const nextAfterEventId = response.nextAfterEventId ?? response.events.at(-1)?.eventId;
-      if (!Number.isInteger(nextAfterEventId) || nextAfterEventId <= afterEventId) {
+      const nextAfterSequence = response.nextAfterSequence;
+      if (!Number.isInteger(nextAfterSequence) || nextAfterSequence <= afterSequence) {
         throw new Error("日志分页没有向前推进");
       }
-      afterEventId = nextAfterEventId;
+      afterSequence = nextAfterSequence;
     }
   }
   async function writeEvents(send2, writer, sessionId, maxEventId) {

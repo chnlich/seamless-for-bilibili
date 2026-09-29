@@ -11,6 +11,11 @@ export const NO_PAGE_MESSAGES = Object.freeze({
   preferenceSaved: '已保存，刷新页面后生效。',
 });
 
+// 活动标签页没有运行增强、但别的标签页仍在运行时，面板如实显示那一页的只读事实；
+// 这行标注面板的归属，避免被读成对当前标签页的判断（2026-09-28 用户实测：
+// 活动标签页已换到别的页面时，用户把这句话读成了正在看的直播页没有运行增强）。
+export const PROBED_TAB_NOTICE = '当前标签页没有运行增强；以下显示仍在运行增强的页面。';
+
 const TARGET_STATE_WORDS = Object.freeze({
   已应用: '已生效',
   等待: '等待生效',

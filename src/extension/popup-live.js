@@ -1,6 +1,6 @@
 // 面板路由、双开关偏好与直播只读事实：路由判定、开关读写、直播接管状态的事件折叠。
-// 数据全部来自 logs:max-event-id / logs:events-page（与开发日志同源），
-// 直播线路连接时间走既有 logs:cdn-summary，这里不做网络请求。
+// 直播事实由 worker 端摘要（logs:live-summary）按 session 索引折叠后给出，直播线路
+// 连接时间走既有 logs:cdn-summary，这里不做网络请求。
 
 import { EXTENSION_PREFERENCES } from '../constants.js';
 

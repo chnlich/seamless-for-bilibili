@@ -1,6 +1,8 @@
 // 导出的分页循环：导出开始时先固定 maxEventId 快照，再逐页读取写出 JSONL 行。
 // 读取范围固定为快照；日志清理删除范围内的记录时分页原样跳过，因此导出容忍
 // 进行中消失的行，快照之外的新增记录不会进入本次文件。
+// 单个 session 的导出走 session 索引分页（logs:session-events-page），代价只随该
+// session 自身的大小增长；全库导出仍按全局 eventId 分页（logs:events-page）。
 
 export async function writeLine(writer, value) {
   await writer.write(`${JSON.stringify(value)}\n`);
@@ -31,22 +33,41 @@ export async function writeSessions(send, writer, sessionId, maxEventId) {
 }
 
 export async function forEachEventPage(send, sessionId, maxEventId, callback) {
-  let afterEventId = 0;
+  if (sessionId === undefined) {
+    let afterEventId = 0;
+    for (;;) {
+      const response = await send({
+        type: 'logs:events-page',
+        limit: 250,
+        afterEventId,
+        maxEventId,
+      });
+      await callback(response.events);
+      if (!response.hasMore) break;
+      const nextAfterEventId = response.nextAfterEventId ?? response.events.at(-1)?.eventId;
+      if (!Number.isInteger(nextAfterEventId) || nextAfterEventId <= afterEventId) {
+        throw new Error('日志分页没有向前推进');
+      }
+      afterEventId = nextAfterEventId;
+    }
+    return;
+  }
+  let afterSequence = 0;
   for (;;) {
     const response = await send({
-      type: 'logs:events-page',
+      type: 'logs:session-events-page',
       limit: 250,
-      afterEventId,
+      afterSequence,
       maxEventId,
-      ...(sessionId === undefined ? {} : { sessionId }),
+      sessionId,
     });
     await callback(response.events);
     if (!response.hasMore) break;
-    const nextAfterEventId = response.nextAfterEventId ?? response.events.at(-1)?.eventId;
-    if (!Number.isInteger(nextAfterEventId) || nextAfterEventId <= afterEventId) {
+    const nextAfterSequence = response.nextAfterSequence;
+    if (!Number.isInteger(nextAfterSequence) || nextAfterSequence <= afterSequence) {
       throw new Error('日志分页没有向前推进');
     }
-    afterEventId = nextAfterEventId;
+    afterSequence = nextAfterSequence;
   }
 }
 

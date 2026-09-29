@@ -90,33 +90,6 @@
       pairRejected: false
     };
   }
-  function liveServeClass(result) {
-    if (result === "hit") return "engaged";
-    if (result === "failed") return "failed";
-    return "pass";
-  }
-  function foldLiveEvent(facts, event) {
-    if (event?.code === "live.stream.stitch") {
-      if (event?.data?.mismatch === true) facts.pairRejected = true;
-      return facts;
-    }
-    if (event?.code !== "bank.serve") return facts;
-    const data = event?.data !== null && typeof event?.data === "object" ? event.data : {};
-    facts.serveCount += 1;
-    const klass = liveServeClass(data.result);
-    if (klass === "engaged") {
-      facts.engagement = "engaged";
-      facts.pairedAddressAvailable = data.pairedAddressAvailable === true;
-      facts.pairRejected = false;
-    } else if (klass === "failed") {
-      facts.engagement = "failed";
-    }
-    return facts;
-  }
-  function foldLiveEvents(facts, events) {
-    for (const event of events || []) foldLiveEvent(facts, event);
-    return facts;
-  }
 
   // src/extension/popup-view.js
   var NO_PAGE_MESSAGES = Object.freeze({
@@ -127,6 +100,7 @@
     preferenceFailed: "读取设置失败，请稍后重开面板。",
     preferenceSaved: "已保存，刷新页面后生效。"
   });
+  var PROBED_TAB_NOTICE = "当前标签页没有运行增强；以下显示仍在运行增强的页面。";
   var TARGET_STATE_WORDS = Object.freeze({
     已应用: "已生效",
     等待: "等待生效",
@@ -294,11 +268,15 @@
   var nextRaceQueryAt = 0;
   var liveSessionId;
   var liveFacts = emptyLiveFacts();
-  var liveAfterEventId = 0;
   var liveError;
   var liveQueryInFlight = false;
   var nextLiveQueryAt = 0;
   var pageUnavailable = true;
+  var panelTabId;
+  var panelFromOtherTab = false;
+  var probeInFlight = false;
+  var nextProbeAt = 0;
+  var lastProbeResult;
   function showNotice(text) {
     noticeElement.textContent = text;
   }
@@ -381,7 +359,6 @@
     if (sessionIdValue === void 0 || sessionIdValue === "未提供") {
       liveSessionId = sessionIdValue;
       liveFacts = emptyLiveFacts();
-      liveAfterEventId = 0;
       liveError = void 0;
       renderLivePanel();
       return;
@@ -389,7 +366,6 @@
     if (liveSessionId !== sessionIdValue) {
       liveSessionId = sessionIdValue;
       liveFacts = emptyLiveFacts();
-      liveAfterEventId = 0;
       liveError = void 0;
       nextLiveQueryAt = 0;
     }
@@ -397,29 +373,9 @@
     liveQueryInFlight = true;
     renderLivePanel();
     try {
-      const max = await sendLogsRead({ type: "logs:max-event-id", sessionId: sessionIdValue });
-      let afterEventId = liveAfterEventId;
-      for (; ; ) {
-        const page = await sendLogsRead({
-          type: "logs:events-page",
-          limit: 250,
-          afterEventId,
-          maxEventId: max.maxEventId,
-          sessionId: sessionIdValue
-        });
-        if (liveSessionId !== sessionIdValue) return;
-        foldLiveEvents(liveFacts, page.events);
-        if (!page.hasMore) {
-          afterEventId = page.nextAfterEventId;
-          break;
-        }
-        const nextAfterEventId = page.nextAfterEventId ?? page.events.at(-1)?.eventId;
-        if (!Number.isInteger(nextAfterEventId) || nextAfterEventId <= afterEventId) {
-          throw new Error("日志分页没有向前推进");
-        }
-        afterEventId = nextAfterEventId;
-      }
-      liveAfterEventId = afterEventId;
+      const response = await sendLogsRead({ type: "logs:live-summary", sessionId: sessionIdValue });
+      if (liveSessionId !== sessionIdValue) return;
+      liveFacts = response.facts;
       liveError = void 0;
     } catch (error) {
       if (liveSessionId === sessionIdValue) liveError = error?.message || String(error);
@@ -435,47 +391,111 @@
     if (readouts?.routeKind === "video" || readouts?.routeKind === "other") return POPUP_ROUTE.VIDEO;
     return popupRouteForTabUrl(tabUrl);
   }
+  async function pollTab(tab) {
+    const readouts = await sendTabMessage(tab.id, "readouts:get");
+    const snapshot = popupRoute === POPUP_ROUTE.VIDEO ? await sendTabMessage(tab.id, "status:get") : void 0;
+    return { readouts, snapshot };
+  }
+  function tabRecency(tab) {
+    return Number.isFinite(tab.lastAccessed) ? tab.lastAccessed : 0;
+  }
+  async function findEnhancedTab(triedTabIds) {
+    const cacheUsable = lastProbeResult !== void 0 && !triedTabIds.has(lastProbeResult.tab.id);
+    if (probeInFlight || Date.now() < nextProbeAt && cacheUsable) return lastProbeResult;
+    probeInFlight = true;
+    try {
+      const tabs = await chrome.tabs.query({});
+      const candidates = tabs.filter((tab) => Number.isInteger(tab.id) && !triedTabIds.has(tab.id)).sort((left, right) => tabRecency(right) - tabRecency(left));
+      const answers = await Promise.allSettled(
+        candidates.map((tab) => sendTabMessage(tab.id, "readouts:get"))
+      );
+      lastProbeResult = void 0;
+      for (const [index, answer] of answers.entries()) {
+        if (answer.status === "fulfilled") {
+          lastProbeResult = { tab: candidates[index], readouts: answer.value };
+          break;
+        }
+      }
+      return lastProbeResult;
+    } finally {
+      probeInFlight = false;
+      nextProbeAt = Date.now() + 1e3;
+    }
+  }
+  async function collectPanelState(active) {
+    try {
+      return { tab: active, polled: await pollTab(active) };
+    } catch (error) {
+      if (error?.message !== RECEIVER_MISSING) throw error;
+    }
+    const tried = /* @__PURE__ */ new Set([active.id]);
+    for (; ; ) {
+      const probe = await findEnhancedTab(tried);
+      if (probe === void 0) return void 0;
+      tried.add(probe.tab.id);
+      try {
+        return { tab: probe.tab, polled: await pollTab(probe.tab) };
+      } catch (error) {
+        lastProbeResult = void 0;
+        nextProbeAt = 0;
+        if (error?.message !== RECEIVER_MISSING) throw error;
+      }
+    }
+  }
+  async function failPanel(message, { error } = {}) {
+    pageUnavailable = true;
+    panelTabId = void 0;
+    panelFromOtherTab = false;
+    resetPageData();
+    latestReadouts = void 0;
+    await refreshRace(void 0);
+    if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(void 0);
+    renderAll();
+    if (error !== void 0) console.error("[BilibiliBuffer] 读取页面状态失败", error);
+    showNotice(message);
+  }
   async function refresh() {
-    const tab = await activeTab();
-    const route = routeFor(latestReadouts, tab?.url);
+    const active = await activeTab();
+    const route = routeFor(latestReadouts, active?.url);
     if (route !== popupRoute) {
       popupRoute = route;
       applyPopupRoute(document, route);
     }
-    if (tab === void 0) {
+    if (active === void 0) {
       pageUnavailable = true;
+      panelTabId = void 0;
+      panelFromOtherTab = false;
       resetPageData();
       renderAll();
       showNotice(NO_PAGE_MESSAGES.noTab);
       return;
     }
+    let sourceTab;
+    let polled;
     try {
-      const readouts = await sendTabMessage(tab.id, "readouts:get");
-      latestReadouts = readouts;
-      latestForwardSeconds = Number.isFinite(readouts?.forwardSeconds) ? readouts.forwardSeconds : void 0;
-      sessionId = readouts?.diagnostics?.sessionId;
-      latestSnapshot = popupRoute === POPUP_ROUTE.VIDEO ? await sendTabMessage(tab.id, "status:get") : void 0;
-    } catch (error) {
-      if (error?.message === RECEIVER_MISSING) {
-        pageUnavailable = true;
-        resetPageData();
-        await refreshRace(void 0);
-        if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(void 0);
-        renderAll();
-        showNotice(NO_PAGE_MESSAGES.noReceiver);
+      const collected = await collectPanelState(active);
+      if (collected === void 0) {
+        await failPanel(NO_PAGE_MESSAGES.noReceiver);
         return;
       }
-      resetPageData();
-      latestReadouts = void 0;
-      await refreshRace(void 0);
-      if (popupRoute === POPUP_ROUTE.LIVE) await refreshLivePanel(void 0);
-      renderAll();
-      console.error("[BilibiliBuffer] 读取页面状态失败", error);
-      showNotice(NO_PAGE_MESSAGES.readFailed);
+      sourceTab = collected.tab;
+      polled = collected.polled;
+    } catch (error) {
+      await failPanel(NO_PAGE_MESSAGES.readFailed, { error });
       return;
     }
+    latestReadouts = polled.readouts;
+    latestForwardSeconds = Number.isFinite(polled.readouts?.forwardSeconds) ? polled.readouts.forwardSeconds : void 0;
+    sessionId = polled.readouts?.diagnostics?.sessionId;
+    panelTabId = sourceTab.id;
+    panelFromOtherTab = sourceTab.id !== active.id;
+    const readoutsRoute = routeFor(latestReadouts, active?.url);
+    if (readoutsRoute !== popupRoute) {
+      popupRoute = readoutsRoute;
+      applyPopupRoute(document, popupRoute);
+    }
     pageUnavailable = false;
-    showNotice("");
+    showNotice(panelFromOtherTab ? PROBED_TAB_NOTICE : "");
     document.body.dataset.ready = "true";
     renderAll();
     await refreshRace(sessionId);
@@ -505,9 +525,8 @@
     void (async () => {
       let fragment = "";
       try {
-        const tab = await activeTab();
-        if (tab !== void 0) {
-          const response = await sendTabMessage(tab.id, "diagnostics:session-id:get");
+        if (panelTabId !== void 0) {
+          const response = await sendTabMessage(panelTabId, "diagnostics:session-id:get");
           fragment = logSessionFragment(response.sessionId);
         }
         await chrome.tabs.create({ url: chrome.runtime.getURL(`logs.html${fragment}`) });

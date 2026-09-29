@@ -17,6 +17,7 @@ import {
 } from '../src/extension/popup-live.js';
 import {
   NO_PAGE_MESSAGES,
+  PROBED_TAB_NOTICE,
   applyPageAvailability,
   cdnLinesView,
   connectionText,
@@ -408,4 +409,191 @@ test('pages without the content script collapse the cards down to one friendly l
   assert.equal(document.querySelector('main').classList.contains('no-page'), false);
   assert.equal(NO_PAGE_MESSAGES.noReceiver.includes('Bilibili'), true);
   assert.equal(NO_PAGE_MESSAGES.noTab.includes('Bilibili'), true);
+});
+
+// ---- 完整 popup 装配（jsdom + 假 chrome）：活动标签页换页后的探测行为 ----
+
+const RECEIVER_MISSING = 'Could not establish connection. Receiving end does not exist.';
+
+function liveReadouts(sessionId = 'session-live-1') {
+  return {
+    version: 2,
+    routeKind: 'live',
+    forwardSeconds: undefined,
+    diagnostics: { sessionId },
+  };
+}
+
+function popupChromeMock({ activeTabIds, allTabIds, tabBehaviors }) {
+  const calls = { queries: [], tabMessages: [], runtimeMessages: [] };
+  const chrome = {
+    runtime: {
+      lastError: undefined,
+      getURL: (path) => `chrome-extension://test-extension-id/${path}`,
+      sendMessage: async (message) => {
+        calls.runtimeMessages.push(message);
+        if (message.type === 'logs:live-summary') {
+          return {
+            ok: true,
+            maxEventId: 10,
+            sampleCount: 2,
+            facts: { serveCount: 2, engagement: 'engaged', pairedAddressAvailable: true, pairRejected: false },
+          };
+        }
+        if (message.type === 'logs:cdn-summary') {
+          return {
+            ok: true,
+            maxEventId: 10,
+            sampleCount: 1,
+            summary: {
+              totalChunks: 1,
+              pairedChunks: 1,
+              pairCoverage: 1,
+              fetchedBytes: 16,
+              wastedBytes: 0,
+              wastedByteRatio: 0,
+              byResult: { fetched: 1, lost_race: 0, stalled: 0, aborted: 0, superseded: 0, network_error: 0, http_error: 0, invalid_response: 0, gave_up: 0 },
+              rows: [{ mirror: 'd1--ov-gotcha207.bilivideo.com', racesEntered: 1, wins: 1, winRate: 1, ttfbP50: 40, ttfbP90: 60, stalled: 0, failures: 0, bytesDelivered: 16 }],
+            },
+          };
+        }
+        throw new Error(`意外的日志读取消息 ${message.type}`);
+      },
+    },
+    storage: { local: { get: async () => ({}) } },
+    tabs: {
+      query: async (options) => {
+        calls.queries.push(options);
+        if (options.lastFocusedWindow === true && options.active === true) return activeTabIds();
+        return allTabIds();
+      },
+      sendMessage: async (tabId, message) => {
+        calls.tabMessages.push({ tabId, type: message.type });
+        const behavior = tabBehaviors.get(tabId);
+        if (behavior === undefined) throw new Error(RECEIVER_MISSING);
+        if (behavior === 'reject') throw new Error(RECEIVER_MISSING);
+        return behavior(message);
+      },
+      create: async () => ({}),
+    },
+  };
+  return { chrome, calls };
+}
+
+async function withPopupAssembly(chrome, run) {
+  const dom = new JSDOM(popupHtml);
+  const previousDocument = globalThis.document;
+  const previousWindow = globalThis.window;
+  const previousChrome = globalThis.chrome;
+  globalThis.document = dom.window.document;
+  globalThis.window = dom.window;
+  globalThis.chrome = chrome;
+  try {
+    await import(`../src/extension/popup.js?case=${Date.now()}-${Math.random()}`);
+    await run(dom.window);
+  } finally {
+    dom.window.dispatchEvent(new dom.window.Event('pagehide'));
+    globalThis.document = previousDocument;
+    globalThis.window = previousWindow;
+    globalThis.chrome = previousChrome;
+  }
+}
+
+function settleMacrotasks(rounds = 4) {
+  let remaining = rounds;
+  return new Promise((resolve) => {
+    const step = () => {
+      remaining -= 1;
+      if (remaining <= 0) resolve();
+      else setImmediate(step);
+    };
+    setImmediate(step);
+  });
+}
+
+test('popup keeps showing the running page when the active tab moves off the enhancement', async () => {
+  const behaviors = new Map([
+    [1, (message) => {
+      if (message.type === 'readouts:get') return liveReadouts();
+      if (message.type === 'status:get') return { version: 2, ok: true, state: '未提供' };
+      if (message.type === 'diagnostics:session-id:get') return { version: 2, ok: true, sessionId: 'session-live-1' };
+      throw new Error(`意外消息 ${message.type}`);
+    }],
+    [2, 'reject'],
+  ]);
+  const { chrome, calls } = popupChromeMock({
+    activeTabIds: () => [{ id: 2, active: true }],
+    allTabIds: () => [{ id: 1, lastAccessed: 100 }, { id: 2, active: true, lastAccessed: 200 }],
+    tabBehaviors: behaviors,
+  });
+  await withPopupAssembly(chrome, async (domWindow) => {
+    await settleMacrotasks();
+    const document = domWindow.document;
+    // 活动标签页（id 2）没有应答，探测到 id 1 仍在运行增强并显示那一页。
+    assert.equal(document.body.dataset.ready, 'true');
+    assert.equal(document.querySelector('main').classList.contains('no-page'), false);
+    assert.equal(document.querySelector('[data-notice]').textContent, PROBED_TAB_NOTICE);
+    assert.notEqual(document.querySelector('[data-notice]').textContent, NO_PAGE_MESSAGES.noReceiver);
+    assert.equal(document.querySelector('[data-live-takeover]').textContent, '正在按两条线路竞速下载');
+    // 先问活动标签页（id 2），它没有接收器；随后所有询问都落在仍在运行增强的 id 1。
+    const readoutTargets = calls.tabMessages
+      .filter((call) => call.type === 'readouts:get')
+      .map((call) => call.tabId);
+    assert.equal(readoutTargets[0], 2);
+    assert.equal(readoutTargets.length >= 2, true);
+    assert.equal(readoutTargets.slice(1).every((tabId) => tabId === 1), true);
+    // 直播状态走 worker 摘要，不再按全局 eventId 分页扫全库。
+    assert.equal(calls.runtimeMessages.some((message) => message.type === 'logs:live-summary'), true);
+    assert.equal(calls.runtimeMessages.some((message) => message.type === 'logs:events-page'), false);
+    // 打开日志按钮带的是面板所属标签页的 session。
+    document.querySelector('[data-open-logs]').click();
+    await settleMacrotasks();
+    assert.deepEqual(
+      calls.tabMessages.filter((call) => call.type === 'diagnostics:session-id:get').map((call) => call.tabId),
+      [1],
+    );
+  });
+});
+
+test('popup shows the not-running line only when no tab runs the enhancement', async () => {
+  const behaviors = new Map([[2, 'reject']]);
+  const { chrome, calls } = popupChromeMock({
+    activeTabIds: () => [{ id: 2, active: true }],
+    allTabIds: () => [{ id: 2, active: true }],
+    tabBehaviors: behaviors,
+  });
+  await withPopupAssembly(chrome, async (domWindow) => {
+    await settleMacrotasks();
+    const document = domWindow.document;
+    assert.equal(document.body.dataset.ready, undefined);
+    assert.equal(document.querySelector('main').classList.contains('no-page'), true);
+    assert.equal(document.querySelector('[data-notice]').textContent, NO_PAGE_MESSAGES.noReceiver);
+    assert.equal(calls.runtimeMessages.some((message) => message.type === 'logs:live-summary'), false);
+  });
+});
+
+test('popup does not probe other tabs while the active tab answers', async () => {
+  const behaviors = new Map([
+    [1, (message) => {
+      if (message.type === 'readouts:get') return liveReadouts();
+      if (message.type === 'status:get') return { version: 2, ok: true, state: '未提供' };
+      throw new Error(`意外消息 ${message.type}`);
+    }],
+  ]);
+  const { chrome, calls } = popupChromeMock({
+    activeTabIds: () => [{ id: 1, active: true }],
+    allTabIds: () => [{ id: 1, active: true }],
+    tabBehaviors: behaviors,
+  });
+  await withPopupAssembly(chrome, async (domWindow) => {
+    await settleMacrotasks();
+    const document = domWindow.document;
+    assert.equal(document.body.dataset.ready, 'true');
+    assert.equal(document.querySelector('[data-notice]').textContent, '');
+    assert.equal(calls.queries.some((options) => options.lastFocusedWindow !== true), false, '活动标签页应答时不发起全标签页探测');
+    assert.deepEqual(
+      calls.tabMessages.filter((call) => call.type === 'readouts:get').map((call) => call.tabId),
+      [1],
+    );
+  });
 });
