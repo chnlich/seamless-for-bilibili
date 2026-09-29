@@ -6,7 +6,10 @@
 // 这三种没有内容脚本可答的情形共享同一句如实提示（弹窗没有 tabs 权限、看不到地址，
 // 无法区分三者，提示对三者都成立并给出刷新路径）。第三组覆盖两个开关：默认开启、
 // 拨动后的保存提示、关闭并刷新页面后面板如实报开关已关闭（直播不空等数据、视频不
-// 谎称申请过缓存目标）、拨回并刷新后面板恢复。
+// 谎称申请过缓存目标）、拨回并刷新后面板恢复。第四组覆盖商店自动更新的真实时序：
+// 视频页正在拉流时重载同一播放源，旧文档的内容脚本作废，但下载层跑在页面主世界里
+// 不受影响——拉流必须续上、库存分片继续命中（网络零新增）、控制台只允许「日志持久化
+// 降级」这一类如实错误（扩展上下文作废后写库失败的既有信号，且必须出现以作阳性对照）。
 //
 //   node scripts/popup-window-check.mjs      （Windows；系统 Chrome 由 BILIBILI_E2E_CHROME 指定）
 //
@@ -38,6 +41,37 @@ if (chromeExecutablePath === undefined || chromeExecutablePath.length === 0) {
 const VIDEO_URL = 'https://www.bilibili.com/video/BVwin-check/';
 const LIVE_URL = 'https://live.bilibili.com/6-win-check';
 const OTHER_URL = 'https://example.com/popup-window-check';
+const UPDATE_VIDEO_URL = 'https://www.bilibili.com/video/BVwin-check-update/';
+const UPDATE_SEGMENT_URL = 'https://e2e-video.bilivideo.com/e2e/update-video.m4s?signature=update';
+const UPDATE_SEGMENT_TOTAL_SIZE = 4 * 1024 ** 2;
+const UPDATE_PULL_SPAN = 64 * 1024;
+const UPDATE_FIXTURE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>win-check update</title></head><body>
+<video id="media" muted playsinline width="320" height="180"></video>
+<script>
+  const segmentUrl = ${JSON.stringify(UPDATE_SEGMENT_URL)};
+  const totalSize = ${UPDATE_SEGMENT_TOTAL_SIZE};
+  const span = ${UPDATE_PULL_SPAN};
+  window.__updateFixture = { pulls: 0, errors: [] };
+  let cursor = 0;
+  async function pullOnce() {
+    const start = cursor % totalSize;
+    cursor += span;
+    try {
+      const response = await fetch(segmentUrl, { headers: { Range: 'bytes=' + start + '-' + (start + span - 1) } });
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength !== span) throw new Error('short read: ' + buffer.byteLength);
+      const view = new Uint8Array(buffer);
+      for (const probe of [0, span >> 1, span - 1]) {
+        if (view[probe] !== (start + probe) % 251) throw new Error('byte mismatch at ' + (start + probe));
+      }
+      window.__updateFixture.pulls += 1;
+    } catch (error) {
+      window.__updateFixture.errors.push(String((error && error.message) || error));
+    }
+  }
+  setInterval(pullOnce, 100);
+  window.player = { __core() { return { setStableBufferTime() {} }; } };
+</script></body></html>`;
 const FIXTURE_HTML = (kind) => `<!doctype html><html><head><meta charset="utf-8"><title>win-check ${kind}</title></head><body>${kind === 'video' ? '<video id="v" muted playsinline></video>' : ''}popup-window-check ${kind} fixture</body></html>`;
 
 const scenarios = [];
@@ -151,11 +185,21 @@ function makeDriver(transport) {
   return driver;
 }
 
+const FIXTURE_CORS_HEADERS = [
+  { name: 'Access-Control-Allow-Origin', value: '*' },
+  { name: 'Access-Control-Allow-Headers', value: 'Range, Content-Type' },
+  { name: 'Access-Control-Allow-Methods', value: 'GET, OPTIONS' },
+  { name: 'Access-Control-Expose-Headers', value: 'Content-Range, Content-Length' },
+];
+
 async function installFixtureInterception(driver) {
+  const stats = { updateSegmentGets: 0 };
   const keyFor = (url) => {
     if (url.startsWith(VIDEO_URL)) return 'video';
     if (url.startsWith(LIVE_URL)) return 'live';
     if (url.startsWith(OTHER_URL)) return 'other';
+    if (url.startsWith(UPDATE_VIDEO_URL)) return 'update';
+    if (url.startsWith(UPDATE_SEGMENT_URL)) return 'segment';
     return undefined;
   };
   await driver.send('Fetch.enable', {
@@ -163,12 +207,43 @@ async function installFixtureInterception(driver) {
       { urlPattern: `${VIDEO_URL}*`, requestStage: 'Request' },
       { urlPattern: `${LIVE_URL}*`, requestStage: 'Request' },
       { urlPattern: `${OTHER_URL}*`, requestStage: 'Request' },
+      { urlPattern: `${UPDATE_VIDEO_URL}*`, requestStage: 'Request' },
+      { urlPattern: `${UPDATE_SEGMENT_URL}*`, requestStage: 'Request' },
     ],
   });
   driver.on('Fetch.requestPaused', (event) => {
     const params = event.params;
     const kind = keyFor(params.request.url);
     assert.ok(kind !== undefined, `fixture interception saw an unmatched URL: ${params.request.url}`);
+    if (kind === 'segment') {
+      if (params.request.method === 'OPTIONS') {
+        void driver.send('Fetch.fulfillRequest', {
+          requestId: params.requestId, responseCode: 204, responseHeaders: FIXTURE_CORS_HEADERS,
+        }, event.sessionId);
+        return;
+      }
+      const rangeHeader = (params.request.headers.Range ?? params.request.headers.range ?? '');
+      const match = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader);
+      assert.ok(match !== null, `update segment request has no closed range: ${params.request.url}`);
+      stats.updateSegmentGets += 1;
+      const start = Number(match[1]);
+      const end = Math.min(Number(match[2]), UPDATE_SEGMENT_TOTAL_SIZE - 1);
+      const body = Buffer.alloc(end - start + 1);
+      for (let index = 0; index < body.length; index += 1) body[index] = (start + index) % 251;
+      void driver.send('Fetch.fulfillRequest', {
+        requestId: params.requestId,
+        responseCode: 206,
+        responseHeaders: [
+          ...FIXTURE_CORS_HEADERS,
+          { name: 'Content-Type', value: 'video/mp4' },
+          { name: 'Content-Length', value: String(body.length) },
+          { name: 'Content-Range', value: `bytes ${start}-${end}/${UPDATE_SEGMENT_TOTAL_SIZE}` },
+          { name: 'Cache-Control', value: 'no-store' },
+        ],
+        body: body.toString('base64'),
+      }, event.sessionId);
+      return;
+    }
     void driver.send('Fetch.fulfillRequest', {
       requestId: params.requestId,
       responseCode: 200,
@@ -176,9 +251,10 @@ async function installFixtureInterception(driver) {
         { name: 'Content-Type', value: 'text/html; charset=utf-8' },
         { name: 'Cache-Control', value: 'no-store' },
       ],
-      body: Buffer.from(FIXTURE_HTML(kind), 'utf8').toString('base64'),
+      body: Buffer.from(kind === 'update' ? UPDATE_FIXTURE_HTML : FIXTURE_HTML(kind), 'utf8').toString('base64'),
     }, event.sessionId);
   });
+  return stats;
 }
 
 async function findInitialPage(driver) {
@@ -257,13 +333,13 @@ async function setupBrowser(profileTag) {
   const { chrome, port } = await spawnChrome(profileDirectory);
   const transport = await connectToChrome(port);
   const driver = makeDriver(transport);
-  await installFixtureInterception(driver);
+  const fixtures = await installFixtureInterception(driver);
   const cleanup = async () => {
     await transport.close();
     await stopChrome(chrome);
     await rmTree(profileDirectory);
   };
-  return { driver, cleanup };
+  return { driver, cleanup, fixtures };
 }
 
 async function runMultiWindowPack() {
@@ -587,6 +663,127 @@ async function runSwitchPack() {
   }
 }
 
+// 第四组：商店自动更新的真实时序——视频页拉流正酣时重载同一播放源。
+// 重载作废旧文档的内容脚本（隔离世界），但下载层跑在页面主世界、不依赖扩展上下文，
+// 所以接管与库存继续工作：拉流续上、已入库分片继续命中（段地址零新增网络请求）。
+// 如实输掉的是日志持久化：旧上下文写库必败，只许出现「diagnostic persistence degraded」
+// 这一类错误（全量报告是既有口径，且它必须出现以作控制台捕获的阳性对照）。
+async function runUpdateMidPlaybackPack() {
+  const { driver, cleanup, fixtures } = await setupBrowser('popup-window-check-c-');
+  try {
+    const { id: extensionId } = await driver.send('Extensions.loadUnpacked', { path: extensionDirectory });
+    const launcher = await openLauncher(driver, extensionId);
+    const videoTabId = await driver.evaluate(launcher, `(async () => {
+      const tab = await chrome.tabs.create({ url: ${JSON.stringify(UPDATE_VIDEO_URL)}, active: true });
+      return tab.id;
+    })()`);
+    const videoTarget = await driver.findPageByUrl(UPDATE_VIDEO_URL);
+    const videoSession = await driver.attach(videoTarget.targetId);
+
+    const consoleErrors = [];
+    driver.on('Runtime.consoleAPICalled', (message) => {
+      if (message.sessionId !== videoSession || message.params.type !== 'error') return;
+      const text = (message.params.args || [])
+        .map((arg) => arg.value ?? arg.description ?? '')
+        .join(' ');
+      consoleErrors.push({ kind: 'console', text });
+    });
+    driver.on('Runtime.exceptionThrown', (message) => {
+      if (message.sessionId !== videoSession) return;
+      const details = message.params.exceptionDetails ?? {};
+      consoleErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
+    });
+
+    // 拉流稳定、预取覆盖全部 4 个分片（之后每次拉取都应命中内存），并确认接管已生效。
+    await waitForState(
+      () => driver.evaluate(videoSession, `window.__updateFixture === undefined ? null : JSON.parse(JSON.stringify(window.__updateFixture))`),
+      (state) => state !== null && state.errors.length === 0 && state.pulls >= 10
+        ? true
+        : 'waiting for steady segment pulls',
+      { what: 'fixture pulling segments before the update' },
+    );
+    await waitForState(
+      () => Promise.resolve(fixtures.updateSegmentGets),
+      (count) => count >= UPDATE_SEGMENT_TOTAL_SIZE / (1024 ** 2)
+        ? true
+        : 'waiting for prefetch to cover every chunk',
+      { what: 'prefetch covering the whole stream' },
+    );
+    const serveCount = await waitForState(
+      () => driver.evaluate(launcher, `(async () => {
+      const send = (message) => new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage(message, (response) => {
+          if (chrome.runtime.lastError !== undefined) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          resolve(response);
+        });
+      });
+      const snapshot = await send({ version: 1, type: 'logs:max-event-id' });
+      if (snapshot?.ok !== true) throw new Error('log snapshot was rejected');
+      let afterEventId = 0;
+      let count = 0;
+      for (;;) {
+        const page = await send({ version: 1, type: 'logs:events-page', limit: 250, afterEventId, maxEventId: snapshot.maxEventId });
+        if (page?.ok !== true) throw new Error('log event page was rejected');
+        for (const event of page.events) if (event.code === 'bank.serve') count += 1;
+        if (!page.hasMore) return count;
+        afterEventId = page.nextAfterEventId;
+      }
+    })()`),
+      (count) => count > 0 ? true : 'no bank.serve event persisted yet',
+      { what: 'takeover serving segments before the update' },
+    );
+
+    // 更新：重载同一播放源（扩展 id 不变）。旧 launcher 同属旧上下文，弃用并开新 launcher；
+    // 旧视频页的内容脚本必须死掉，否则本组什么也证明不了。
+    const { id: reloadedId } = await driver.send('Extensions.loadUnpacked', { path: extensionDirectory });
+    assert.equal(reloadedId, extensionId, '同一播放源重载后扩展 id 不变');
+    const launcherAfter = await openLauncher(driver, extensionId);
+    await waitForState(
+      () => driver.evaluate(launcherAfter, `chrome.tabs.sendMessage(
+        ${videoTabId},
+        { version: ${STATUS_MESSAGE_VERSION}, type: 'readouts:get' },
+      ).then(() => 'alive', () => 'dead')`),
+      (value) => value === 'dead' ? true : 'old content script still answering',
+      { what: 'old content script orphaned by the update' },
+    );
+    // 新开的 launcher 抢走了活动标签位：后台标签页的 setInterval 被 Chrome 压到
+    // 约 1 Hz，fixture 的拉流节奏会因此失真（实测 15 秒只剩 15 次）。把视频页激活
+    // 回来，让定时器恢复，观察窗量到的才是扩展自己的速度。
+    const activated = await driver.evaluate(launcherAfter, `chrome.tabs.update(${videoTabId}, { active: true }).then(() => true)`);
+    assert.equal(activated, true, '视频页重新激活失败');
+
+    // 观察窗：播放（分片拉取）必须续上，库存命中使段地址网络计数停在原值，
+    // 控制台只许持久化降级这一类如实错误。
+    const pullsBefore = await driver.evaluate(videoSession, `window.__updateFixture.pulls`);
+    const getsBefore = fixtures.updateSegmentGets;
+    await delay(15000);
+    const post = await driver.evaluate(videoSession, `window.__updateFixture === undefined ? null : JSON.parse(JSON.stringify(window.__updateFixture))`);
+    assert.deepEqual(post.errors, [], `更新后拉流出错 ${JSON.stringify(post.errors)}`);
+    const pullsAfter = post.pulls - pullsBefore;
+    assert.ok(pullsAfter >= 20, `更新后播放没有续上：15 秒只前进了 ${pullsAfter} 次拉取`);
+    assert.equal(
+      fixtures.updateSegmentGets,
+      getsBefore,
+      '更新后段地址出现新的网络请求：库存没有继续命中，下载层疑似随上下文一起死掉',
+    );
+    const persistenceErrorCount = consoleErrors
+      .filter((entry) => entry.text.includes('diagnostic persistence degraded')).length;
+    const unexpected = consoleErrors
+      .filter((entry) => !entry.text.includes('diagnostic persistence degraded'));
+    assert.deepEqual(unexpected, [], `更新后出现预期之外的扩展错误 ${JSON.stringify(unexpected)}`);
+    assert.ok(
+      persistenceErrorCount > 0,
+      '更新后没有任何持久化降级错误：日志写库失败的如实信号缺席，控制台捕获通道存疑',
+    );
+    markScenario('扩展更新时视频页正在拉流：拉流续上、库存继续命中，控制台只如实报日志持久化降级');
+  } finally {
+    await cleanup();
+  }
+}
+
 const provenance = await readProvenance();
 const commitSha = process.env.BILIBILI_E2E_COMMIT_SHA ?? provenance.commitSha ?? provenance.commitShaReason ?? 'unknown';
 console.log('popup window check provenance:', JSON.stringify({
@@ -599,6 +796,7 @@ console.log('popup window check provenance:', JSON.stringify({
 await runMultiWindowPack();
 await runPreExistingPagePack();
 await runSwitchPack();
+await runUpdateMidPlaybackPack();
 
 console.log(`popup window check passed: ${scenarios.length} scenarios`);
 for (const scenario of scenarios) console.log(`- ${scenario}`);
