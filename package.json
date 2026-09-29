@@ -12,6 +12,7 @@
     "test:contract": "node test/build-contract.mjs",
     "capture:store-images": "node scripts/capture-store-images.mjs",
     "test:e2e": "node scripts/browser-e2e.mjs",
+    "test:popup-window": "node scripts/popup-window-check.mjs",
     "smoke:external": "node scripts/smoke-external.mjs",
     "verify:browser": "node scripts/verify.mjs",
     "test": "npm run build && npm run test:unit && npm run test:contract && npm run test:e2e"

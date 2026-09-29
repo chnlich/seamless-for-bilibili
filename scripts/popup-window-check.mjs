@@ -10,6 +10,11 @@
 // 视频页正在拉流时重载同一播放源，旧文档的内容脚本作废，但下载层跑在页面主世界里
 // 不受影响——拉流必须续上、库存分片继续命中（网络零新增）、控制台只允许「日志持久化
 // 降级」这一类如实错误（扩展上下文作废后写库失败的既有信号，且必须出现以作阳性对照）。
+// 第五组覆盖商店用户最常走的路线：先开主页类（无媒体）Bilibili 页面，再点进视频页或
+// 直播间，全程开着弹窗看它会不会说错话。断言无媒体页面如实报没有播放中的视频、不谎称
+// 申请过缓存目标；弹窗日志入口落在零分片 session 上读取如实完成（NaN 与异常都算谎话）；
+// 同一标签页跨路由导航后面板跟随；活动标签页是扩展自身日志页时如实退到合并提示；弹窗
+// 控制台带阳性对照，全组零扩展错误才算通过。
 //
 //   node scripts/popup-window-check.mjs      （Windows；系统 Chrome 由 BILIBILI_E2E_CHROME 指定）
 //
@@ -27,7 +32,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectToChrome } from './console-capture.mjs';
 import { readProvenance } from './provenance.mjs';
-import { NO_PAGE_MESSAGES, SWITCH_OFF_TEXT } from '../src/extension/popup-view.js';
+import {
+  NO_PAGE_MESSAGES, SWITCH_OFF_TEXT, cdnLinesView, liveTakeoverText,
+} from '../src/extension/popup-view.js';
+import { emptyLiveFacts } from '../src/extension/popup-live.js';
 import { STATUS_MESSAGE_VERSION } from '../src/ui/panel.js';
 import { VOD_CONFIG } from '../src/constants.js';
 
@@ -41,6 +49,7 @@ if (chromeExecutablePath === undefined || chromeExecutablePath.length === 0) {
 const VIDEO_URL = 'https://www.bilibili.com/video/BVwin-check/';
 const LIVE_URL = 'https://live.bilibili.com/6-win-check';
 const OTHER_URL = 'https://example.com/popup-window-check';
+const HOME_URL = 'https://www.bilibili.com/win-check-nomedia';
 const UPDATE_VIDEO_URL = 'https://www.bilibili.com/video/BVwin-check-update/';
 const UPDATE_SEGMENT_URL = 'https://e2e-video.bilivideo.com/e2e/update-video.m4s?signature=update';
 const UPDATE_SEGMENT_TOTAL_SIZE = 4 * 1024 ** 2;
@@ -198,6 +207,7 @@ async function installFixtureInterception(driver) {
     if (url.startsWith(VIDEO_URL)) return 'video';
     if (url.startsWith(LIVE_URL)) return 'live';
     if (url.startsWith(OTHER_URL)) return 'other';
+    if (url.startsWith(HOME_URL)) return 'nomedia';
     if (url.startsWith(UPDATE_VIDEO_URL)) return 'update';
     if (url.startsWith(UPDATE_SEGMENT_URL)) return 'segment';
     return undefined;
@@ -207,6 +217,7 @@ async function installFixtureInterception(driver) {
       { urlPattern: `${VIDEO_URL}*`, requestStage: 'Request' },
       { urlPattern: `${LIVE_URL}*`, requestStage: 'Request' },
       { urlPattern: `${OTHER_URL}*`, requestStage: 'Request' },
+      { urlPattern: `${HOME_URL}*`, requestStage: 'Request' },
       { urlPattern: `${UPDATE_VIDEO_URL}*`, requestStage: 'Request' },
       { urlPattern: `${UPDATE_SEGMENT_URL}*`, requestStage: 'Request' },
     ],
@@ -304,6 +315,9 @@ const POPUP_STATE_EXPRESSION = `(async () => {
     targetValue: q('[data-target-value]').textContent,
     bufferSeconds: q('[data-buffer-seconds]').textContent,
     bufferGoal: q('[data-buffer-goal]').textContent,
+    bufferNoteHidden: q('[data-buffer-note]').hidden,
+    bufferNote: q('[data-buffer-note]').textContent,
+    cdnCard: q('[data-cdn-lines]').textContent,
   };
 })()`;
 
@@ -853,19 +867,226 @@ async function runUpdateMidPlaybackPack() {
   }
 }
 
+// 第五组：无媒体 Bilibili 页面与随导航变化的面板（见文件头说明）。
+// 期望值一律从 src 的既有导出推导（cdnLinesView 的空态、liveTakeoverText 的事实折叠、
+// NO_PAGE_MESSAGES 的合并提示）：本组检查的是浏览器里装配出来的面板，不是文案字面。
+async function runNoMediaPagePack() {
+  const { driver, cleanup } = await setupBrowser('popup-window-check-d-');
+  try {
+    const { id: extensionId } = await driver.send('Extensions.loadUnpacked', { path: extensionDirectory });
+    const popupUrl = `chrome-extension://${extensionId}/popup.html`;
+    const logsPagePrefix = `chrome-extension://${extensionId}/logs.html`;
+    const launcher = await openLauncher(driver, extensionId);
+    const world = await driver.evaluate(launcher, `(async () => {
+      const homeTab = await chrome.tabs.create({ url: ${JSON.stringify(HOME_URL)}, active: true });
+      const popupTab = await chrome.tabs.create({ url: ${JSON.stringify(popupUrl)}, active: false });
+      await chrome.tabs.update(homeTab.id, { active: true });
+      const readout = async (tabId) => {
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          try {
+            const response = await chrome.tabs.sendMessage(tabId, { version: ${STATUS_MESSAGE_VERSION}, type: 'readouts:get' });
+            return response.routeKind ?? null;
+          } catch (error) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+        }
+        throw new Error(\`content script never answered readouts for tab \${tabId}\`);
+      };
+      const homeKind = await readout(homeTab.id);
+      return { windowId: homeTab.windowId, homeTabId: homeTab.id, popupTabId: popupTab.id, homeKind };
+    })()`);
+    console.log('no-media world:', JSON.stringify(world));
+    assert.equal(world.homeKind, 'other', JSON.stringify(world));
+
+    const readState = await popupStateReader(driver, popupUrl);
+    const popupTarget = await driver.findPageByUrl(popupUrl);
+    const popupSession = await driver.attach(popupTarget.targetId);
+    const consoleErrors = [];
+    driver.on('Runtime.consoleAPICalled', (message) => {
+      if (message.sessionId !== popupSession || message.params.type !== 'error') return;
+      const text = (message.params.args || [])
+        .map((arg) => arg.value ?? arg.description ?? '')
+        .join(' ');
+      consoleErrors.push({ kind: 'console', text });
+    });
+    driver.on('Runtime.exceptionThrown', (message) => {
+      if (message.sessionId !== popupSession) return;
+      const details = message.params.exceptionDetails ?? {};
+      consoleErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
+    });
+
+    const cdnEmptyMessage = cdnLinesView(undefined, undefined, false).message;
+    const liveWaitingText = liveTakeoverText(emptyLiveFacts(), { liveEnabled: true });
+
+    // 主页类（无媒体）页面：缓冲如实报没有播放中的视频，申请状态行整体收起，
+    // 线路如实报还没有数据，直播卡片不出现，提示句为空。
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
+        && state.bufferCardHidden === false
+        && state.bufferNoteHidden === false && state.bufferNote.length > 0
+        && state.bufferSeconds === '—' && state.bufferGoal === ''
+        && state.stateLineHidden === true && state.targetValue === ''
+        && state.livePanelHidden === true
+        && state.cdnCard === cdnEmptyMessage
+        ? true
+        : 'expected the honest no-media page state',
+      { what: 'popup on a Bilibili page with no playing media' },
+    );
+    markScenario('无媒体 Bilibili 页面：缓冲如实报没有播放中的视频、不谎称已申请缓存，线路如实报还没有数据');
+
+    // 弹窗日志入口落在零分片 session：读取如实完成，覆盖率按 0/0 如实显示，不出现 NaN。
+    await driver.evaluate(popupSession, `document.querySelector('[data-open-logs]').click()`);
+    const [fragmentLogsTarget] = await waitForState(
+      async () => (await driver.targets())
+        .filter((info) => info.type === 'page' && info.url.startsWith(`${logsPagePrefix}#sessionId=`)),
+      (candidates) => candidates.length === 1 ? true : `expected 1 popup-opened logs page, got ${candidates.length}`,
+      { what: 'popup-opened logs page for the no-media session' },
+    );
+    const logsSession = await driver.attach(fragmentLogsTarget.targetId);
+    const readCdnPanel = () => driver.evaluate(logsSession, `({
+      filterValue: document.querySelector('[data-session-filter]').value,
+      buttonDisabled: document.querySelector('[data-cdn-refresh]').disabled,
+      status: document.querySelector('[data-cdn-status]').textContent,
+      summary: document.querySelector('[data-cdn-summary]').textContent,
+    })`);
+    await waitForState(
+      readCdnPanel,
+      (state) => state.filterValue === 'current' && state.buttonDisabled === false
+        ? true
+        : `unexpected CDN panel state ${JSON.stringify(state)}`,
+      { what: 'CDN panel ready on the zero-chunk session' },
+    );
+    await driver.evaluate(logsSession, `document.querySelector('[data-cdn-refresh]').click()`);
+    const zeroChunkRead = await waitForState(
+      readCdnPanel,
+      (state) => state.status.startsWith('读取完成')
+        ? true
+        : `unexpected CDN status ${JSON.stringify(state)}`,
+      { what: 'CDN read on a session with zero chunk events' },
+    );
+    assert.equal(zeroChunkRead.status.includes('覆盖 0 条事件'), true, JSON.stringify(zeroChunkRead));
+    assert.equal(zeroChunkRead.summary.includes('配对覆盖率 0/0'), true, JSON.stringify(zeroChunkRead));
+    assert.equal(zeroChunkRead.summary.includes('NaN'), false, JSON.stringify(zeroChunkRead));
+    markScenario('弹窗日志入口落在零分片 session：CDN 读取如实完成，覆盖率按 0/0 显示、无 NaN');
+
+    // 关掉弹出的日志页，活动标签页回到无媒体页。
+    await driver.evaluate(launcher, `(async () => {
+      const me = await chrome.tabs.getCurrent();
+      const active = await chrome.tabs.query({ active: true, windowId: me.windowId });
+      if (active.length !== 1 || active[0].id === me.id
+        || active[0].id === ${world.homeTabId} || active[0].id === ${world.popupTabId}) {
+        throw new Error('expected the popup-opened logs page to be the only active tab');
+      }
+      await chrome.tabs.remove(active[0].id);
+      await chrome.tabs.update(${world.homeTabId}, { active: true });
+    })()`);
+
+    const probeRoute = async (expected) => waitForState(
+      () => driver.evaluate(launcher, `(async () => {
+        try {
+          const response = await chrome.tabs.sendMessage(${world.homeTabId}, { version: ${STATUS_MESSAGE_VERSION}, type: 'readouts:get' });
+          return response.routeKind ?? null;
+        } catch (error) {
+          return null;
+        }
+      })()`),
+      (kind) => kind === expected ? true : `routeKind ${JSON.stringify(kind)}`,
+      { what: `readouts route after navigating to ${expected}` },
+    );
+
+    // 同一标签页导航到视频页：面板跟随，收起无媒体提示。
+    const homeTarget = await driver.findPageByUrl(HOME_URL);
+    const homeSession = await driver.attach(homeTarget.targetId);
+    await driver.send('Page.enable', {}, homeSession);
+    await driver.send('Page.navigate', { url: VIDEO_URL }, homeSession);
+    await probeRoute('video');
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
+        && state.livePanelHidden === true
+        && state.bufferCardHidden === false
+        && state.bufferNoteHidden === true
+        && state.cdnCard === cdnEmptyMessage
+        ? true
+        : 'expected the popup to follow after the tab navigated to a video page',
+      { what: 'popup after the tab navigates to a video page' },
+    );
+    markScenario('同一标签页导航到视频页：面板跟随，收起无媒体提示');
+
+    // 同一标签页导航到直播页：切直播布局，如实报等待直播数据。
+    await driver.send('Page.navigate', { url: LIVE_URL }, homeSession);
+    await probeRoute('live');
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
+        && state.livePanelHidden === false
+        && state.takeover === liveWaitingText
+        && state.bufferCardHidden === true
+        && state.cdnCard === cdnEmptyMessage
+        ? true
+        : 'expected the popup to follow after the tab navigated to a live room',
+      { what: 'popup after the tab navigates to a live room' },
+    );
+    markScenario('同一标签页导航到直播页：面板切直播布局，如实报等待直播数据');
+
+    // 活动标签页切到扩展自身日志页：如实退到合并提示，不谎报读取失败。
+    await driver.evaluate(launcher, `(async () => {
+      const me = await chrome.tabs.getCurrent();
+      await chrome.tabs.update(me.id, { active: true });
+    })()`);
+    await waitForState(
+      readState,
+      (state) => state.noPage === true && state.notice === NO_PAGE_MESSAGES.noReceiver
+        ? true
+        : 'expected the truthful merged message while the logs page is the active tab',
+      { what: 'popup while the extension logs page is the active tab' },
+    );
+    markScenario('活动标签页切到扩展自身日志页：如实提示未运行，不谎报读取失败');
+
+    // 控制台通道的阳性对照：探针必须被捕获。
+    await driver.evaluate(popupSession, `console.error('[BilibiliBuffer] win-check-d 控制台探针 win-check-d-probe')`);
+    await waitForState(
+      () => Promise.resolve(consoleErrors.length),
+      () => (consoleErrors.some((entry) => entry.text.includes('win-check-d-probe'))
+        ? true
+        : 'console probe not captured'),
+      { what: 'popup console positive control' },
+    );
+
+    // 恢复：活动标签页回到直播页，面板恢复。
+    await driver.evaluate(launcher, `chrome.tabs.update(${world.homeTabId}, { active: true })`);
+    await waitForState(
+      readState,
+      (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
+        && state.livePanelHidden === false && state.takeover === liveWaitingText
+        ? true
+        : 'expected the popup to recover on the live tab',
+      { what: 'popup recovery after the live tab is active again' },
+    );
+    const unexpected = consoleErrors.filter((entry) => !entry.text.includes('win-check-d-probe'));
+    assert.deepEqual(unexpected, [], `本组场景出现预期之外的弹窗错误 ${JSON.stringify(unexpected)}`);
+    markScenario('重新激活直播标签页：面板恢复，全组弹窗控制台零扩展错误（阳性对照通过）');
+  } finally {
+    await cleanup();
+  }
+}
+
 const provenance = await readProvenance();
+
 const commitSha = process.env.BILIBILI_E2E_COMMIT_SHA ?? provenance.commitSha ?? provenance.commitShaReason ?? 'unknown';
 console.log('popup window check provenance:', JSON.stringify({
   commitSha,
   buildId: provenance.buildId,
   chrome: chromeExecutablePath,
-  fixtures: { video: VIDEO_URL, live: LIVE_URL, other: OTHER_URL },
+  fixtures: { video: VIDEO_URL, live: LIVE_URL, other: OTHER_URL, nomedia: HOME_URL },
 }));
 
 await runMultiWindowPack();
 await runPreExistingPagePack();
 await runSwitchPack();
 await runUpdateMidPlaybackPack();
+await runNoMediaPagePack();
 
 console.log(`popup window check passed: ${scenarios.length} scenarios`);
 for (const scenario of scenarios) console.log(`- ${scenario}`);
