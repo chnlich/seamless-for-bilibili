@@ -146,7 +146,7 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 - popup 面板只读，不影响播放、不上传；内容侧错误只在存在时以一句人话显示。面板只报告它所附着窗口的活动标签页（`chrome.windows.getCurrent()` 定位窗口，在该窗口内取活动标签页），不向其余标签页询问。活动标签页没有内容脚本可答时只显示一句提示：弹窗没有 `tabs` 权限、看不到标签页地址（按 url 过滤也恒为空），分不出「非 Bilibili 页面」与「扩展安装或更新前就已打开的 Bilibili 页面」，两种情况下这句话都成立并给出刷新路径。扩展更新作废的只是旧上下文与日志写库（写库失败继续按既有口径全量报到控制台）：旧页面的下载层跑在页面主世界、不受影响，实测更新后旧页面照常供流、播放不断，已入库分片零新增网络请求（`scripts/popup-window-check.mjs` 的更新组覆盖）；此时弹窗同样联系不上旧脚本，同一句提示照旧成立，刷新一次后新版本的增强接入（`src/extension/popup.js`、`src/extension/popup-tabs.js`、`src/extension/popup-view.js`）。popup 底部保留「打开开发日志」入口。日志页开头写明保留期限：日志只保留最近 3 天（72 小时），更早的记录自动删除。
 - 所有 `media.*` 事件都附带同一帧周期聚合的 `frameTiming`，包括 presentedTotal、maxFrameGapMs、processingMs、displayLead、mediaStep 与 append 相关指标（`src/diagnostics/media.js`、`src/diagnostics/privacy.js` 的 `safeFrameTiming`）。这些细节只进开发日志；popup 不再展示 readyState、networkState、轨道 ranges、库存计数或持久化状态等开发读数。
 - 下载层库存只列出本次播放实际参与的分轨（`resourceState` 或 `chunks` 中出现过的资源），不展示地址簿里的所有表示（`src/bank/inventory.js` 的资源并集过滤）；它作为 `bank.inventory` 诊断事件进入开发日志。
-- 日志页提供 CDN 竞速面板，按镜像统计竞速进入、胜出、TTFB P50/P90、停滞与交付字节，并给出配对覆盖率与浪费字节率（`src/diagnostics/logs.js`、`src/diagnostics/worker.js`）。
+- 日志页提供 CDN 竞速面板，按镜像统计竞速进入、胜出、TTFB P50/P90、停滞与交付字节，并给出配对覆盖率与浪费字节率。面板只按单个 session 统计，范围取日志页所选的 当前 session（从弹窗的「打开开发日志」进入本页时自动带上）；选不到 session 时按钮禁用并在状态行直说入口（`src/diagnostics/logs.js`、`src/diagnostics/logs-view.js`、`src/diagnostics/worker.js`）。
 
 ## 构建
 

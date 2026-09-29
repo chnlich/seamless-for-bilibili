@@ -1,6 +1,7 @@
 import { sessionIdFromHash } from './log-session.js';
 import { aggregateCdnEvents } from './cdn.js';
 import { writeEvents, writeSessions } from './export.js';
+import { CDN_RANGE_MESSAGES, cdnPanelState } from './logs-view.js';
 
 export { aggregateCdnEvents };
 
@@ -112,7 +113,33 @@ async function exportLogs() {
   }
 }
 
-sessionSelect.addEventListener('change', renderDetails);
+// CDN 按钮的禁用有两个来源：范围选不到 session（cdnRangeUnavailable，来自
+// logs-view.js 的范围语义）与一次读取在途（cdnReadInFlight）。两处都只经过
+// renderCdnAvailability 写按钮，状态行在禁用期间保存（cdnSavedStatus）、
+// 恢复启用时还原，读取期间切走范围时读取结果写入保存位而不是状态行。
+let cdnReadInFlight = false;
+let cdnRangeUnavailable = false;
+let cdnSavedStatus = CDN_RANGE_MESSAGES.idle;
+
+function renderCdnAvailability() {
+  const unavailable = selectedSessionId() === undefined;
+  if (unavailable !== cdnRangeUnavailable) {
+    cdnRangeUnavailable = unavailable;
+    if (unavailable && !cdnReadInFlight) cdnSavedStatus = cdnStatusElement.textContent;
+    const state = cdnPanelState({
+      sessionSelected: !unavailable,
+      currentSessionAvailable: currentSessionId !== undefined,
+      lastStatus: cdnSavedStatus,
+    });
+    cdnStatusElement.textContent = state.status;
+  }
+  cdnButton.disabled = cdnReadInFlight || cdnRangeUnavailable;
+}
+
+sessionSelect.addEventListener('change', () => {
+  renderDetails();
+  renderCdnAvailability();
+});
 exportButton.addEventListener('click', async () => {
   exportButton.disabled = true;
   statusElement.textContent = '正在固定 eventId 并流式导出…';
@@ -131,19 +158,26 @@ exportButton.addEventListener('click', async () => {
 });
 
 cdnButton.addEventListener('click', async () => {
-  cdnButton.disabled = true;
+  // 范围选不到 session 时按钮是禁用的，点不到这里；万一走到，worker 的
+  // sessionId 校验如实拍错，不再另设提示。
+  const sessionId = selectedSessionId();
+  cdnReadInFlight = true;
+  renderCdnAvailability();
   cdnStatusElement.textContent = '正在读取 bank.fetch.chunk 事件…';
   try {
-    const sessionId = selectedSessionId();
-    if (sessionId === undefined) throw new Error('读取 CDN racing 前请先选择一个 session');
     const response = await send({ type: 'logs:cdn-summary', sessionId });
     renderCdnPanel(response.summary);
-    cdnStatusElement.textContent = `读取完成，覆盖 ${response.sampleCount} 条事件，截止 eventId ${response.maxEventId}。`;
+    const doneText = `读取完成，覆盖 ${response.sampleCount} 条事件，截止 eventId ${response.maxEventId}。`;
+    if (selectedSessionId() === sessionId) cdnStatusElement.textContent = doneText;
+    else cdnSavedStatus = doneText;
   } catch (error) {
-    cdnStatusElement.textContent = `读取失败: ${display(error?.message || error)}`;
+    const failureText = `读取失败: ${display(error?.message || error)}`;
+    if (selectedSessionId() === sessionId) cdnStatusElement.textContent = failureText;
+    else cdnSavedStatus = failureText;
     console.error('[BilibiliBuffer] CDN 面板读取失败', error);
   } finally {
-    cdnButton.disabled = false;
+    cdnReadInFlight = false;
+    renderCdnAvailability();
   }
 });
 
@@ -153,3 +187,4 @@ if (currentSessionId === undefined) {
   sessionSelect.value = 'current';
 }
 renderDetails();
+renderCdnAvailability();

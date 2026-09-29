@@ -277,6 +277,10 @@ function logsPageFixture() {
       return element;
     },
   };
+  const initialText = new Map([
+    // 与 logs.html 出厂文本一致：按钮状态行初始即「尚未读取」，不是空串。
+    ['[data-cdn-status]', '尚未读取 CDN racing。'],
+  ]);
   for (const selector of [
     '[data-session-filter]',
     '[data-export]',
@@ -292,7 +296,7 @@ function logsPageFixture() {
       ownerDocument: documentObject,
       value: '',
       disabled: false,
-      textContent: '',
+      textContent: initialText.get(selector) ?? '',
       listeners,
       addEventListener(type, listener) { listeners.set(type, listener); },
       querySelector() { return { disabled: false }; },
@@ -1446,6 +1450,8 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
     assert.doesNotMatch(rendered, /https?:\/\/|signature=secret/);
 
     fixture.elements.get('[data-session-filter]').value = 'session-cdn';
+    fixture.elements.get('[data-session-filter]').listeners.get('change')();
+    assert.equal(fixture.elements.get('[data-cdn-refresh]').disabled, false);
     globalThis.chrome.runtime.sendMessage = async (message) => {
       fixture.messages.push(message);
       assert.equal(message.type, 'logs:cdn-summary');
@@ -1458,6 +1464,76 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
     assert.equal(fixture.messages.some((message) => message.type === 'diagnostic:events'), false);
   } finally {
     fixture.restore();
+  }
+});
+
+// CDN 面板只按单个 session 统计，而页面能选的 session 只有当前 session：
+// 选不到 session 时按钮禁用、状态行直说路径（2026-09-29 实测按钮必报
+// 「请选择一个 session」，页面上却无项可选，是条死路）。
+test('logs page CDN button follows the selectable session instead of dead-ending', async () => {
+  const { CDN_RANGE_MESSAGES, cdnPanelState } = await import('../src/diagnostics/logs-view.js');
+  assert.deepEqual(
+    cdnPanelState({ sessionSelected: true, currentSessionAvailable: false, lastStatus: undefined }),
+    { disabled: false, status: CDN_RANGE_MESSAGES.idle },
+  );
+  assert.deepEqual(
+    cdnPanelState({ sessionSelected: false, currentSessionAvailable: true, lastStatus: 'x' }),
+    { disabled: true, status: CDN_RANGE_MESSAGES.pickCurrent },
+  );
+  assert.deepEqual(
+    cdnPanelState({ sessionSelected: false, currentSessionAvailable: false, lastStatus: 'x' }),
+    { disabled: true, status: CDN_RANGE_MESSAGES.noSessionEntry },
+  );
+
+  // 无 #sessionId 打开：按钮禁用并直说入口，选到 session 后恢复启用，
+  // 读取过的状态在禁用期间保存、恢复启用时还原。
+  const fixture = logsPageFixture();
+  try {
+    await fixture.importModule();
+    const button = fixture.elements.get('[data-cdn-refresh]');
+    const status = fixture.elements.get('[data-cdn-status]');
+    const filter = fixture.elements.get('[data-session-filter]');
+    assert.equal(button.disabled, true);
+    assert.equal(status.textContent, CDN_RANGE_MESSAGES.noSessionEntry);
+
+    filter.value = 'session-x';
+    filter.listeners.get('change')();
+    assert.equal(button.disabled, false);
+    assert.equal(status.textContent, CDN_RANGE_MESSAGES.idle);
+
+    globalThis.chrome.runtime.sendMessage = async (message) => {
+      assert.equal(message.type, 'logs:cdn-summary');
+      return {
+        ok: true,
+        maxEventId: 3,
+        sampleCount: 0,
+        summary: { pairedChunks: 0, totalChunks: 0, pairCoverage: 0, wastedByteRatio: 0, rows: [] },
+      };
+    };
+    await button.listeners.get('click')();
+    assert.match(status.textContent, /读取完成/);
+
+    filter.value = '';
+    filter.listeners.get('change')();
+    assert.equal(button.disabled, true);
+    assert.equal(status.textContent, CDN_RANGE_MESSAGES.noSessionEntry);
+    filter.value = 'session-x';
+    filter.listeners.get('change')();
+    assert.equal(button.disabled, false);
+    assert.match(status.textContent, /读取完成/);
+  } finally {
+    fixture.restore();
+  }
+
+  // 带 #sessionId 打开（弹窗「打开开发日志」的路径）：范围默认当前 session，按钮可用。
+  const withSession = logsPageFixture();
+  try {
+    globalThis.window = { location: { hash: '#sessionId=s-1' } };
+    await withSession.importModule();
+    assert.equal(withSession.elements.get('[data-session-filter]').value, 'current');
+    assert.equal(withSession.elements.get('[data-cdn-refresh]').disabled, false);
+  } finally {
+    withSession.restore();
   }
 });
 

@@ -182,6 +182,22 @@
     });
   }
 
+  // src/diagnostics/logs-view.js
+  var CDN_RANGE_MESSAGES = Object.freeze({
+    idle: "尚未读取 CDN racing。",
+    noSessionEntry: "CDN racing 按单个 session 统计：从 Bilibili 视频页或直播页的弹窗里点「打开开发日志」，本页才会带上当前 session。",
+    pickCurrent: "CDN racing 按单个 session 统计：把导出范围切到 当前 session 后读取。"
+  });
+  function cdnPanelState({ sessionSelected, currentSessionAvailable, lastStatus }) {
+    if (sessionSelected === true) {
+      return { disabled: false, status: lastStatus ?? CDN_RANGE_MESSAGES.idle };
+    }
+    return {
+      disabled: true,
+      status: currentSessionAvailable === true ? CDN_RANGE_MESSAGES.pickCurrent : CDN_RANGE_MESSAGES.noSessionEntry
+    };
+  }
+
   // src/diagnostics/logs.js
   var MESSAGE_VERSION = 1;
   var sessionSelect = document.querySelector("[data-session-filter]");
@@ -279,7 +295,27 @@
       throw error;
     }
   }
-  sessionSelect.addEventListener("change", renderDetails);
+  var cdnReadInFlight = false;
+  var cdnRangeUnavailable = false;
+  var cdnSavedStatus = CDN_RANGE_MESSAGES.idle;
+  function renderCdnAvailability() {
+    const unavailable = selectedSessionId() === void 0;
+    if (unavailable !== cdnRangeUnavailable) {
+      cdnRangeUnavailable = unavailable;
+      if (unavailable && !cdnReadInFlight) cdnSavedStatus = cdnStatusElement.textContent;
+      const state = cdnPanelState({
+        sessionSelected: !unavailable,
+        currentSessionAvailable: currentSessionId !== void 0,
+        lastStatus: cdnSavedStatus
+      });
+      cdnStatusElement.textContent = state.status;
+    }
+    cdnButton.disabled = cdnReadInFlight || cdnRangeUnavailable;
+  }
+  sessionSelect.addEventListener("change", () => {
+    renderDetails();
+    renderCdnAvailability();
+  });
   exportButton.addEventListener("click", async () => {
     exportButton.disabled = true;
     statusElement.textContent = "正在固定 eventId 并流式导出…";
@@ -297,19 +333,24 @@
     }
   });
   cdnButton.addEventListener("click", async () => {
-    cdnButton.disabled = true;
+    const sessionId = selectedSessionId();
+    cdnReadInFlight = true;
+    renderCdnAvailability();
     cdnStatusElement.textContent = "正在读取 bank.fetch.chunk 事件…";
     try {
-      const sessionId = selectedSessionId();
-      if (sessionId === void 0) throw new Error("读取 CDN racing 前请先选择一个 session");
       const response = await send({ type: "logs:cdn-summary", sessionId });
       renderCdnPanel(response.summary);
-      cdnStatusElement.textContent = `读取完成，覆盖 ${response.sampleCount} 条事件，截止 eventId ${response.maxEventId}。`;
+      const doneText = `读取完成，覆盖 ${response.sampleCount} 条事件，截止 eventId ${response.maxEventId}。`;
+      if (selectedSessionId() === sessionId) cdnStatusElement.textContent = doneText;
+      else cdnSavedStatus = doneText;
     } catch (error) {
-      cdnStatusElement.textContent = `读取失败: ${display(error?.message || error)}`;
+      const failureText = `读取失败: ${display(error?.message || error)}`;
+      if (selectedSessionId() === sessionId) cdnStatusElement.textContent = failureText;
+      else cdnSavedStatus = failureText;
       console.error("[BilibiliBuffer] CDN 面板读取失败", error);
     } finally {
-      cdnButton.disabled = false;
+      cdnReadInFlight = false;
+      renderCdnAvailability();
     }
   });
   if (currentSessionId === void 0) {
@@ -318,5 +359,6 @@
     sessionSelect.value = "current";
   }
   renderDetails();
+  renderCdnAvailability();
 })();
 //# sourceMappingURL=logs.js.map

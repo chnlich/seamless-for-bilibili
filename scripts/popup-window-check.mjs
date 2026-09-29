@@ -658,6 +658,75 @@ async function runSwitchPack() {
     const launcherStatus = await driver.evaluate(launcher, `document.querySelector('[data-status]').textContent`);
     assert.equal(launcherStatus.includes('正在读取'), false, JSON.stringify({ launcherStatus }));
     markScenario('日志页初始状态行如实，不谎称正在读取');
+
+    // 直接打开的日志页（launcher 无 #sessionId）选不出任何 session：CDN 按钮
+    // 必须禁用并直说弹窗入口，不许报「请选择一个 session」这种页面上无项可选的
+    // 死路（先按裸 DOM 断言再对文案：未修复的旧构建在第一条裸断言上就已失败）。
+    const cdnNoSession = await driver.evaluate(launcher, `({
+      buttonDisabled: document.querySelector('[data-cdn-refresh]').disabled,
+      currentOptionDisabled: document.querySelector('[data-session-filter] option[value="current"]').disabled,
+      status: document.querySelector('[data-cdn-status]').textContent,
+      exportDisabled: document.querySelector('[data-export]').disabled,
+    })`);
+    assert.equal(cdnNoSession.currentOptionDisabled, true, JSON.stringify(cdnNoSession));
+    assert.equal(cdnNoSession.buttonDisabled, true, JSON.stringify(cdnNoSession));
+    assert.equal(cdnNoSession.exportDisabled, false, JSON.stringify(cdnNoSession));
+    const { CDN_RANGE_MESSAGES } = await import('../src/diagnostics/logs-view.js');
+    assert.equal(cdnNoSession.status, CDN_RANGE_MESSAGES.noSessionEntry, JSON.stringify(cdnNoSession));
+    markScenario('日志页没有可选 session 时：CDN 按钮禁用并直说弹窗入口，不给死路');
+
+    // 商店用户的真实路径：弹窗底部「打开开发日志」带当前 session 进日志页，
+    // CDN 面板立即可读、读取完成；范围切到 全部 session 再切回时，按钮与
+    // 状态行跟着范围走，不残留谎话。
+    await driver.evaluate(popupSession, `document.querySelector('[data-open-logs]').click()`);
+    const logsPrefix = `chrome-extension://${extensionId}/logs.html#sessionId=`;
+    const foundLogs = await waitForState(
+      () => driver.targets(),
+      (targets) => targets.filter((info) => info.type === 'page' && info.url.startsWith(logsPrefix)).length === 1,
+      { what: 'logs page opened from the popup footer with the current session' },
+    );
+    const logsTarget = foundLogs.find((info) => info.type === 'page' && info.url.startsWith(logsPrefix));
+    console.log('popup-opened logs page:', logsTarget.url);
+    const logsSession = await driver.attach(logsTarget.targetId);
+    const readCdnPanel = () => driver.evaluate(logsSession, `({
+      filterValue: document.querySelector('[data-session-filter]').value,
+      buttonDisabled: document.querySelector('[data-cdn-refresh]').disabled,
+      status: document.querySelector('[data-cdn-status]').textContent,
+    })`);
+    const fragmentState = await waitForState(
+      readCdnPanel,
+      (state) => state.filterValue === 'current' && state.buttonDisabled === false
+        && state.status === CDN_RANGE_MESSAGES.idle,
+      { what: 'CDN panel ready on the popup-opened logs page' },
+    );
+    assert.equal(fragmentState.filterValue, 'current', JSON.stringify(fragmentState));
+    await driver.evaluate(logsSession, `document.querySelector('[data-cdn-refresh]').click()`);
+    await waitForState(
+      readCdnPanel,
+      (state) => state.buttonDisabled === false && state.status.startsWith('读取完成')
+        ? true
+        : `unexpected CDN status ${JSON.stringify(state)}`,
+      { what: 'CDN read completes for the popup-opened session' },
+    );
+    markScenario('弹窗进日志页带上当前 session：CDN 面板立即可读并读取完成');
+
+    await driver.evaluate(logsSession, `(() => {
+      const select = document.querySelector('[data-session-filter]');
+      select.value = '';
+      select.dispatchEvent(new Event('change'));
+    })()`);
+    const allRangeState = await readCdnPanel();
+    assert.equal(allRangeState.buttonDisabled, true, JSON.stringify(allRangeState));
+    assert.equal(allRangeState.status, CDN_RANGE_MESSAGES.pickCurrent, JSON.stringify(allRangeState));
+    await driver.evaluate(logsSession, `(() => {
+      const select = document.querySelector('[data-session-filter]');
+      select.value = 'current';
+      select.dispatchEvent(new Event('change'));
+    })()`);
+    const restoredState = await readCdnPanel();
+    assert.equal(restoredState.buttonDisabled, false, JSON.stringify(restoredState));
+    assert.equal(restoredState.status.startsWith('读取完成'), true, JSON.stringify(restoredState));
+    markScenario('范围切到 全部 session：CDN 按钮禁用并指向 当前 session，切回即恢复');
   } finally {
     await cleanup();
   }

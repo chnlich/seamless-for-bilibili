@@ -460,6 +460,7 @@ const readmeSourceAnchors = [
   ['src/diagnostics/privacy.js', ['safeFrameTiming']],
   ['src/bank/inventory.js', ['storedByResource']],
   ['src/diagnostics/logs.js', ['renderCdnPanel']],
+  ['src/diagnostics/logs-view.js', ['CDN_RANGE_MESSAGES', 'cdnPanelState']],
   ['src/diagnostics/cdn.js', ['CDN_LINE_FAILURE_RESULTS']],
   ['src/diagnostics/worker.js', ['readCdnSummary']],
 ];
