@@ -10,9 +10,9 @@ import {
   savePreferenceChange,
   storedPreferences,
 } from './popup-live.js';
+import { popupAttachedTab, tabOnEnhancementRoute } from './popup-tabs.js';
 import {
   NO_PAGE_MESSAGES,
-  PROBED_TAB_NOTICE,
   applyPageAvailability,
   cdnLinesView,
   renderCdnLines,
@@ -64,10 +64,6 @@ let liveQueryInFlight = false;
 let nextLiveQueryAt = 0;
 let pageUnavailable = true;
 let panelTabId;
-let panelFromOtherTab = false;
-let probeInFlight = false;
-let nextProbeAt = 0;
-let lastProbeResult;
 
 function showNotice(text) {
   noticeElement.textContent = text;
@@ -105,9 +101,7 @@ function resetPageData() {
 }
 
 async function activeTab() {
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (tabs.length !== 1 || !Number.isInteger(tabs[0].id)) return undefined;
-  return tabs[0];
+  return popupAttachedTab({ windowsApi: chrome.windows, tabsApi: chrome.tabs });
 }
 
 async function sendTabMessage(tabId, type) {
@@ -209,73 +203,9 @@ async function pollTab(tab) {
   return { readouts, snapshot };
 }
 
-// 活动标签页没有运行增强时不代表增强没在运行：用户点开别的标签页（或从别的窗口
-// 打开面板）时，正在看的那一页仍在接管下载。向其余标签页询问（readouts:get 只发
-// 给本扩展自己的内容脚本，其余标签页立即拒绝），有应答就如实显示那一页并注明来源，
-// 全都查无时才按「这个页面没有运行增强」提示。1 秒节流与结果缓存与其他读数一致。
-function tabRecency(tab) {
-  return Number.isFinite(tab.lastAccessed) ? tab.lastAccessed : 0;
-}
-
-// 探测进行中的标记：500ms 轮询不等前一次。探测未决时本拍保持面板现状，
-// 不落进任何提示（避免把「还在问别的标签页」显示成「没有运行增强」）。
-const PROBE_PENDING = Symbol('probe-pending');
-
-async function findEnhancedTab(triedTabIds) {
-  if (probeInFlight) return PROBE_PENDING;
-  const cacheUsable = lastProbeResult !== undefined && !triedTabIds.has(lastProbeResult.tab.id);
-  if (Date.now() < nextProbeAt && cacheUsable) return lastProbeResult;
-  probeInFlight = true;
-  try {
-    const tabs = await chrome.tabs.query({});
-    const candidates = tabs
-      .filter((tab) => Number.isInteger(tab.id) && !triedTabIds.has(tab.id))
-      .sort((left, right) => tabRecency(right) - tabRecency(left));
-    const answers = await Promise.allSettled(
-      candidates.map((tab) => sendTabMessage(tab.id, 'readouts:get')),
-    );
-    lastProbeResult = undefined;
-    for (const [index, answer] of answers.entries()) {
-      if (answer.status === 'fulfilled') {
-        lastProbeResult = { tab: candidates[index], readouts: answer.value };
-        break;
-      }
-    }
-    return lastProbeResult;
-  } finally {
-    probeInFlight = false;
-    nextProbeAt = Date.now() + 1000;
-  }
-}
-
-// 面板数据来源：优先活动标签页；它没有运行增强时按最近访问顺序询问其余标签页，
-// 有应答的页面照常显示（并注明来源），全都查无时返回 undefined。
-async function collectPanelState(active) {
-  try {
-    return { tab: active, polled: await pollTab(active) };
-  } catch (error) {
-    if (error?.message !== RECEIVER_MISSING) throw error;
-  }
-  const tried = new Set([active.id]);
-  for (;;) {
-    const probe = await findEnhancedTab(tried);
-    if (probe === PROBE_PENDING) return PROBE_PENDING;
-    if (probe === undefined) return undefined;
-    tried.add(probe.tab.id);
-    try {
-      return { tab: probe.tab, polled: await pollTab(probe.tab) };
-    } catch (error) {
-      lastProbeResult = undefined;
-      nextProbeAt = 0;
-      if (error?.message !== RECEIVER_MISSING) throw error;
-    }
-  }
-}
-
 async function failPanel(message, { error } = {}) {
   pageUnavailable = true;
   panelTabId = undefined;
-  panelFromOtherTab = false;
   resetPageData();
   latestReadouts = undefined;
   await refreshRace(undefined);
@@ -285,6 +215,11 @@ async function failPanel(message, { error } = {}) {
   showNotice(message);
 }
 
+// 面板只报告它所附着窗口的活动标签页（见 popup-tabs.js）。活动标签页不答
+// （Receiver 缺失）时分两种：地址匹配内容脚本 matches 的页面是扩展安装或更新前
+// 打开的，旧文档没有脚本可答，只能提示刷新后恢复；其余地址统一按未运行增强提示。
+// 不向其余标签页询问：另一个窗口仍在运行的增强与本面板无关，显示它只会被读成对
+// 当前窗口的错误判断（2026-09-28 用户实测误读）。
 async function refresh() {
   const active = await activeTab();
   const route = routeFor(latestReadouts, active?.url);
@@ -295,26 +230,25 @@ async function refresh() {
   if (active === undefined) {
     pageUnavailable = true;
     panelTabId = undefined;
-    panelFromOtherTab = false;
     resetPageData();
     renderAll();
     showNotice(NO_PAGE_MESSAGES.noTab);
     return;
   }
-  let sourceTab;
   let polled;
   try {
-    const collected = await collectPanelState(active);
-    if (collected === PROBE_PENDING) return;
-    if (collected === undefined) {
-      // 活动标签页没有运行增强，其他标签页也都查无：按原样提示。
-      await failPanel(NO_PAGE_MESSAGES.noReceiver);
-      return;
-    }
-    sourceTab = collected.tab;
-    polled = collected.polled;
+    polled = await pollTab(active);
   } catch (error) {
-    await failPanel(NO_PAGE_MESSAGES.readFailed, { error });
+    if (error?.message === RECEIVER_MISSING) {
+      const staysUntilRefresh = await tabOnEnhancementRoute({
+        tabsApi: chrome.tabs,
+        windowId: active.windowId,
+        tabId: active.id,
+      });
+      await failPanel(staysUntilRefresh ? NO_PAGE_MESSAGES.pageNeedsRefresh : NO_PAGE_MESSAGES.noReceiver);
+    } else {
+      await failPanel(NO_PAGE_MESSAGES.readFailed, { error });
+    }
     return;
   }
   latestReadouts = polled.readouts;
@@ -323,15 +257,14 @@ async function refresh() {
     ? polled.readouts.forwardSeconds
     : undefined;
   sessionId = polled.readouts?.diagnostics?.sessionId;
-  panelTabId = sourceTab.id;
-  panelFromOtherTab = sourceTab.id !== active.id;
+  panelTabId = active.id;
   const readoutsRoute = routeFor(latestReadouts, active?.url);
   if (readoutsRoute !== popupRoute) {
     popupRoute = readoutsRoute;
     applyPopupRoute(document, popupRoute);
   }
   pageUnavailable = false;
-  showNotice(panelFromOtherTab ? PROBED_TAB_NOTICE : '');
+  showNotice('');
   document.body.dataset.ready = 'true';
   renderAll();
   await refreshRace(sessionId);
@@ -364,8 +297,7 @@ document.querySelector('[data-open-logs]').addEventListener('click', () => {
   void (async () => {
     let fragment = '';
     try {
-      // 日志带上面板正在显示的那个标签页的 session（活动标签页没有运行增强时，
-      // 面板显示的是探测到的仍在运行增强的标签页）。
+      // 日志带上面板正在显示的标签页的 session（面板只显示它所附着窗口的活动标签页）。
       if (panelTabId !== undefined) {
         const response = await sendTabMessage(panelTabId, 'diagnostics:session-id:get');
         fragment = logSessionFragment(response.sessionId);

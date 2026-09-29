@@ -55,7 +55,7 @@ The popup is read-only: it shows observed facts, affects no playback, and upload
 - **120-second request state**: the result of asking the player for the 120-second buffer — 已生效 (applied) / 等待生效 (waiting) / 播放器不支持 (player does not support it) / 申请失败 (request failed).
 - **Download lines**: every CDN line this playback actually used (usually two), each with a health word (正常 normal / 有停滞 stalled / 有错误 errors / 尚无数据 no data yet) and connection times ("通常 X 毫秒 · 慢时 Y 毫秒" — the line's first-byte latency P50 and P90).
 - **Live pages** use the same layout: the same download-lines card plus one live-takeover line (正在按两条线路竞速下载 racing on two lines / 单路接管（无可用备用线路） single leg, no backup found / 接管请求失败 takeover request failed / 未接管（未发现直播媒体流） not taken over, no live media stream found / 等待直播数据 waiting for live data). Live has no buffer bar.
-- On a page that is not playing, the cards fold away and a single friendly hint remains.
+- The popup only reports the active tab of the window it belongs to; another window's page is never shown. On a page that is not playing (or not a Bilibili page at all), the cards fold away and a single friendly hint remains. A Bilibili page that was already open when the extension was installed or updated has no content script to answer; the popup says a reload is needed, and the enhancement runs after the page reloads.
 
 ![Popup close-up](store/images/popup-video.png)
 

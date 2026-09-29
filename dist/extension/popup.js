@@ -91,16 +91,30 @@
     };
   }
 
+  // src/extension/popup-tabs.js
+  async function popupAttachedTab({ windowsApi, tabsApi }) {
+    const ownWindow = await windowsApi.getCurrent();
+    const tabs = await tabsApi.query({ active: true, windowId: ownWindow.id });
+    if (tabs.length !== 1 || !Number.isInteger(tabs[0].id)) return void 0;
+    return tabs[0];
+  }
+  async function tabOnEnhancementRoute({ tabsApi, windowId, tabId }) {
+    const matches = await tabsApi.query({ url: [...EXTENSION_MANIFEST.matches], windowId });
+    return matches.some((tab) => tab.id === tabId);
+  }
+
   // src/extension/popup-view.js
   var NO_PAGE_MESSAGES = Object.freeze({
     loading: "正在读取页面状态…",
     noTab: "请先打开一个 Bilibili 页面，再打开本面板。",
     noReceiver: "这个页面没有运行 Bilibili 增强。请打开 Bilibili 的视频或直播页面。",
+    // 页面在扩展安装或更新之前就已打开：旧文档没有扩展脚本可答（更新还会作废旧
+    // 脚本），只有刷新页面后脚本才会注入。如实说刷新，不谎报成不受支持的页面。
+    pageNeedsRefresh: "这个页面在扩展安装或更新之前就已打开；刷新这个页面后，增强才会运行。",
     readFailed: "读取页面状态失败，请稍后重开面板。",
     preferenceFailed: "读取设置失败，请稍后重开面板。",
     preferenceSaved: "已保存，刷新页面后生效。"
   });
-  var PROBED_TAB_NOTICE = "当前标签页没有运行增强；以下显示仍在运行增强的页面。";
   var TARGET_STATE_WORDS = Object.freeze({
     已应用: "已生效",
     等待: "等待生效",
@@ -273,10 +287,6 @@
   var nextLiveQueryAt = 0;
   var pageUnavailable = true;
   var panelTabId;
-  var panelFromOtherTab = false;
-  var probeInFlight = false;
-  var nextProbeAt = 0;
-  var lastProbeResult;
   function showNotice(text) {
     noticeElement.textContent = text;
   }
@@ -307,9 +317,7 @@
     sessionId = void 0;
   }
   async function activeTab() {
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (tabs.length !== 1 || !Number.isInteger(tabs[0].id)) return void 0;
-    return tabs[0];
+    return popupAttachedTab({ windowsApi: chrome.windows, tabsApi: chrome.tabs });
   }
   async function sendTabMessage(tabId, type) {
     const response = await chrome.tabs.sendMessage(tabId, {
@@ -396,59 +404,9 @@
     const snapshot = popupRoute === POPUP_ROUTE.VIDEO ? await sendTabMessage(tab.id, "status:get") : void 0;
     return { readouts, snapshot };
   }
-  function tabRecency(tab) {
-    return Number.isFinite(tab.lastAccessed) ? tab.lastAccessed : 0;
-  }
-  var PROBE_PENDING = Symbol("probe-pending");
-  async function findEnhancedTab(triedTabIds) {
-    if (probeInFlight) return PROBE_PENDING;
-    const cacheUsable = lastProbeResult !== void 0 && !triedTabIds.has(lastProbeResult.tab.id);
-    if (Date.now() < nextProbeAt && cacheUsable) return lastProbeResult;
-    probeInFlight = true;
-    try {
-      const tabs = await chrome.tabs.query({});
-      const candidates = tabs.filter((tab) => Number.isInteger(tab.id) && !triedTabIds.has(tab.id)).sort((left, right) => tabRecency(right) - tabRecency(left));
-      const answers = await Promise.allSettled(
-        candidates.map((tab) => sendTabMessage(tab.id, "readouts:get"))
-      );
-      lastProbeResult = void 0;
-      for (const [index, answer] of answers.entries()) {
-        if (answer.status === "fulfilled") {
-          lastProbeResult = { tab: candidates[index], readouts: answer.value };
-          break;
-        }
-      }
-      return lastProbeResult;
-    } finally {
-      probeInFlight = false;
-      nextProbeAt = Date.now() + 1e3;
-    }
-  }
-  async function collectPanelState(active) {
-    try {
-      return { tab: active, polled: await pollTab(active) };
-    } catch (error) {
-      if (error?.message !== RECEIVER_MISSING) throw error;
-    }
-    const tried = /* @__PURE__ */ new Set([active.id]);
-    for (; ; ) {
-      const probe = await findEnhancedTab(tried);
-      if (probe === PROBE_PENDING) return PROBE_PENDING;
-      if (probe === void 0) return void 0;
-      tried.add(probe.tab.id);
-      try {
-        return { tab: probe.tab, polled: await pollTab(probe.tab) };
-      } catch (error) {
-        lastProbeResult = void 0;
-        nextProbeAt = 0;
-        if (error?.message !== RECEIVER_MISSING) throw error;
-      }
-    }
-  }
   async function failPanel(message, { error } = {}) {
     pageUnavailable = true;
     panelTabId = void 0;
-    panelFromOtherTab = false;
     resetPageData();
     latestReadouts = void 0;
     await refreshRace(void 0);
@@ -467,40 +425,39 @@
     if (active === void 0) {
       pageUnavailable = true;
       panelTabId = void 0;
-      panelFromOtherTab = false;
       resetPageData();
       renderAll();
       showNotice(NO_PAGE_MESSAGES.noTab);
       return;
     }
-    let sourceTab;
     let polled;
     try {
-      const collected = await collectPanelState(active);
-      if (collected === PROBE_PENDING) return;
-      if (collected === void 0) {
-        await failPanel(NO_PAGE_MESSAGES.noReceiver);
-        return;
-      }
-      sourceTab = collected.tab;
-      polled = collected.polled;
+      polled = await pollTab(active);
     } catch (error) {
-      await failPanel(NO_PAGE_MESSAGES.readFailed, { error });
+      if (error?.message === RECEIVER_MISSING) {
+        const staysUntilRefresh = await tabOnEnhancementRoute({
+          tabsApi: chrome.tabs,
+          windowId: active.windowId,
+          tabId: active.id
+        });
+        await failPanel(staysUntilRefresh ? NO_PAGE_MESSAGES.pageNeedsRefresh : NO_PAGE_MESSAGES.noReceiver);
+      } else {
+        await failPanel(NO_PAGE_MESSAGES.readFailed, { error });
+      }
       return;
     }
     latestReadouts = polled.readouts;
     latestSnapshot = polled.snapshot;
     latestForwardSeconds = Number.isFinite(polled.readouts?.forwardSeconds) ? polled.readouts.forwardSeconds : void 0;
     sessionId = polled.readouts?.diagnostics?.sessionId;
-    panelTabId = sourceTab.id;
-    panelFromOtherTab = sourceTab.id !== active.id;
+    panelTabId = active.id;
     const readoutsRoute = routeFor(latestReadouts, active?.url);
     if (readoutsRoute !== popupRoute) {
       popupRoute = readoutsRoute;
       applyPopupRoute(document, popupRoute);
     }
     pageUnavailable = false;
-    showNotice(panelFromOtherTab ? PROBED_TAB_NOTICE : "");
+    showNotice("");
     document.body.dataset.ready = "true";
     renderAll();
     await refreshRace(sessionId);

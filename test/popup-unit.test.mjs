@@ -17,7 +17,6 @@ import {
 } from '../src/extension/popup-live.js';
 import {
   NO_PAGE_MESSAGES,
-  PROBED_TAB_NOTICE,
   applyPageAvailability,
   cdnLinesView,
   connectionText,
@@ -412,7 +411,6 @@ test('pages without the content script collapse the cards down to one friendly l
 });
 
 // ---- 完整 popup 装配（jsdom + 假 chrome）：活动标签页换页后的探测行为 ----
-
 const RECEIVER_MISSING = 'Could not establish connection. Receiving end does not exist.';
 
 function liveReadouts(sessionId = 'session-live-1') {
@@ -424,9 +422,51 @@ function liveReadouts(sessionId = 'session-live-1') {
   };
 }
 
-function popupChromeMock({ activeTabIds, allTabIds, tabBehaviors }) {
+function videoReadouts(sessionId = 'session-video-1') {
+  return {
+    version: 2,
+    routeKind: 'video',
+    forwardSeconds: 80,
+    diagnostics: { sessionId },
+  };
+}
+
+// chrome.tabs.query 的 url 过滤语义（match pattern 子集：scheme://host/path，path 末尾 *）。
+// 面板扩展没有 tabs 权限：地址只参与 Chrome 内部过滤，不会出现在返回的标签页对象上。
+function urlMatchesPattern(url, pattern) {
+  const match = /^(\*|https?|file|ftp):\/\/([^/]+)(\/.*)$/.exec(pattern);
+  assert.ok(match !== null, `fixture 里遇到未支持的 match pattern: ${pattern}`);
+  const [, scheme, host, pathPattern] = match;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch (error) {
+    return false;
+  }
+  if (scheme !== '*' && parsed.protocol !== `${scheme}:`) return false;
+  const hostPattern = host.startsWith('*.') ? `*.${host.slice(2)}` : host;
+  const hostMatches = hostPattern === '*'
+    || parsed.hostname === host
+    || (host.startsWith('*.') && parsed.hostname.endsWith(hostPattern.slice(1)));
+  if (!hostMatches) return false;
+  const escaped = pathPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replaceAll('\\*', '.*');
+  return new RegExp(`^${escaped}$`).test(parsed.pathname);
+}
+
+// 假 Chrome 的窗口世界：windows 是 [{ id, tabs: [{ id, url, active }] }]。假
+// chrome.tabs.query 复刻无 tabs 权限行为：url 过滤在 Chrome 内部判定，返回的标签页
+// 不携带 url 字段。popupAttachedTab 需要的 windowId 字段始终可见，予以保留。
+function popupChromeMock({ currentWindowId, lastFocusedWindowId, windows, tabBehaviors }) {
   const calls = { queries: [], tabMessages: [], runtimeMessages: [] };
+  const tabsOfWindow = (windowId) => windows.find((w) => w.id === windowId)?.tabs ?? [];
+  const stripUrl = (tab) => ({ id: tab.id, active: tab.active, windowId: tab.windowId });
+  const windowed = (tab, windowId) => ({ ...tab, windowId });
+  const allTabs = windows.flatMap((w) => w.tabs.map((tab) => windowed(tab, w.id)));
+  const visibleTabs = (windowId) => tabsOfWindow(windowId).map((tab) => windowed(tab, windowId));
   const chrome = {
+    windows: {
+      getCurrent: async () => ({ id: currentWindowId }),
+    },
     runtime: {
       lastError: undefined,
       getURL: (path) => `chrome-extension://test-extension-id/${path}`,
@@ -464,8 +504,19 @@ function popupChromeMock({ activeTabIds, allTabIds, tabBehaviors }) {
     tabs: {
       query: async (options) => {
         calls.queries.push(options);
-        if (options.lastFocusedWindow === true && options.active === true) return activeTabIds();
-        return allTabIds();
+        if (options.active === true && options.windowId !== undefined) {
+          return visibleTabs(options.windowId).filter((tab) => tab.active === true).map(stripUrl);
+        }
+        if (options.active === true && options.lastFocusedWindow === true) {
+          return visibleTabs(lastFocusedWindowId).filter((tab) => tab.active === true).map(stripUrl);
+        }
+        if (Array.isArray(options.url)) {
+          const candidates = options.windowId !== undefined ? visibleTabs(options.windowId) : allTabs;
+          return candidates
+            .filter((tab) => options.url.some((pattern) => urlMatchesPattern(tab.url, pattern)))
+            .map(stripUrl);
+        }
+        return allTabs.map(stripUrl);
       },
       sendMessage: async (tabId, message) => {
         calls.tabMessages.push({ tabId, type: message.type });
@@ -511,41 +562,58 @@ function settleMacrotasks(rounds = 4) {
   });
 }
 
-test('popup keeps showing the running page when the active tab moves off the enhancement', async () => {
+test('popup reports the active tab of its own window, never the last-focused window\'s', async () => {
+  // 回归锚（0e982f5 的缺陷，2026-09-28 用户实测）：两个普通窗口时，弹窗开在视频页
+  // 所在窗口，lastFocusedWindow 解析到另一窗口的直播房间；本装配下 lastFocusedWindow
+  // 查询固定返回直播标签页（id 2），按旧取法面板会显示直播内容。
   const behaviors = new Map([
     [1, (message) => {
-      if (message.type === 'readouts:get') return liveReadouts();
+      if (message.type === 'readouts:get') return videoReadouts();
       if (message.type === 'status:get') return { version: 2, ok: true, state: '未提供' };
-      if (message.type === 'diagnostics:session-id:get') return { version: 2, ok: true, sessionId: 'session-live-1' };
+      if (message.type === 'diagnostics:session-id:get') return { version: 2, ok: true, sessionId: 'session-video-1' };
       throw new Error(`意外消息 ${message.type}`);
     }],
-    [2, 'reject'],
+    [2, (message) => {
+      if (message.type === 'readouts:get') return liveReadouts();
+      throw new Error(`意外消息 ${message.type}`);
+    }],
   ]);
   const { chrome, calls } = popupChromeMock({
-    activeTabIds: () => [{ id: 2, active: true }],
-    allTabIds: () => [{ id: 1, lastAccessed: 100 }, { id: 2, active: true, lastAccessed: 200 }],
+    currentWindowId: 10,
+    lastFocusedWindowId: 20,
+    windows: [
+      { id: 10, tabs: [{ id: 1, url: 'https://www.bilibili.com/video/BV1', active: true }] },
+      { id: 20, tabs: [{ id: 2, url: 'https://live.bilibili.com/6', active: true }] },
+    ],
     tabBehaviors: behaviors,
   });
   await withPopupAssembly(chrome, async (domWindow) => {
     await settleMacrotasks();
     const document = domWindow.document;
-    // 活动标签页（id 2）没有应答，探测到 id 1 仍在运行增强并显示那一页。
     assert.equal(document.body.dataset.ready, 'true');
     assert.equal(document.querySelector('main').classList.contains('no-page'), false);
-    assert.equal(document.querySelector('[data-notice]').textContent, PROBED_TAB_NOTICE);
-    assert.notEqual(document.querySelector('[data-notice]').textContent, NO_PAGE_MESSAGES.noReceiver);
-    assert.equal(document.querySelector('[data-live-takeover]').textContent, '正在按两条线路竞速下载');
-    // 先问活动标签页（id 2），它没有接收器；随后所有询问都落在仍在运行增强的 id 1。
-    const readoutTargets = calls.tabMessages
-      .filter((call) => call.type === 'readouts:get')
-      .map((call) => call.tabId);
-    assert.equal(readoutTargets[0], 2);
-    assert.equal(readoutTargets.length >= 2, true);
-    assert.equal(readoutTargets.slice(1).every((tabId) => tabId === 1), true);
-    // 直播状态走 worker 摘要，不再按全局 eventId 分页扫全库。
-    assert.equal(calls.runtimeMessages.some((message) => message.type === 'logs:live-summary'), true);
-    assert.equal(calls.runtimeMessages.some((message) => message.type === 'logs:events-page'), false);
-    // 打开日志按钮带的是面板所属标签页的 session。
+    assert.equal(document.querySelector('[data-notice]').textContent, '');
+    // 本窗口是视频标签页：直播接管卡收起，缓冲卡保持可见，直播事实不得泄漏进来。
+    assert.equal(document.querySelector('[data-live-panel]').hidden, true);
+    assert.equal(document.querySelector('[aria-label="缓冲"]').hidden, false);
+    // 只问本窗口的活动标签页；跨窗口的直播标签页一次都没有被询问过。
+    assert.deepEqual(
+      [...new Set(calls.tabMessages.filter((call) => call.type === 'readouts:get').map((call) => call.tabId))],
+      [1],
+    );
+    assert.equal(calls.tabMessages.some((call) => call.tabId === 2), false, '不得询问另一个窗口的标签页');
+    // 归属一律经 windowId：lastFocusedWindow 与全窗口扫描都不再出现。
+    assert.equal(
+      calls.queries.some((options) => options.lastFocusedWindow === true),
+      false,
+      '不得按 lastFocusedWindow 定位标签页',
+    );
+    assert.equal(
+      calls.queries.every((options) => options.windowId !== undefined || Array.isArray(options.url)),
+      true,
+      '不得发起全窗口扫描查询',
+    );
+    // 打开日志按钮带的是本窗口视频标签页的 session。
     document.querySelector('[data-open-logs]').click();
     await settleMacrotasks();
     assert.deepEqual(
@@ -555,11 +623,22 @@ test('popup keeps showing the running page when the active tab moves off the enh
   });
 });
 
-test('popup shows the not-running line only when no tab runs the enhancement', async () => {
-  const behaviors = new Map([[2, 'reject']]);
+test('popup never adopts another window\'s enhanced tab when its own active tab cannot answer', async () => {
+  const behaviors = new Map([
+    [1, 'reject'],
+    [2, (message) => {
+      if (message.type === 'readouts:get') return videoReadouts();
+      if (message.type === 'status:get') return { version: 2, ok: true, state: '未提供' };
+      throw new Error(`意外消息 ${message.type}`);
+    }],
+  ]);
   const { chrome, calls } = popupChromeMock({
-    activeTabIds: () => [{ id: 2, active: true }],
-    allTabIds: () => [{ id: 2, active: true }],
+    currentWindowId: 10,
+    lastFocusedWindowId: 20,
+    windows: [
+      { id: 10, tabs: [{ id: 1, url: 'https://example.com/', active: true }] },
+      { id: 20, tabs: [{ id: 2, url: 'https://www.bilibili.com/video/BV1', active: true }] },
+    ],
     tabBehaviors: behaviors,
   });
   await withPopupAssembly(chrome, async (domWindow) => {
@@ -569,10 +648,61 @@ test('popup shows the not-running line only when no tab runs the enhancement', a
     assert.equal(document.querySelector('main').classList.contains('no-page'), true);
     assert.equal(document.querySelector('[data-notice]').textContent, NO_PAGE_MESSAGES.noReceiver);
     assert.equal(calls.runtimeMessages.some((message) => message.type === 'logs:live-summary'), false);
+    assert.deepEqual(
+      [...new Set(calls.tabMessages.map((call) => call.tabId))],
+      [1],
+      '另一个窗口仍在运行增强的标签页不得被询问或显示',
+    );
   });
 });
 
-test('popup does not probe other tabs while the active tab answers', async () => {
+test('a pre-existing Bilibili page without the content script gets the reload hint', async () => {
+  // 页面在扩展安装或更新前就已打开：旧文档没有内容脚本可答，地址又匹配内容脚本
+  // matches，只能提示刷新，不得谎报成不受支持的页面。
+  const behaviors = new Map([[1, 'reject']]);
+  const { chrome, calls } = popupChromeMock({
+    currentWindowId: 10,
+    lastFocusedWindowId: 10,
+    windows: [
+      { id: 10, tabs: [{ id: 1, url: 'https://www.bilibili.com/video/BV1', active: true }] },
+    ],
+    tabBehaviors: behaviors,
+  });
+  await withPopupAssembly(chrome, async (domWindow) => {
+    await settleMacrotasks();
+    const document = domWindow.document;
+    assert.equal(document.body.dataset.ready, undefined);
+    assert.equal(document.querySelector('main').classList.contains('no-page'), true);
+    assert.equal(document.querySelector('[data-notice]').textContent, NO_PAGE_MESSAGES.pageNeedsRefresh);
+    assert.notEqual(document.querySelector('[data-notice]').textContent, NO_PAGE_MESSAGES.noReceiver);
+    // 分类经 url 过滤完成：问过（url + windowId），不读标签页地址字段，也不需要 tabs 权限。
+    assert.equal(
+      calls.queries.some((options) => Array.isArray(options.url) && options.windowId === 10),
+      true,
+      '应当按内容脚本 matches 做 url 过滤分类',
+    );
+  });
+});
+
+test('a non-Bilibili active tab keeps the plain not-running message', async () => {
+  const behaviors = new Map([[1, 'reject']]);
+  const { chrome, calls } = popupChromeMock({
+    currentWindowId: 10,
+    lastFocusedWindowId: 10,
+    windows: [
+      { id: 10, tabs: [{ id: 1, url: 'https://example.com/', active: true }] },
+    ],
+    tabBehaviors: behaviors,
+  });
+  await withPopupAssembly(chrome, async (domWindow) => {
+    await settleMacrotasks();
+    const document = domWindow.document;
+    assert.equal(document.querySelector('main').classList.contains('no-page'), true);
+    assert.equal(document.querySelector('[data-notice]').textContent, NO_PAGE_MESSAGES.noReceiver);
+  });
+});
+
+test('popup asks only its own window\'s active tab while that tab answers', async () => {
   const behaviors = new Map([
     [1, (message) => {
       if (message.type === 'readouts:get') return liveReadouts();
@@ -581,8 +711,11 @@ test('popup does not probe other tabs while the active tab answers', async () =>
     }],
   ]);
   const { chrome, calls } = popupChromeMock({
-    activeTabIds: () => [{ id: 1, active: true }],
-    allTabIds: () => [{ id: 1, active: true }],
+    currentWindowId: 10,
+    lastFocusedWindowId: 10,
+    windows: [
+      { id: 10, tabs: [{ id: 1, url: 'https://live.bilibili.com/6', active: true }] },
+    ],
     tabBehaviors: behaviors,
   });
   await withPopupAssembly(chrome, async (domWindow) => {
@@ -590,53 +723,16 @@ test('popup does not probe other tabs while the active tab answers', async () =>
     const document = domWindow.document;
     assert.equal(document.body.dataset.ready, 'true');
     assert.equal(document.querySelector('[data-notice]').textContent, '');
-    assert.equal(calls.queries.some((options) => options.lastFocusedWindow !== true), false, '活动标签页应答时不发起全标签页探测');
+    assert.equal(document.querySelector('[data-live-panel]').hidden, false);
+    assert.equal(document.querySelector('[data-live-takeover]').textContent, '正在按两条线路竞速下载');
     assert.deepEqual(
-      calls.tabMessages.filter((call) => call.type === 'readouts:get').map((call) => call.tabId),
+      [...new Set(calls.tabMessages.filter((call) => call.type === 'readouts:get').map((call) => call.tabId))],
       [1],
     );
+    // 直播状态走 worker 摘要，不再按全局 eventId 分页扫全库。
+    assert.equal(calls.runtimeMessages.some((message) => message.type === 'logs:live-summary'), true);
+    assert.equal(calls.runtimeMessages.some((message) => message.type === 'logs:events-page'), false);
   });
-});
-
-test('an in-flight probe never flashes the not-running line on overlapping polls', async () => {
-  const behaviors = new Map([
-    [1, (message) => {
-      if (message.type === 'readouts:get') return liveReadouts();
-      if (message.type === 'status:get') return { version: 2, ok: true, state: '未提供' };
-      throw new Error(`意外消息 ${message.type}`);
-    }],
-    [2, 'reject'],
-  ]);
-  const { chrome } = popupChromeMock({
-    activeTabIds: () => [{ id: 2, active: true }],
-    allTabIds: () => [{ id: 1, lastAccessed: 100 }, { id: 2, active: true, lastAccessed: 200 }],
-    tabBehaviors: behaviors,
-  });
-  // 全标签页探测放慢到 700ms：500ms 轮询会在探测进行中再触发一次。
-  const originalQuery = chrome.tabs.query.bind(chrome.tabs);
-  chrome.tabs.query = async (options) => {
-    const result = await originalQuery(options);
-    if (options.lastFocusedWindow !== true) await new Promise((resolve) => setTimeout(resolve, 700));
-    return result;
-  };
-  const observed = [];
-  await withPopupAssembly(chrome, async (domWindow) => {
-    const deadline = Date.now() + 1600;
-    while (Date.now() < deadline) {
-      observed.push({
-        elapsed: Date.now() % 100000,
-        notice: domWindow.document.querySelector('[data-notice]')?.textContent ?? null,
-      });
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    await settleMacrotasks();
-  });
-  assert.equal(
-    observed.some((sample) => sample.notice === NO_PAGE_MESSAGES.noReceiver),
-    false,
-    '探测进行中或探测未决时不得显示「没有运行增强」',
-  );
-  assert.equal(observed.at(-1)?.notice, PROBED_TAB_NOTICE);
 });
 
 test('video popup feeds the status:get snapshot to the target-state line', async () => {
@@ -644,22 +740,18 @@ test('video popup feeds the status:get snapshot to the target-state line', async
   // （一度在面板装配里取回但未接上，状态行永远停在「等待增强启动」）。
   const behaviors = new Map([
     [1, (message) => {
-      if (message.type === 'readouts:get') {
-        return {
-          version: 2,
-          routeKind: 'video',
-          forwardSeconds: 80,
-          diagnostics: { sessionId: 'session-video-1' },
-        };
-      }
+      if (message.type === 'readouts:get') return videoReadouts();
       if (message.type === 'status:get') return { version: 2, ok: true, state: '已应用', error: '未提供' };
       if (message.type === 'diagnostics:session-id:get') return { version: 2, ok: true, sessionId: 'session-video-1' };
       throw new Error(`意外消息 ${message.type}`);
     }],
   ]);
   const { chrome, calls } = popupChromeMock({
-    activeTabIds: () => [{ id: 1, active: true }],
-    allTabIds: () => [{ id: 1, active: true }],
+    currentWindowId: 10,
+    lastFocusedWindowId: 10,
+    windows: [
+      { id: 10, tabs: [{ id: 1, url: 'https://www.bilibili.com/video/BV1', active: true }] },
+    ],
     tabBehaviors: behaviors,
   });
   await withPopupAssembly(chrome, async (domWindow) => {
@@ -670,7 +762,7 @@ test('video popup feeds the status:get snapshot to the target-state line', async
     assert.equal(document.querySelector('[data-status-field="state"]').hidden, false);
     assert.equal(document.querySelector('[data-status-field="error"]').hidden, true);
     assert.deepEqual(
-      calls.tabMessages.filter((call) => call.type === 'status:get').map((call) => call.tabId),
+      [...new Set(calls.tabMessages.filter((call) => call.type === 'status:get').map((call) => call.tabId))],
       [1],
     );
   });
