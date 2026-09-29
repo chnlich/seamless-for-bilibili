@@ -577,6 +577,11 @@ async function runSwitchPack() {
       { what: 'live takeover line after switching back on' },
     );
     markScenario('两个开关拨回开启并刷新页面后：面板恢复申请措辞与等待直播数据');
+
+    // 日志页打开时没有任何读取在进行，初始状态行不得谎称「正在读取」。
+    const launcherStatus = await driver.evaluate(launcher, `document.querySelector('[data-status]').textContent`);
+    assert.equal(launcherStatus.includes('正在读取'), false, JSON.stringify({ launcherStatus }));
+    markScenario('日志页初始状态行如实，不谎称正在读取');
   } finally {
     await cleanup();
   }
