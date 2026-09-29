@@ -100,6 +100,11 @@
   }
 
   // src/extension/popup-view.js
+  var SWITCH_OFF_TEXT = Object.freeze({
+    videoLabel: "视频增强开关",
+    videoOffValue: "已关闭",
+    liveOff: "直播增强开关已关闭"
+  });
   var NO_PAGE_MESSAGES = Object.freeze({
     loading: "正在读取页面状态…",
     noTab: "请先打开一个 Bilibili 页面，再打开本面板。",
@@ -141,7 +146,7 @@
     if (hasVideo !== true) return "";
     const mapped = TARGET_STATE_WORDS[stateLabel];
     if (mapped !== void 0) return mapped;
-    return enhancementEnabled2 === false ? "增强开关已关闭" : "等待增强启动";
+    return enhancementEnabled2 === false ? SWITCH_OFF_TEXT.videoOffValue : "等待增强启动";
   }
   function applyPageAvailability(documentObject, available) {
     documentObject.querySelector("main")?.classList.toggle("no-page", available !== true);
@@ -166,23 +171,24 @@
         stateLabel: snapshot?.state,
         enhancementEnabled: enhancementEnabled2
       }),
-      targetLabel: `已向播放器申请 ${targetSeconds} 秒缓存`
+      targetLabel: enhancementEnabled2 === false ? SWITCH_OFF_TEXT.videoLabel : `已向播放器申请 ${targetSeconds} 秒缓存`,
+      goalSuffix: enhancementEnabled2 === false ? "" : void 0
     });
     const error = surfaceErrorText(snapshot);
     refs.errorLine.hidden = error === void 0;
     refs.errorLine.textContent = error ?? "";
   }
-  function renderLiveTakeover(refs, { facts, error } = {}) {
-    refs.takeover.textContent = error !== void 0 ? "直播状态读取失败" : liveTakeoverText(facts);
+  function renderLiveTakeover(refs, { facts, error, liveEnabled } = {}) {
+    refs.takeover.textContent = error !== void 0 ? "直播状态读取失败" : liveTakeoverText(facts, { liveEnabled });
   }
-  function renderBuffer(documentObject, refs, { forwardSeconds, targetSeconds, stateText, targetLabel }) {
+  function renderBuffer(documentObject, refs, { forwardSeconds, targetSeconds, stateText, targetLabel, goalSuffix }) {
     const hasVideo = Number.isFinite(forwardSeconds) && Number.isFinite(targetSeconds) && targetSeconds > 0;
     if (hasVideo) {
       const percent = Math.max(0, Math.min(100, forwardSeconds / targetSeconds * 100));
       refs.fill.style.width = `${percent}%`;
       refs.bar.classList.toggle("reached", forwardSeconds >= targetSeconds);
       refs.seconds.textContent = `${Math.round(forwardSeconds)} 秒`;
-      refs.goal.textContent = `/ 目标 ${Math.round(targetSeconds)} 秒`;
+      refs.goal.textContent = goalSuffix ?? `/ 目标 ${Math.round(targetSeconds)} 秒`;
       refs.note.hidden = true;
       refs.note.textContent = "";
     } else {
@@ -227,14 +233,17 @@
     empty.textContent = message === void 0 || message === "" ? "还没有线路数据" : message;
     container.append(empty);
   }
-  function liveTakeoverText(facts) {
-    if (!facts || facts.serveCount === 0) return "等待直播数据";
-    if (facts.engagement === "engaged") {
-      if (facts.pairedAddressAvailable && !facts.pairRejected) return "正在按两条线路竞速下载";
-      return "单路接管（无可用备用线路）";
+  function liveTakeoverText(facts, { liveEnabled } = {}) {
+    if (facts && facts.serveCount > 0) {
+      if (facts.engagement === "engaged") {
+        if (facts.pairedAddressAvailable && !facts.pairRejected) return "正在按两条线路竞速下载";
+        return "单路接管（无可用备用线路）";
+      }
+      if (facts.engagement === "failed") return "接管请求失败";
+      return "未接管（未发现直播媒体流）";
     }
-    if (facts.engagement === "failed") return "接管请求失败";
-    return "未接管（未发现直播媒体流）";
+    if (liveEnabled === false) return SWITCH_OFF_TEXT.liveOff;
+    return "等待直播数据";
   }
 
   // src/extension/popup.js
@@ -459,13 +468,14 @@
   }
   for (const name of PREFERENCES) {
     inputs.get(name).addEventListener("change", async (event) => {
+      const checked = event.currentTarget.checked;
       const affectsVideoPanel = await savePreferenceChange({
         name,
-        checked: event.currentTarget.checked,
+        checked,
         storageObject: chrome.storage.local
       });
       if (affectsVideoPanel) {
-        enhancementEnabled = event.currentTarget.checked;
+        enhancementEnabled = checked;
         renderVideoPanel2();
       }
       showNotice(NO_PAGE_MESSAGES.preferenceSaved);

@@ -275,13 +275,16 @@ async function loadPreferences() {
 
 for (const name of PREFERENCES) {
   inputs.get(name).addEventListener('change', async (event) => {
+    // event.currentTarget 只在事件派发期间有效：await 存储写完后再读它是 null，
+    // 确认提示与面板刷新会被静默吞掉（2026-09-29 弹窗 console 实测）。
+    const checked = event.currentTarget.checked;
     const affectsVideoPanel = await savePreferenceChange({
       name,
-      checked: event.currentTarget.checked,
+      checked,
       storageObject: chrome.storage.local,
     });
     if (affectsVideoPanel) {
-      enhancementEnabled = event.currentTarget.checked;
+      enhancementEnabled = checked;
       renderVideoPanel();
     }
     showNotice(NO_PAGE_MESSAGES.preferenceSaved);
