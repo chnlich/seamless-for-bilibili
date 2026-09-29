@@ -23,6 +23,15 @@
 // writer 正常关闭、状态行如实报截止 eventId。导出与 browser-e2e 同手法把 showSaveFilePicker
 // 桩成计数 writer（真实保存对话框要真实用户手势，headless 打不出来）。
 //
+// 第七组覆盖分 P 同文档导航（只动 query 的 pushState，真实站多 P 视频切分 P 的一种
+// 走法）：地址轮询按完整 href 比较，?p=2 也必须换记录；GOAL.md 要求新分 P 独立成
+// 一条记录，落库的 session 正好带 part、不带 query。断言链：内容侧换记录、开着的
+// 弹窗保持如实视频布局、库里新旧记录各就各位、弹窗日志入口指向新记录。
+// 第八组覆盖扩展更新前打开的日志页：商店更新随时可能落在它上面。实测（Chrome 154
+// headless，Extensions.loadUnpacked 同源重载）：重载会把扩展自己的页面全部关掉，
+// 更新前打开的日志页标签随之消失，没有失效页面留下来说错话；内容标签页保留。
+// 本组断言这个关闭行为、内容页的保留，以及重开后日志页读同一 session 照常成功。
+//
 //   node scripts/popup-window-check.mjs      （Windows；系统 Chrome 由 BILIBILI_E2E_CHROME 指定）
 //
 // 机制：直接 spawn chrome.exe（回避 Playwright 在浏览器待更新时的丢进程问题），
@@ -1469,6 +1478,315 @@ async function runLogScalePack() {
   }
 }
 
+// ---- 第七组：分 P 同文档导航（见文件头说明）----
+
+async function runPartNavigationPack() {
+  const { driver, cleanup } = await setupBrowser('popup-window-check-f-');
+  try {
+    const { id: extensionId } = await driver.send('Extensions.loadUnpacked', { path: extensionDirectory });
+    const popupUrl = `chrome-extension://${extensionId}/popup.html`;
+    const logsPagePrefix = `chrome-extension://${extensionId}/logs.html`;
+    const launcher = await openLauncher(driver, extensionId);
+    const world = await driver.evaluate(launcher, `(async () => {
+      const videoTab = await chrome.tabs.create({ url: ${JSON.stringify(VIDEO_URL)}, active: true });
+      const popupTab = await chrome.tabs.create({ url: ${JSON.stringify(popupUrl)}, active: false });
+      await chrome.tabs.update(videoTab.id, { active: true });
+      const readout = async (tabId) => {
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          try {
+            const response = await chrome.tabs.sendMessage(tabId, { version: ${STATUS_MESSAGE_VERSION}, type: 'readouts:get' });
+            return response.routeKind ?? null;
+          } catch (error) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+        }
+        throw new Error(\`content script never answered readouts for tab \${tabId}\`);
+      };
+      const videoKind = await readout(videoTab.id);
+      return { windowId: videoTab.windowId, videoTabId: videoTab.id, popupTabId: popupTab.id, videoKind };
+    })()`);
+    console.log('part-navigation world:', JSON.stringify(world));
+    assert.equal(world.videoKind, 'video', JSON.stringify(world));
+
+    const readState = await popupStateReader(driver, popupUrl);
+    const popupTarget = await driver.findPageByUrl(popupUrl);
+    const popupSession = await driver.attach(popupTarget.targetId);
+    const consoleErrors = [];
+    driver.on('Runtime.consoleAPICalled', (message) => {
+      if (message.sessionId !== popupSession || message.params.type !== 'error') return;
+      const text = (message.params.args || [])
+        .map((arg) => arg.value ?? arg.description ?? '')
+        .join(' ');
+      consoleErrors.push({ kind: 'console', text });
+    });
+    driver.on('Runtime.exceptionThrown', (message) => {
+      if (message.sessionId !== popupSession) return;
+      const details = message.params.exceptionDetails ?? {};
+      consoleErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
+    });
+
+    const cdnEmptyMessage = cdnLinesView(undefined, undefined, false).message;
+    const honestVideoLayout = (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
+      && state.livePanelHidden === true
+      && state.bufferCardHidden === false
+      && state.bufferNoteHidden === true
+      && state.cdnCard === cdnEmptyMessage;
+    const videoTarget = await driver.findPageByUrl(VIDEO_URL);
+    const videoSession = await driver.attach(videoTarget.targetId);
+    const sessionProbe = () => driver.evaluate(launcher, `(async () => {
+      try {
+        const response = await chrome.tabs.sendMessage(${world.videoTabId}, { version: ${STATUS_MESSAGE_VERSION}, type: 'diagnostics:session-id:get' });
+        return response.sessionId ?? null;
+      } catch (error) {
+        return null;
+      }
+    })()`);
+
+    const sessionBefore = await waitForState(
+      sessionProbe,
+      (value) => typeof value === 'string' ? true : `session ${JSON.stringify(value)}`,
+      { what: 'content-side session on the video page before the part navigation' },
+    );
+    const baselineShown = await waitForState(
+      readState,
+      (state) => honestVideoLayout(state) ? true : 'expected the honest video layout before the part navigation',
+      { what: 'popup baseline on the video page' },
+    );
+    assert.equal(baselineShown.ownActiveTabIds[0], world.videoTabId, JSON.stringify(baselineShown));
+    markScenario('分 P 导航前：弹窗如实视频布局，内容侧记录就绪');
+
+    // 同文档切分 P：只动 query 的 pushState，不重载页面。
+    await driver.evaluate(videoSession, `history.pushState({}, '', '/video/BVwin-check/?p=2')`);
+    const sessionAfter = await waitForState(
+      sessionProbe,
+      (value) => typeof value === 'string' && value !== sessionBefore ? true : `session ${JSON.stringify(value)}`,
+      { what: 'content-side session rotation after the ?p=2 navigation' },
+    );
+    const partShown = await waitForState(
+      readState,
+      (state) => honestVideoLayout(state) ? true : 'expected the popup to stay truthful across the part navigation',
+      { what: 'open popup across the ?p=2 part navigation' },
+    );
+    assert.equal(partShown.ownActiveTabIds[0], world.videoTabId, JSON.stringify(partShown));
+    markScenario('同文档切分 P（?p=2，不重载）：内容侧换新记录，弹窗如实跟随不闪未运行');
+
+    // 落库的两条记录各就各位：旧记录不带 part，新记录 part 为 2 且 pathname 干净
+    // （隐私契约：query 全剥，只留分 P 一个字段）。从 launcher 扩展页直读扩展自己的
+    // IndexedDB，schema 与播种组同形、缺时才建。
+    const readSessionRecord = (sessionId) => driver.evaluate(launcher, `(async () => {
+      const database = await new Promise((resolve, reject) => {
+        const request = indexedDB.open(${JSON.stringify(SCALE_DB_NAME)}, 1);
+        request.onerror = () => reject(request.error || new Error('session read db open failed'));
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(${JSON.stringify(SESSION_STORE)})) {
+            db.createObjectStore(${JSON.stringify(SESSION_STORE)}, { keyPath: 'sessionId' });
+          }
+          if (!db.objectStoreNames.contains(${JSON.stringify(EVENT_STORE)})) {
+            const events = db.createObjectStore(${JSON.stringify(EVENT_STORE)}, { keyPath: 'eventId', autoIncrement: true });
+            events.createIndex(${JSON.stringify(EVENT_INDEX)}, ['sessionId', 'sequence'], { unique: true });
+          }
+        };
+        request.onsuccess = () => resolve(request.result);
+      });
+      const record = await new Promise((resolve, reject) => {
+        const transaction = database.transaction(${JSON.stringify(SESSION_STORE)}, 'readonly');
+        const request = transaction.objectStore(${JSON.stringify(SESSION_STORE)}).get(${JSON.stringify(sessionId)});
+        request.onerror = () => reject(request.error || new Error('session get failed'));
+        request.onsuccess = () => resolve(request.result ?? null);
+      });
+      database.close();
+      return record;
+    })()`);
+    const recordAfter = await waitForState(
+      () => readSessionRecord(sessionAfter),
+      (record) => record !== null && record.part === '2'
+        ? true
+        : `rotated record ${JSON.stringify(record)}`,
+      { what: 'rotated session record persisted with part 2' },
+    );
+    assert.equal(recordAfter.routeKind, 'video', JSON.stringify(recordAfter));
+    assert.equal(recordAfter.bvid, 'BVwin-check', JSON.stringify(recordAfter));
+    assert.equal(recordAfter.pathname, '/video/BVwin-check/', JSON.stringify(recordAfter));
+    const recordBefore = await readSessionRecord(sessionBefore);
+    assert.ok(recordBefore !== null, '原记录应当已落库');
+    assert.equal('part' in recordBefore, false, JSON.stringify(recordBefore));
+    markScenario('分 P 换记录后落库各就各位：新记录 part 为 2，旧记录无 part，pathname 不受 query 污染');
+
+    // 弹窗的「打开开发日志」在点击时重新询问内容侧：换分 P 后入口指向新记录。
+    await driver.evaluate(popupSession, `document.querySelector('[data-open-logs]').click()`);
+    const [partLogsTarget] = await waitForState(
+      async () => (await driver.targets())
+        .filter((info) => info.type === 'page' && info.url.startsWith(`${logsPagePrefix}#sessionId=`)),
+      (candidates) => candidates.length === 1 ? true : `expected 1 popup-opened logs page, got ${candidates.length}`,
+      { what: 'popup-opened logs page after the part navigation' },
+    );
+    assert.equal(partLogsTarget.url, `${logsPagePrefix}#sessionId=${sessionAfter}`,
+      '弹窗的日志入口必须指向分 P 导航后的新记录');
+    markScenario('分 P 换记录后：弹窗日志入口指向新 session');
+
+    // 关掉弹出的日志页，活动标签页回到视频页，弹窗面板恢复。
+    await driver.evaluate(launcher, `(async () => {
+      const me = await chrome.tabs.getCurrent();
+      const active = await chrome.tabs.query({ active: true, windowId: me.windowId });
+      if (active.length !== 1 || active[0].id === me.id
+        || active[0].id === ${world.videoTabId} || active[0].id === ${world.popupTabId}) {
+        throw new Error('expected the popup-opened logs page to be the only active tab');
+      }
+      await chrome.tabs.remove(active[0].id);
+      await chrome.tabs.update(${world.videoTabId}, { active: true });
+    })()`);
+    await waitForState(
+      readState,
+      (state) => honestVideoLayout(state) ? true : 'expected the popup to recover after its logs page was closed',
+      { what: 'popup recovery after the popup-opened logs page closes' },
+    );
+
+    // 控制台通道的阳性对照 + 全组零预期外错误。
+    await driver.evaluate(popupSession, `console.error('[BilibiliBuffer] win-check-f 控制台探针 win-check-f-probe')`);
+    await waitForState(
+      () => Promise.resolve(consoleErrors.length),
+      () => (consoleErrors.some((entry) => entry.text.includes('win-check-f-probe'))
+        ? true
+        : 'console probe not captured'),
+      { what: 'popup console positive control' },
+    );
+    const unexpected = consoleErrors.filter((entry) => !entry.text.includes('win-check-f-probe'));
+    assert.deepEqual(unexpected, [], `本组场景出现预期之外的弹窗错误 ${JSON.stringify(unexpected)}`);
+    markScenario('分 P 组全组弹窗控制台零扩展错误（阳性对照通过）');
+  } finally {
+    await cleanup();
+  }
+}
+
+// ---- 第八组：扩展更新前打开的日志页（见文件头说明）----
+
+async function runStaleLogsPack() {
+  const { driver, cleanup } = await setupBrowser('popup-window-check-g-');
+  try {
+    const { id: extensionId } = await driver.send('Extensions.loadUnpacked', { path: extensionDirectory });
+    const logsPagePrefix = `chrome-extension://${extensionId}/logs.html`;
+    const launcher = await openLauncher(driver, extensionId);
+    const world = await driver.evaluate(launcher, `(async () => {
+      const tab = await chrome.tabs.create({ url: ${JSON.stringify(VIDEO_URL)}, active: true });
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        try {
+          const response = await chrome.tabs.sendMessage(tab.id, { version: ${STATUS_MESSAGE_VERSION}, type: 'diagnostics:session-id:get' });
+          if (typeof response.sessionId === 'string') return { videoTabId: tab.id, sessionId: response.sessionId };
+        } catch (error) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+      throw new Error('video tab content script never answered');
+    })()`);
+    console.log('stale-logs world:', JSON.stringify(world));
+
+    const hashedLogsUrl = `${logsPagePrefix}#sessionId=${encodeURIComponent(world.sessionId)}`;
+    const openLogsPage = async () => {
+      const { targetId } = await driver.send('Target.createTarget', { url: hashedLogsUrl });
+      return driver.attach(targetId);
+    };
+    const readCdnPanel = (session) => driver.evaluate(session, `(() => {
+      const filter = document.querySelector('[data-session-filter]');
+      const button = document.querySelector('[data-cdn-refresh]');
+      const status = document.querySelector('[data-cdn-status]');
+      if (filter === null || button === null || status === null) return null;
+      return { filterValue: filter.value, buttonDisabled: button.disabled, status: status.textContent };
+    })()`);
+    const logsPageTargets = async () => (await driver.targets())
+      .filter((info) => info.type === 'page' && info.url.startsWith(logsPagePrefix));
+
+    const preUpdateLogs = await openLogsPage();
+    // 更新前：当前 session 能读，先读成功一次作基线。
+    await waitForState(
+      () => readCdnPanel(preUpdateLogs),
+      (state) => state !== null && state.filterValue === 'current' && state.buttonDisabled === false
+        ? true
+        : `unexpected CDN panel state ${JSON.stringify(state)}`,
+      { what: 'CDN panel ready on the pre-update logs page' },
+    );
+    await driver.evaluate(preUpdateLogs, `document.querySelector('[data-cdn-refresh]').click()`);
+    await waitForState(
+      () => readCdnPanel(preUpdateLogs),
+      (state) => state !== null && state.status.startsWith('读取完成')
+        ? true
+        : `unexpected CDN status ${JSON.stringify(state)}`,
+      { what: 'CDN read succeeds on the logs page before the update' },
+    );
+    const logsTargetsBefore = (await logsPageTargets()).length;
+    assert.equal(logsTargetsBefore, 2, `重载前应有 launcher 与带 hash 两个日志页，实为 ${logsTargetsBefore}`);
+    markScenario('扩展更新前：日志页当前 session 读取成功（基线）');
+
+    // 商店自动更新的形状：同一播放源重载（扩展 id 不变）。重载会关掉扩展自己的
+    // 页面：launcher 与带 hash 的日志页标签一并消失，没有失效页面留下来说错话；
+    // 内容标签页（视频页）保留。
+    const { id: reloadedId } = await driver.send('Extensions.loadUnpacked', { path: extensionDirectory });
+    assert.equal(reloadedId, extensionId, '同一播放源重载后扩展 id 不变');
+    const survivors = await waitForState(
+      async () => {
+        const targets = await driver.targets();
+        return {
+          logsPages: targets.filter((info) => info.type === 'page' && info.url.startsWith(logsPagePrefix)).length,
+          videoPages: targets.filter((info) => info.type === 'page' && info.url.startsWith(VIDEO_URL)).length,
+        };
+      },
+      (state) => state.logsPages === 0 && state.videoPages === 1
+        ? true
+        : `unexpected target map ${JSON.stringify(state)}`,
+      { what: 'pre-update extension pages torn down by the reload' },
+    );
+    console.log('post-reload target map:', JSON.stringify(survivors));
+    markScenario('扩展重载后：更新前打开的日志页标签被关闭，没有失效页面留下，内容标签页保留');
+
+    // 重载后重开日志页属于新上下文：读同一 session 照常成功（库与记录不受重载影响）。
+    const freshSession = await openLogsPage();
+    const consoleErrors = [];
+    driver.on('Runtime.consoleAPICalled', (message) => {
+      if (message.sessionId !== freshSession || message.params.type !== 'error') return;
+      const text = (message.params.args || [])
+        .map((arg) => arg.value ?? arg.description ?? '')
+        .join(' ');
+      consoleErrors.push({ kind: 'console', text });
+    });
+    driver.on('Runtime.exceptionThrown', (message) => {
+      if (message.sessionId !== freshSession) return;
+      const details = message.params.exceptionDetails ?? {};
+      consoleErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
+    });
+    await waitForState(
+      () => readCdnPanel(freshSession),
+      (state) => state !== null && state.filterValue === 'current' && state.buttonDisabled === false
+        ? true
+        : `unexpected CDN panel state ${JSON.stringify(state)}`,
+      { what: 'CDN panel ready on the post-update logs page' },
+    );
+    await driver.evaluate(freshSession, `document.querySelector('[data-cdn-refresh]').click()`);
+    await waitForState(
+      () => readCdnPanel(freshSession),
+      (state) => state !== null && state.status.startsWith('读取完成')
+        ? true
+        : `unexpected CDN status ${JSON.stringify(state)}`,
+      { what: 'CDN read succeeds on the post-update logs page' },
+    );
+    markScenario('扩展更新后重开日志页读同一 session 照常成功');
+
+    // 控制台通道的阳性对照 + 全组零预期外错误。
+    await driver.evaluate(freshSession, `console.error('[BilibiliBuffer] win-check-g 控制台探针 win-check-g-probe')`);
+    await waitForState(
+      () => Promise.resolve(consoleErrors.length),
+      () => (consoleErrors.some((entry) => entry.text.includes('win-check-g-probe'))
+        ? true
+        : 'console probe not captured'),
+      { what: 'post-update logs console positive control' },
+    );
+    const unexpected = consoleErrors.filter((entry) => !entry.text.includes('win-check-g-probe'));
+    assert.deepEqual(unexpected, [], `本组场景出现预期之外的控制台错误 ${JSON.stringify(unexpected)}`);
+    markScenario('更新前后日志页组全组零预期外错误（阳性对照通过）');
+  } finally {
+    await cleanup();
+  }
+}
+
 const provenance = await readProvenance();
 
 const commitSha = process.env.BILIBILI_E2E_COMMIT_SHA ?? provenance.commitSha ?? provenance.commitShaReason ?? 'unknown';
@@ -1485,6 +1803,8 @@ await runSwitchPack();
 await runUpdateMidPlaybackPack();
 await runNoMediaPagePack();
 await runLogScalePack();
+await runPartNavigationPack();
+await runStaleLogsPack();
 
 console.log(`popup window check passed: ${scenarios.length} scenarios`);
 for (const scenario of scenarios) console.log(`- ${scenario}`);
