@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { findAvailablePort, parseHeadedFlag, resolveChromeExecutablePath } from './browser-runtime.mjs';
+import { findAvailablePort, resolveChromeExecutablePath } from './browser-runtime.mjs';
 import { startConsoleCapture, triggerExtensionPositiveControl } from './console-capture.mjs';
 import { readMaxEventId, readStoredEvents } from './extension-log-pull.mjs';
 import { installUnpackedExtension } from './install-unpacked-extension.mjs';
@@ -16,21 +16,24 @@ const extensionDirectory = path.join(root, 'dist', 'extension');
 const MEDIA_HOST = /(?:\.bilivideo\.com|\.akamaized\.net)$/;
 
 function parseArgs(argv) {
+  // --headed 先从 argv 摘掉：其余参数仍走下面的严格循环（未知参数照旧报错）。
+  const headed = argv.includes('--headed');
+  const rest = argv.filter((value) => value !== '--headed');
   const options = {
     bv: 'BV1syga6fEL7',
     seconds: 150,
     startSeconds: 0,
     profile: undefined,
     outputDirectory: undefined,
-    headed: parseHeadedFlag(argv),
+    headed,
   };
-  for (let index = 0; index < argv.length; index += 1) {
-    const key = argv[index];
-    if (key === '--bv') options.bv = argv[++index];
-    else if (key === '--seconds') options.seconds = Number(argv[++index]);
-    else if (key === '--start-seconds') options.startSeconds = Number(argv[++index]);
-    else if (key === '--profile') options.profile = argv[++index];
-    else if (key === '--output-dir') options.outputDirectory = argv[++index];
+  for (let index = 0; index < rest.length; index += 1) {
+    const key = rest[index];
+    if (key === '--bv') options.bv = rest[++index];
+    else if (key === '--seconds') options.seconds = Number(rest[++index]);
+    else if (key === '--start-seconds') options.startSeconds = Number(rest[++index]);
+    else if (key === '--profile') options.profile = rest[++index];
+    else if (key === '--output-dir') options.outputDirectory = rest[++index];
     else throw new Error(`unknown argument ${key}`);
   }
   if (typeof options.bv !== 'string' || options.bv.length === 0) throw new Error('--bv must be non-empty');
@@ -232,71 +235,6 @@ async function readMedia(page) {
       volume: video.volume,
     };
   });
-}
-
-async function switchQuality(context, extensionId, page, startAfterEventId, pathname) {
-  const beforeResult = await waitForMediaSample(
-    context,
-    extensionId,
-    startAfterEventId,
-    pathname,
-    (event) => resolutionKey(event) !== undefined,
-  );
-  const before = beforeResult.sample;
-  const qualityButton = page.locator('.bpx-player-ctrl-quality').first();
-  try {
-    await qualityButton.waitFor({ state: 'visible', timeout: 15000 });
-  } catch (error) {
-    throw Object.assign(new Error('quality control .bpx-player-ctrl-quality was not found or visible'), {
-      code: 'QUALITY_CONTROL_NOT_FOUND',
-      cause: error,
-    });
-  }
-  await qualityButton.click();
-  const menu = page.locator('.bpx-player-ctrl-quality-menu').first();
-  try {
-    await menu.waitFor({ state: 'visible', timeout: 5000 });
-  } catch (error) {
-    throw Object.assign(new Error('quality menu .bpx-player-ctrl-quality-menu did not open'), {
-      code: 'QUALITY_MENU_NOT_FOUND',
-      cause: error,
-    });
-  }
-  const items = menu.locator('.bpx-player-ctrl-quality-menu-item');
-  const metadata = await items.evaluateAll((elements) => elements.map((element) => ({
-    text: element.textContent?.trim() || '',
-    active: element.classList.contains('bpx-player-ctrl-quality-menu-item-active')
-      || element.getAttribute('aria-selected') === 'true'
-      || element.dataset.selected === 'true',
-  })));
-  if (metadata.length < 2) {
-    throw Object.assign(new Error('quality menu has fewer than two selectable levels'), {
-      code: 'QUALITY_LEVEL_NOT_FOUND',
-    });
-  }
-  const activeIndex = metadata.findIndex((item) => item.active);
-  const targetIndex = metadata.findIndex((item, index) => index !== activeIndex);
-  if (targetIndex < 0) {
-    throw Object.assign(new Error('quality menu has no level different from the current level'), {
-      code: 'QUALITY_LEVEL_NOT_FOUND',
-    });
-  }
-  await items.nth(targetIndex).click();
-  const afterResult = await waitForMediaSample(
-    context,
-    extensionId,
-    startAfterEventId,
-    pathname,
-    (event) => resolutionKey(event) !== undefined && resolutionKey(event) !== resolutionKey(before),
-    30000,
-  );
-  return {
-    beforeResolution: before.data.resolution,
-    afterResolution: afterResult.sample.data.resolution,
-    beforeVideoQuality: before.data.videoQuality,
-    afterVideoQuality: afterResult.sample.data.videoQuality,
-    selectedLevel: metadata[targetIndex].text,
-  };
 }
 
 function assertPlayback(samples) {
