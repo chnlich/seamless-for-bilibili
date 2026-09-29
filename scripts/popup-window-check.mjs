@@ -15,6 +15,13 @@
 // 申请过缓存目标；弹窗日志入口落在零分片 session 上读取如实完成（NaN 与异常都算谎话）；
 // 同一标签页跨路由导航后面板跟随；活动标签页是扩展自身日志页时如实退到合并提示；弹窗
 // 控制台带阳性对照，全组零扩展错误才算通过。
+// 第六组覆盖日志大库：一个重度用户的 72 小时窗口可装下几十万条记录（实测约 7 MB/小时，
+// 窗口上界数百 MB）。按生产记录形状向扩展自己的 IndexedDB 播种 40 个 session 与 20 万条
+// 事件（焦点 session 带 1000 组双腿竞速分片），之后全程走生产路径：快照如实读到播种数；
+// 无 hash 的日志页按钮禁用且直说入口（与小库一致）；当前 session 点「读取 CDN racing」
+// 两行镜像、覆盖率按 1000/1000 如实显示、无 NaN；全部 session 的导出行数恰好等于播种行数、
+// writer 正常关闭、状态行如实报截止 eventId。导出与 browser-e2e 同手法把 showSaveFilePicker
+// 桩成计数 writer（真实保存对话框要真实用户手势，headless 打不出来）。
 //
 //   node scripts/popup-window-check.mjs      （Windows；系统 Chrome 由 BILIBILI_E2E_CHROME 指定）
 //
@@ -36,8 +43,10 @@ import {
   NO_PAGE_MESSAGES, SWITCH_OFF_TEXT, cdnLinesView, liveTakeoverText,
 } from '../src/extension/popup-view.js';
 import { emptyLiveFacts } from '../src/extension/popup-live.js';
+import { CDN_RANGE_MESSAGES } from '../src/diagnostics/logs-view.js';
+import { EVENT_INDEX, EVENT_STORE, SESSION_STORE } from '../src/diagnostics/idb.js';
 import { STATUS_MESSAGE_VERSION } from '../src/ui/panel.js';
-import { VOD_CONFIG } from '../src/constants.js';
+import { VERSION, VOD_CONFIG } from '../src/constants.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extensionDirectory = path.join(root, 'dist', 'extension');
@@ -1072,6 +1081,322 @@ async function runNoMediaPagePack() {
   }
 }
 
+// ---- 第六组：日志大库（72 小时窗口的重度使用规模）----
+
+const SCALE_DB_NAME = 'bilibili-development-logs';
+const SCALE_SESSION_COUNT = 40;
+const SCALE_CHUNK_PAIRS = 1000;
+const SCALE_FOCUS_CHUNKS = SCALE_CHUNK_PAIRS * 2;
+const SCALE_FOCUS_SERVE = 200;
+const SCALE_FOCUS_EVENTS = SCALE_FOCUS_CHUNKS + SCALE_FOCUS_SERVE;
+const SCALE_EVENT_COUNT = 200000;
+const SCALE_SEED_BATCH = 5000;
+const SCALE_TX_BATCH = 2000;
+const SCALE_WALL_SPAN_MS = 47 * 3600 * 1000;
+
+function scaleSessionId(index) {
+  return `scale-${String(index).padStart(2, '0')}`;
+}
+
+// 播种计划：焦点 session（索引 0）= 2000 条 bank.fetch.chunk（1000 组双腿竞速对）
+// + 200 条 bank.serve；其余按 4 码轮转铺满，总量恰好 20 万。
+function scaleSeedJobs() {
+  const counts = new Array(SCALE_SESSION_COUNT).fill(0);
+  counts[0] = SCALE_FOCUS_EVENTS;
+  let remaining = SCALE_EVENT_COUNT - SCALE_FOCUS_EVENTS;
+  for (let index = 1; index < SCALE_SESSION_COUNT; index += 1) {
+    const share = Math.floor(remaining / (SCALE_SESSION_COUNT - index));
+    counts[index] = share;
+    remaining -= share;
+  }
+  assert.equal(counts.reduce((sum, value) => sum + value, 0), SCALE_EVENT_COUNT);
+  const jobs = [];
+  counts.forEach((count, sessionIndex) => {
+    for (let fromSeq = 1; fromSeq <= count; fromSeq += SCALE_SEED_BATCH) {
+      jobs.push({
+        sessionId: scaleSessionId(sessionIndex),
+        sessionIndex,
+        fromSeq,
+        toSeq: Math.min(count, fromSeq + SCALE_SEED_BATCH - 1),
+        total: count,
+        focus: sessionIndex === 0,
+      });
+    }
+  });
+  return jobs;
+}
+
+// 页内播种函数：按生产记录形状（client.js append / session.js createSessionIdentity 的字段）
+// 直写扩展自己的 IndexedDB，schema 与 idb.js 完全一致、缺时才建；eventId 交给 autoIncrement，
+// 播种顺序就是 eventId 递增序。分事务等待，避免单次请求风暴；每批回插计数与耗时。
+function scaleSeedExpression(job, context) {
+  return `(async () => {
+    const job = ${JSON.stringify(job)};
+    const ctx = ${JSON.stringify(context)};
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(${JSON.stringify(SCALE_DB_NAME)}, 1);
+      request.onerror = () => reject(request.error || new Error('seed db open failed'));
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(${JSON.stringify(SESSION_STORE)})) {
+          db.createObjectStore(${JSON.stringify(SESSION_STORE)}, { keyPath: 'sessionId' });
+        }
+        if (!db.objectStoreNames.contains(${JSON.stringify(EVENT_STORE)})) {
+          const events = db.createObjectStore(${JSON.stringify(EVENT_STORE)}, { keyPath: 'eventId', autoIncrement: true });
+          events.createIndex(${JSON.stringify(EVENT_INDEX)}, ['sessionId', 'sequence'], { unique: true });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+    });
+    const putAll = (storeName, records) => new Promise((resolve, reject) => {
+      const transaction = database.transaction(storeName, 'readwrite');
+      const store = transaction.objectStore(storeName);
+      for (const record of records) store.put(record);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error || new Error('seed tx failed'));
+      transaction.onabort = () => reject(transaction.error || new Error('seed tx aborted'));
+    });
+    const started = Date.now();
+    if (job.fromSeq === 1) {
+      await putAll(${JSON.stringify(SESSION_STORE)}, [{
+        schemaVersion: 1,
+        sessionId: job.sessionId,
+        startedAt: new Date(ctx.wallStartMs).toISOString(),
+        extensionVersion: ctx.version,
+        buildId: ctx.buildId,
+        tabId: 1000 + job.sessionIndex,
+        routeKind: 'video',
+        origin: 'https://www.bilibili.com',
+        pathname: '/video/BVscale' + String(job.sessionIndex).padStart(2, '0') + '/',
+        bvid: 'BVscale' + String(job.sessionIndex).padStart(2, '0'),
+      }]);
+    }
+    const wallTimeFor = (sequence) => new Date(Math.round(
+      ctx.wallStartMs + ctx.wallSpanMs * (sequence - 1) / Math.max(1, job.total - 1),
+    )).toISOString();
+    const elapsedFor = (sequence) => Math.round(ctx.wallSpanMs * (sequence - 1) / Math.max(1, job.total - 1));
+    const sampleData = {
+      forwardSeconds: 87.25, readyState: 4, networkState: 1, currentTime: 321.123456,
+      videoWidth: 1920, videoHeight: 1080, playbackRate: 2, paused: false, muted: false, volume: 0.8,
+      bufferedRanges: [
+        { start: 0.0, end: 87.2501, track: 'video bytes', bytes: 118111600, label: 'buffered video ahead of the play position' },
+        { start: 87.2501, end: 160.75, track: 'video bytes', bytes: 73400320, label: 'buffered video ahead of the play position' },
+        { start: 160.75, end: 233.875, track: 'audio bytes', bytes: 8388608, label: 'buffered audio ahead of the play position' },
+        { start: 233.875, end: 361.5003, track: 'audio bytes', bytes: 12582912, label: 'buffered audio ahead of the play position' },
+      ],
+      seekableRanges: [{ start: 0.0, end: 3615.003 }],
+      frameTiming: {
+        presentedTotal: 12345, droppedTotal: 17, maxFrameGapMs: 33.333, processingMs: 2.5,
+        displayLead: 0.833, mediaStep: 33.333, appendMs: 1.25, appendBytes: 1048576,
+        sourceOpen: true, quiesce: false, degraded: false, degradedQueue: false,
+        degradedAppend: false, presentationLagMs: 4.17, decodeQueueVideo: 12, decodeQueueAudio: 6,
+      },
+      tracksCount: 2, quality: 80, liveEdge: false, stepAsides: 0,
+    };
+    const buildRecord = (sequence) => {
+      const base = { sessionId: job.sessionId, sequence, wallTime: wallTimeFor(sequence), elapsedMs: elapsedFor(sequence) };
+      if (job.focus && sequence <= ctx.focusChunks) {
+        const pair = (sequence - 1) >> 1;
+        const leg = ((sequence - 1) % 2) + 1;
+        const won = (pair % 2) === (leg - 1);
+        const start = pair * 1048576;
+        const host = 'upos-sz-mirror' + (leg === 1 ? 'a' : 'b') + '.bilivideo.com';
+        return { ...base, code: 'bank.fetch.chunk', data: {
+          source: 'https://' + host + '/scale-live/stream.flv',
+          mirror: host,
+          chunkIndex: pair,
+          start,
+          end: start + 1048575,
+          bytes: 1048576,
+          durationMs: 220 + (pair % 40),
+          slot: leg,
+          priority: 'foreground',
+          result: won ? 'fetched' : 'lost_race',
+          ttfbMs: 40 + (pair % 50),
+        } };
+      }
+      if (job.focus) {
+        return { ...base, code: 'bank.serve', data: {
+          result: 'hit', mirror: 'upos-sz-mirrora.bilivideo.com', durationMs: 2.8, mode: 'memory',
+        } };
+      }
+      const kind = sequence % 4;
+      if (kind === 0) return { ...base, code: 'media.sample', data: sampleData };
+      if (kind === 1) return { ...base, code: 'media.append', data: { track: 'video bytes', bytes: 1048576, ms: 3.4, queueLength: 2, bufferedAfter: 96.1 } };
+      if (kind === 2) return { ...base, code: 'bank.serve', data: { result: 'hit', mirror: 'upos-sz-mirrorb.bilivideo.com', durationMs: 3.1, mode: 'memory' } };
+      return { ...base, code: 'media.progress', data: { currentTime: 321.123, forwardSeconds: 95.5, readyState: 4, paused: false, playbackRate: 2 } };
+    };
+    let inserted = 0;
+    let cursor = job.fromSeq;
+    while (cursor <= job.toSeq) {
+      const records = [];
+      const end = Math.min(job.toSeq, cursor + ${SCALE_TX_BATCH} - 1);
+      for (; cursor <= end; cursor += 1) records.push(buildRecord(cursor));
+      await putAll(${JSON.stringify(EVENT_STORE)}, records);
+      inserted += records.length;
+    }
+    database.close();
+    return { inserted, seconds: (Date.now() - started) / 1000 };
+  })()`;
+}
+
+async function runLogScalePack() {
+  const { driver, cleanup } = await setupBrowser('popup-window-check-e-');
+  try {
+    const { id: extensionId } = await driver.send('Extensions.loadUnpacked', { path: extensionDirectory });
+    const logsPagePrefix = `chrome-extension://${extensionId}/logs.html`;
+    const launcher = await openLauncher(driver, extensionId);
+
+    const consoleErrors = [];
+    for (const watched of [() => launcher]) {
+      driver.on('Runtime.consoleAPICalled', (message) => {
+        if (message.sessionId !== watched() || message.params.type !== 'error') return;
+        const text = (message.params.args || []).map((arg) => arg.value ?? arg.description ?? '').join(' ');
+        consoleErrors.push({ kind: 'console', text });
+      });
+      driver.on('Runtime.exceptionThrown', (message) => {
+        if (message.sessionId !== watched()) return;
+        const details = message.params.exceptionDetails ?? {};
+        consoleErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
+      });
+    }
+
+    // 播种：全程直写扩展自己的 IndexedDB（生产 schema、生产记录形状）。
+    const seedContext = {
+      buildId: provenance.buildId,
+      version: VERSION,
+      wallStartMs: Date.now() - 48 * 3600 * 1000,
+      wallSpanMs: SCALE_WALL_SPAN_MS,
+      focusChunks: SCALE_FOCUS_CHUNKS,
+    };
+    let seeded = 0;
+    let seedSeconds = 0;
+    for (const job of scaleSeedJobs()) {
+      const result = await driver.evaluate(launcher, scaleSeedExpression(job, seedContext));
+      seeded += result.inserted;
+      seedSeconds += result.seconds;
+    }
+    assert.equal(seeded, SCALE_EVENT_COUNT, `seeded ${seeded}`);
+
+    // 快照如实读到播种数：eventId 从 1 连续递增，全部 20 万条都在。
+    const snapshot = await driver.evaluate(launcher, `(async () => {
+      return await new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ version: 1, type: 'logs:max-event-id' }, (response) => {
+          if (chrome.runtime.lastError !== undefined) reject(new Error(chrome.runtime.lastError.message));
+          else resolve(response);
+        });
+      });
+    })()`);
+    assert.equal(snapshot.maxEventId, SCALE_EVENT_COUNT, JSON.stringify(snapshot));
+    markScenario('大库播种后快照如实读到全部 20 万条事件（eventId 连续无缺口）');
+
+    // 无 hash 的日志页（launcher 本身就是）：大库下按钮依旧禁用、状态行直说入口。
+    const idleCdn = await driver.evaluate(launcher, `({
+      filterValue: document.querySelector('[data-session-filter]').value,
+      currentDisabled: document.querySelector('[data-session-filter] option[value="current"]').disabled,
+      buttonDisabled: document.querySelector('[data-cdn-refresh]').disabled,
+      status: document.querySelector('[data-cdn-status]').textContent,
+    })`);
+    assert.equal(idleCdn.filterValue, '', JSON.stringify(idleCdn));
+    assert.equal(idleCdn.currentDisabled, true, JSON.stringify(idleCdn));
+    assert.equal(idleCdn.buttonDisabled, true, JSON.stringify(idleCdn));
+    assert.equal(idleCdn.status, CDN_RANGE_MESSAGES.noSessionEntry, JSON.stringify(idleCdn));
+    markScenario('大库下无 hash 打开日志页：CDN 按钮禁用且状态行直说从弹窗带入 session 的入口');
+
+    // 当前 session 点「读取 CDN racing」：真实按钮路径，两行镜像、覆盖率如实、无 NaN。
+    const focusUrl = `${logsPagePrefix}#sessionId=${scaleSessionId(0)}`;
+    await driver.evaluate(launcher, `chrome.tabs.create({ url: ${JSON.stringify(focusUrl)}, active: true })`);
+    const focusTarget = await waitForState(
+      async () => (await driver.targets()).find((info) => info.type === 'page' && info.url.startsWith(`${logsPagePrefix}#sessionId=`)) ?? null,
+      (target) => (target !== null ? true : 'focus logs page did not appear'),
+      { what: 'focus logs page target' },
+    );
+    const focusSession = await driver.attach(focusTarget.targetId);
+    driver.on('Runtime.consoleAPICalled', (message) => {
+      if (message.sessionId !== focusSession || message.params.type !== 'error') return;
+      const text = (message.params.args || []).map((arg) => arg.value ?? arg.description ?? '').join(' ');
+      consoleErrors.push({ kind: 'console', text });
+    });
+    driver.on('Runtime.exceptionThrown', (message) => {
+      if (message.sessionId !== focusSession) return;
+      const details = message.params.exceptionDetails ?? {};
+      consoleErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
+    });
+    const readCdnPanel = () => driver.evaluate(focusSession, `({
+      filterValue: document.querySelector('[data-session-filter]').value,
+      buttonDisabled: document.querySelector('[data-cdn-refresh]').disabled,
+      status: document.querySelector('[data-cdn-status]').textContent,
+      summary: document.querySelector('[data-cdn-summary]').textContent,
+      rows: [...document.querySelectorAll('[data-cdn-rows] tr')].map((row) => [...row.children].map((cell) => cell.textContent)),
+    })`);
+    const beforeClick = await readCdnPanel();
+    assert.equal(beforeClick.filterValue, 'current', JSON.stringify(beforeClick));
+    assert.equal(beforeClick.buttonDisabled, false, JSON.stringify(beforeClick));
+    const cdnStart = Date.now();
+    await driver.evaluate(focusSession, `document.querySelector('[data-cdn-refresh]').click()`);
+    const cdnPanel = await waitForState(
+      readCdnPanel,
+      (panel) => (panel.status.startsWith(`读取完成，覆盖 ${SCALE_FOCUS_CHUNKS} 条事件`) ? true : `CDN read not done: ${panel.status}`),
+      { what: 'CDN racing read on the seeded focus session', timeoutMs: 60000 },
+    );
+    const cdnSeconds = (Date.now() - cdnStart) / 1000;
+    // readCdnSummary 的 maxEventId 是本 session 自己的最大 eventId：焦点 session 的 2200 条最先入库。
+    assert.ok(cdnPanel.status.includes(`截止 eventId ${SCALE_FOCUS_EVENTS}`), JSON.stringify(cdnPanel.status));
+    assert.equal(cdnPanel.rows.length, 2, JSON.stringify(cdnPanel.rows));
+    assert.ok(cdnPanel.summary.includes(`配对覆盖率 ${SCALE_CHUNK_PAIRS}/${SCALE_CHUNK_PAIRS}`), JSON.stringify(cdnPanel.summary));
+    assert.ok(cdnPanel.summary.includes('浪费字节率 100.0%'), JSON.stringify(cdnPanel.summary));
+    assert.ok(!JSON.stringify(cdnPanel).includes('NaN'), JSON.stringify(cdnPanel));
+    markScenario('大库下当前 session 读取 CDN racing：两行镜像、覆盖率 1000/1000、无 NaN，状态行如实报截止快照');
+
+    // 导出全部 session：行数恰好等于播种行数（40 sessions + 20 万事件），writer 正常关闭。
+    await driver.evaluate(focusSession, `
+      window.__scaleExport = { writes: 0, bytes: 0, lines: 0, closed: false, aborted: false };
+      window.showSaveFilePicker = async () => ({
+        createWritable: async () => ({
+          write: async (chunk) => {
+            window.__scaleExport.writes += 1;
+            window.__scaleExport.bytes += chunk.length;
+            window.__scaleExport.lines += 1;
+          },
+          close: async () => { window.__scaleExport.closed = true; },
+          abort: async () => { window.__scaleExport.aborted = true; },
+        }),
+      });
+      const select = document.querySelector('[data-session-filter]');
+      select.value = '';
+      select.dispatchEvent(new Event('change'));
+      document.querySelector('[data-export]').click();
+      'export-clicked'`);
+    const exportStart = Date.now();
+    await waitForState(
+      () => driver.evaluate(focusSession, `document.querySelector('[data-status]').textContent`),
+      (text) => (text.startsWith(`导出完成，截止 eventId ${SCALE_EVENT_COUNT}`) ? true : `export not done: ${text}`),
+      { what: 'full-database export on the seeded corpus', timeoutMs: 240000, intervalMs: 1000 },
+    );
+    const exportSeconds = (Date.now() - exportStart) / 1000;
+    const scaleExport = await driver.evaluate(focusSession, `window.__scaleExport`);
+    assert.equal(scaleExport.lines, SCALE_EVENT_COUNT + SCALE_SESSION_COUNT, JSON.stringify(scaleExport));
+    assert.equal(scaleExport.closed, true, JSON.stringify(scaleExport));
+    assert.equal(scaleExport.aborted, false, JSON.stringify(scaleExport));
+    assert.ok(scaleExport.bytes > 40 * 1024 ** 2 && scaleExport.bytes < 400 * 1024 ** 2, JSON.stringify(scaleExport));
+    markScenario('大库导出全部 session：行数恰好等于 40 个 session 加 20 万条事件，writer 关闭，状态行如实报截止 eventId');
+    console.log(`log-scale timings: seed ${seedSeconds.toFixed(1)}s, cdn ${cdnSeconds.toFixed(1)}s, export ${exportSeconds.toFixed(1)}s, bytes ${scaleExport.bytes}`);
+
+    // 控制台通道阳性对照 + 全组零预期外错误。
+    await driver.evaluate(focusSession, `console.error('[BilibiliBuffer] win-check-e 控制台探针 win-check-e-probe')`);
+    await waitForState(
+      () => Promise.resolve(consoleErrors.length),
+      () => (consoleErrors.some((entry) => entry.text.includes('win-check-e-probe')) ? true : 'console probe not captured'),
+      { what: 'log-scale console positive control' },
+    );
+    const unexpected = consoleErrors.filter((entry) => !entry.text.includes('win-check-e-probe'));
+    assert.deepEqual(unexpected, [], `大库场景出现预期之外的控制台错误 ${JSON.stringify(unexpected)}`);
+    markScenario('大库全组零扩展错误（控制台阳性对照通过）');
+  } finally {
+    await cleanup();
+  }
+}
+
 const provenance = await readProvenance();
 
 const commitSha = process.env.BILIBILI_E2E_COMMIT_SHA ?? provenance.commitSha ?? provenance.commitShaReason ?? 'unknown';
@@ -1087,6 +1412,7 @@ await runPreExistingPagePack();
 await runSwitchPack();
 await runUpdateMidPlaybackPack();
 await runNoMediaPagePack();
+await runLogScalePack();
 
 console.log(`popup window check passed: ${scenarios.length} scenarios`);
 for (const scenario of scenarios) console.log(`- ${scenario}`);
