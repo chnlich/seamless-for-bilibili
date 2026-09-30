@@ -188,7 +188,8 @@ export class SegmentBank {
     this.recentResourceKeys = [];
     // HLS 直播分片的流身份门：key 为去分片名的流目录，值为 { verdict, attempts }。
     this.liveSegmentIdentity = new Map();
-    // fMP4 播放列表的 EXT-BILI-AUX：key 为流目录，值为 { mapUri, entries: Map<分片名, aux> }。
+    // fMP4 播放列表的 EXT-BILI-AUX：key 为流目录，值为 { mapUri, initBytes, entries: Map<分片名, aux> }；
+    // initBytes 是最近一次经网络送达的 init 分片（EXT-X-MAP 所名）。
     this.livePlaylists = new Map();
     // 当前 fMP4 流的 FLV 后备（一页一个播放器，同时只有一条）；unavailable 记已报告过的原因。
     this.liveFlvBackup = undefined;
@@ -386,22 +387,28 @@ export class SegmentBank {
     const playlist = parseBiliPlaylist(text);
     let state = this.livePlaylists.get(streamPath);
     if (state === undefined) {
-      state = { mapUri: undefined, entries: new Map() };
+      state = { mapUri: undefined, initBytes: undefined, entries: new Map() };
       this.livePlaylists.set(streamPath, state);
       while (this.livePlaylists.size > 8) this.livePlaylists.delete(this.livePlaylists.keys().next().value);
     }
-    if (playlist.mapUri !== undefined) {
-      if (state.mapUri !== undefined && state.mapUri !== playlist.mapUri
-        && this.liveFlvBackup?.hlsStreamPath === streamPath) {
-        this.liveFlvBackup.resetCalibration();
-      }
-      state.mapUri = playlist.mapUri;
-    }
+    if (playlist.mapUri !== undefined) state.mapUri = playlist.mapUri;
     for (const entry of playlist.entries) {
       state.entries.delete(entry.name);
       state.entries.set(entry.name, entry);
     }
     while (state.entries.size > 256) state.entries.delete(state.entries.keys().next().value);
+  }
+
+  // init 分片经网络送达：字节与上一个不同才作废 FLV 后备的校准。实测有的直播间每分钟换一次
+  // init 分片名（伴随 EXT-X-DISCONTINUITY），字节不变，分片时间线也不断，校准照常可用。
+  noteLiveInitSegment(streamPath, bytes) {
+    const state = this.livePlaylists.get(streamPath);
+    if (state.initBytes !== undefined && compareSegmentBytes(state.initBytes, bytes) !== -1
+      && this.liveFlvBackup?.hlsStreamPath === streamPath) {
+      this.liveFlvBackup.resetCalibration();
+    }
+    // 存副本：交给播放器的字节可能随后被转移（detach）。
+    state.initBytes = bytes.slice();
   }
 
   livePlaylistAuxFor(streamPath, name) {
@@ -1204,6 +1211,9 @@ export class SegmentBank {
           bytes: value.bytes,
           headers: { status: value.status, statusText: value.statusText, contentType: value.contentType },
         });
+      }
+      if (!rebuilt && segmentName === this.livePlaylists.get(streamPath)?.mapUri) {
+        this.noteLiveInitSegment(streamPath, value.bytes);
       }
     };
     // 网络腿全灭而拼接腿还在等时先不失败，等拼接腿的结果。

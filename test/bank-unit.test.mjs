@@ -4469,6 +4469,28 @@ test('an audio-only network segment leaves the FLV backup open, and the next seg
   bank.destroy();
 });
 
+test('a renamed init segment with the same bytes keeps the FLV calibration, and changed init bytes reset it', async () => {
+  const live = syntheticLive({ videoCount: 70, keyFrames: [0] });
+  const harness = flvBackupHarness({ playlistText: syntheticPlaylist(live.segments) });
+  const { bank } = harness;
+  const serveInit = async (name, bytes) => {
+    bank.observeLivePlaylistText(HLS_MAIN_PLAYLIST, syntheticPlaylist(live.segments, { mapUri: name }));
+    const response = hlsFetchThrough(bank, hlsSegmentUrls(name).player);
+    harness.deliver({ aux: { name }, bytes });
+    await (await response).arrayBuffer();
+    await settle();
+  };
+  await serveInit('h1790783173.m4s', encoded('init-a'));
+  await calibrateOverFetch(harness, live, live.flv);
+  assert.equal(bank.liveFlvBackup.ready, true);
+  // 实测有的直播间每分钟换一次 init 分片名（伴随 EXT-X-DISCONTINUITY），字节不变。
+  await serveInit('h1790783174.m4s', encoded('init-a'));
+  assert.equal(bank.liveFlvBackup.ready, true);
+  await serveInit('h1790783175.m4s', encoded('init-b'));
+  assert.equal(bank.liveFlvBackup.ready, false);
+  bank.destroy();
+});
+
 test('the FLV backup reconnects at most three times, then gives up with a full-rate error while segments keep the network legs', async () => {
   const live = syntheticLive({ videoCount: 70, keyFrames: [0] });
   const [first, second] = live.segments;

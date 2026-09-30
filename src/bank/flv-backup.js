@@ -211,7 +211,7 @@ export class LiveFlvBackup {
     this.rebuilder.reset();
   }
 
-  // init 分片更换（播放列表 EXT-X-MAP 变了）后旧模板作废，等下一个网络分片重新校准。
+  // init 分片的字节变了（换名而字节不变不算）后旧模板作废，等下一个网络分片重新校准。
   resetCalibration() {
     this.rebuilder.resetCalibration();
     this.failPending('frames_missing');

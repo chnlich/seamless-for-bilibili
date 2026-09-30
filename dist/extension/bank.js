@@ -2120,7 +2120,7 @@
       this.failPending("frames_missing");
       this.rebuilder.reset();
     }
-    // init 分片更换（播放列表 EXT-X-MAP 变了）后旧模板作废，等下一个网络分片重新校准。
+    // init 分片的字节变了（换名而字节不变不算）后旧模板作废，等下一个网络分片重新校准。
     resetCalibration() {
       this.rebuilder.resetCalibration();
       this.failPending("frames_missing");
@@ -3065,21 +3065,25 @@
       const playlist = parseBiliPlaylist(text);
       let state = this.livePlaylists.get(streamPath);
       if (state === void 0) {
-        state = { mapUri: void 0, entries: /* @__PURE__ */ new Map() };
+        state = { mapUri: void 0, initBytes: void 0, entries: /* @__PURE__ */ new Map() };
         this.livePlaylists.set(streamPath, state);
         while (this.livePlaylists.size > 8) this.livePlaylists.delete(this.livePlaylists.keys().next().value);
       }
-      if (playlist.mapUri !== void 0) {
-        if (state.mapUri !== void 0 && state.mapUri !== playlist.mapUri && this.liveFlvBackup?.hlsStreamPath === streamPath) {
-          this.liveFlvBackup.resetCalibration();
-        }
-        state.mapUri = playlist.mapUri;
-      }
+      if (playlist.mapUri !== void 0) state.mapUri = playlist.mapUri;
       for (const entry of playlist.entries) {
         state.entries.delete(entry.name);
         state.entries.set(entry.name, entry);
       }
       while (state.entries.size > 256) state.entries.delete(state.entries.keys().next().value);
+    }
+    // init 分片经网络送达：字节与上一个不同才作废 FLV 后备的校准。实测有的直播间每分钟换一次
+    // init 分片名（伴随 EXT-X-DISCONTINUITY），字节不变，分片时间线也不断，校准照常可用。
+    noteLiveInitSegment(streamPath, bytes) {
+      const state = this.livePlaylists.get(streamPath);
+      if (state.initBytes !== void 0 && compareSegmentBytes(state.initBytes, bytes) !== -1 && this.liveFlvBackup?.hlsStreamPath === streamPath) {
+        this.liveFlvBackup.resetCalibration();
+      }
+      state.initBytes = bytes.slice();
     }
     livePlaylistAuxFor(streamPath, name) {
       return this.livePlaylists.get(streamPath)?.entries.get(name);
@@ -3858,6 +3862,9 @@
             bytes: value.bytes,
             headers: { status: value.status, statusText: value.statusText, contentType: value.contentType }
           });
+        }
+        if (!rebuilt && segmentName === this.livePlaylists.get(streamPath)?.mapUri) {
+          this.noteLiveInitSegment(streamPath, value.bytes);
         }
       };
       const failSegment = (error) => {
