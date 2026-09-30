@@ -20,6 +20,19 @@ if (executablePath === undefined) {
   throw new Error('set BILIBILI_E2E_CHROME to the Chrome executable; no silent fallback');
 }
 
+// On Linux the system fontconfig knows neither Segoe UI nor any Chinese font: the
+// first Linux render shipped two store images whose every Chinese character was a
+// tofu box (the geometry checks cannot see fonts). fonts.conf next to this script
+// adds /mnt/c/Windows/Fonts and prefers Segoe UI and Microsoft YaHei, so Linux Chrome
+// draws the same glyphs Windows Chrome did. A FONTCONFIG_FILE already in the
+// environment wins over this default, on purpose, so a run can be pointed at another
+// config (e.g. to exercise the font self-check). Windows Chrome finds these fonts
+// itself and launches as before.
+const launchEnv = { ...process.env };
+if (process.platform === 'linux' && process.env.FONTCONFIG_FILE === undefined) {
+  launchEnv.FONTCONFIG_FILE = path.join(srcDir, 'fonts.conf');
+}
+
 // The raw popup captures are 2x device pixels of the whole popup page (the capture
 // clips exactly the popup document's scrollWidth x scrollHeight), so the close-up is
 // the capture itself: every edge, the toggle and the log link are complete by
@@ -124,6 +137,63 @@ async function assertLayout(page, htmlName) {
   }
 }
 
+// The only fonts allowed to draw text in the store images: Segoe UI for Latin and
+// Microsoft YaHei for Chinese, the families Windows Chrome picked for the recorded
+// captures (shared.css asks for both by name). Add a family only when a page starts
+// using it deliberately, and report the addition. One deliberate addition so far:
+// Noto Sans SC draws the diagram's literal check mark (diagram.html "完整到达 →
+// 交给播放器 ✓"): neither Segoe UI nor Microsoft YaHei contains U+2713, so the
+// character falls back — to Noto Sans SC on Linux (a Windows-side font reached
+// through fonts.conf), and to another symbol font on Windows.
+const ALLOWED_FONTS = ['Segoe UI', 'Microsoft YaHei', 'Noto Sans SC'];
+
+// Font self-check, next to the geometry checks, before every screenshot: asks Chrome
+// over CDP (CSS.getPlatformFontsForNode) which platform fonts actually drew each
+// element's own text and fails the render on any family outside ALLOWED_FONTS. Catches
+// a page whose text fell back to a system font or to tofu boxes.
+async function assertFonts(page, htmlName) {
+  const texts = await page.evaluate(() => {
+    const texts = [];
+    for (const el of document.querySelectorAll('body *')) {
+      const ownText = [...el.childNodes]
+        .some((node) => node.nodeType === Node.TEXT_NODE && node.textContent.trim() !== '');
+      if (ownText) {
+        el.setAttribute('data-font-check', String(texts.length));
+        texts.push(el.textContent.trim());
+      }
+    }
+    return texts;
+  });
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send('DOM.enable');
+    await session.send('CSS.enable');
+    const { root } = await session.send('DOM.getDocument');
+    const { nodeIds } = await session.send('DOM.querySelectorAll', {
+      nodeId: root.nodeId,
+      selector: '[data-font-check]',
+    });
+    if (nodeIds.length !== texts.length) {
+      throw new Error(`${htmlName}: the font check found ${nodeIds.length} of ${texts.length} text elements`);
+    }
+    for (const [index, nodeId] of nodeIds.entries()) {
+      const { fonts } = await session.send('CSS.getPlatformFontsForNode', { nodeId });
+      for (const font of fonts) {
+        if (!ALLOWED_FONTS.includes(font.familyName)) {
+          throw new Error(`${htmlName}: text ${JSON.stringify(texts[index])} is drawn in font ${JSON.stringify(font.familyName)} (${font.glyphCount} glyphs), only ${ALLOWED_FONTS.map((f) => JSON.stringify(f)).join(' and ')} may draw text`);
+        }
+      }
+    }
+  } finally {
+    await session.detach();
+    await page.evaluate(() => {
+      for (const el of document.querySelectorAll('[data-font-check]')) {
+        el.removeAttribute('data-font-check');
+      }
+    });
+  }
+}
+
 // Honest live caption: the LIVE_NOTE comment in screenshot-live.html is replaced in the
 // rendered page (never in the source file) based on what was actually captured. The keys
 // are the popup's live status texts (popup-view.js liveTakeoverText); an unknown status
@@ -159,7 +229,8 @@ async function fillLiveNote(page, note) {
   }, note);
 }
 
-const browser = await chromium.launch({ executablePath, headless: true });
+console.log('chrome fontconfig:', launchEnv.FONTCONFIG_FILE ?? '(none; the environment keeps its own)');
+const browser = await chromium.launch({ executablePath, headless: true, env: launchEnv });
 try {
   const report = JSON.parse(await fs.readFile(path.join(rawDir, 'report.json'), 'utf8'));
   const note = liveCaptionNote(report);
@@ -173,6 +244,7 @@ try {
       if (htmlName === 'screenshot-live.html') await fillLiveNote(page, note);
       await page.waitForTimeout(250);
       await assertLayout(page, htmlName);
+      await assertFonts(page, htmlName);
       const target = path.join(imagesDir, outName);
       await page.screenshot({ path: target, clip: { x: 0, y: 0, width, height }, type: 'png' });
       console.log('rendered', target);

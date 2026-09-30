@@ -30,6 +30,11 @@
    断言「打开开发日志」区域有墨迹，任一不满足即报错退出；测试浏览器只按 PID 结束（其命令行含本次临时 profile 路径）。
 2. `node store/images/src/compose.mjs` → 弹窗特写按原始捕获的完整尺寸原样导出（不做裁切），并渲染上表全部 PNG。
    每张图渲染前自检：弹窗、说明语和文字块不出画，说明语不压弹窗，标题只在词边界换行，背景页面截图必须加载成功；任一不满足即报错退出。
+   WSL 上的 Linux Chromium 系统字体既无 Segoe UI 也无任何中文字体（缺字体时中文全部成空框），
+   compose.mjs 在 Linux 上启动 Chrome 时经 `src/fonts.conf` 挂上 `/mnt/c/Windows/Fonts` 并优先使用
+   Segoe UI 与 Microsoft YaHei，渲染与 Windows 首捕同字体；环境里已设 `FONTCONFIG_FILE` 时以环境的为准。
+   另有字体自检：经 CDP 询问 Chrome 每段文字实际画在哪个字体上，出现 Segoe UI、Microsoft YaHei
+   （外加示意图勾号 U+2713 回退到的 Noto Sans SC）以外的字体即判该页渲染失败退出。
 3. 文案修改直接改 `src/*.html`（截图说明语在 HTML 里；直播说明语按 `report.json` 的实际接管状态插值到渲染页面，源文件不改）。
 
 ## 已提交图片的捕获来源
