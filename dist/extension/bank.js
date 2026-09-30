@@ -1072,8 +1072,8 @@
   }
   function calibrateFromSegment(segmentBytes, frameWindow) {
     const fragments = parseMediaSegment(segmentBytes);
+    if (fragments.some((fragment) => fragment.trafs.length < 2)) return { ok: false, reason: "track_missing" };
     const first = fragments[0];
-    if (first.trafs.length !== 2) return { ok: false, reason: "template_unsupported" };
     for (const fragment of fragments) {
       if (fragment.trafs.length !== 2) return { ok: false, reason: "template_unsupported" };
       for (let index = 0; index < 2; index += 1) {

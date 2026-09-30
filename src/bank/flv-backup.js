@@ -238,7 +238,8 @@ export class LiveFlvBackup {
       return;
     }
     if (outcome.reason !== 'template_unsupported') {
-      // 连接供帧未满一个窗口时，网络分片可能早于窗口起点，找不到帧不算失败。
+      // 连接供帧未满一个窗口时，网络分片可能早于窗口起点，找不到帧不算失败；只含一条轨的
+      // 分片（track_missing）同样只是这一个分片用不上。
       if (this.connection?.fullWindow !== true) return;
       this.calibrationFailures += 1;
       if (this.calibrationFailures < this.config.maxCalibrationAttempts) return;

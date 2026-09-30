@@ -393,8 +393,10 @@ function sameTrafShape(left, right) {
 // 时间锚点与栅格、以及该分片的首帧与小片段序号。失败时给出原因，不抛异常。
 export function calibrateFromSegment(segmentBytes, frameWindow) {
   const fragments = parseMediaSegment(segmentBytes);
+  // 有的直播间发布只含一条轨的分片（实测 0.02 秒、只有音频）：它定不出两轨模板，只算这一个
+  // 分片校准不上，等下一个分片。
+  if (fragments.some((fragment) => fragment.trafs.length < 2)) return { ok: false, reason: 'track_missing' };
   const first = fragments[0];
-  if (first.trafs.length !== 2) return { ok: false, reason: 'template_unsupported' };
   for (const fragment of fragments) {
     if (fragment.trafs.length !== 2) return { ok: false, reason: 'template_unsupported' };
     for (let index = 0; index < 2; index += 1) {

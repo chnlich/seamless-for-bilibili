@@ -4434,6 +4434,41 @@ test('the FLV backup needs a same-name same-codec address and reports unavailabl
   audioOnly.bank.destroy();
 });
 
+test('an audio-only network segment leaves the FLV backup open, and the next segment calibrates it', async () => {
+  // 实测的 0.02 秒分片：一个小片段、只有音频 traf。
+  const live = syntheticLive({ videoCount: 70, keyFrames: [0] });
+  const [first] = live.segments;
+  const bytes = buildFragment([{ ...REAL_AUDIO_SHAPE, trackId: 2 }], 699, [
+    { baseTime: 0, firstSampleFlags: 0x1010000, samples: [{ data: framePayload('audio', 0) }] },
+  ]);
+  const msn = first.aux.msn - 1;
+  const audioOnly = {
+    bytes,
+    aux: { name: `${msn}.m4s`, msn, duration: 0.02, ptsMs: first.aux.ptsMs - 20, key: true, size: bytes.byteLength, crc: crc32(bytes) },
+  };
+  const harness = flvBackupHarness({ playlistText: syntheticPlaylist([audioOnly, ...live.segments]) });
+  const { bank } = harness;
+  await (await liveFetchThrough(bank, HLS_MAIN_PLAYLIST)).text();
+  const response = hlsFetchThrough(bank, hlsSegmentUrls(audioOnly.aux.name).player);
+  await settle();
+  harness.flvFeed.push(live.flv);
+  await settle();
+  harness.deliver(audioOnly);
+  await (await response).arrayBuffer();
+  await settle();
+  const firstResponse = hlsFetchThrough(bank, hlsSegmentUrls(first.aux.name).player);
+  await settle();
+  harness.deliver(first);
+  await (await firstResponse).arrayBuffer();
+  await settle();
+  assert.deepEqual(harness.events('live.flv.backup'), [
+    { state: 'connected', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
+    { state: 'calibrated', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
+  ]);
+  assert.equal(harness.flvFeed.cancelled, false);
+  bank.destroy();
+});
+
 test('the FLV backup reconnects at most three times, then gives up with a full-rate error while segments keep the network legs', async () => {
   const live = syntheticLive({ videoCount: 70, keyFrames: [0] });
   const [first, second] = live.segments;
