@@ -30,6 +30,12 @@
     raceLegs: 2,
     pairFreshnessMs: 36e5
   });
+  var LIVE_FLV_BACKUP_CONFIG = Object.freeze({
+    windowMs: 3e4,
+    maxReconnects: 3,
+    reconnectDelayMs: 1e3,
+    maxCalibrationAttempts: 10
+  });
   var DIAGNOSTIC_MESSAGE_VERSION = 1;
 
   // src/diagnostics/catalog.js
@@ -88,6 +94,7 @@
     "bank.inventory",
     "live.stream.stitch",
     "live.playurl_observed",
+    "live.flv.backup",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
@@ -202,7 +209,8 @@
       "disabled",
       "routeActive",
       "pairedAddressAvailable",
-      "resources"
+      "resources",
+      "winner"
     ]),
     live: Object.freeze([
       "streamPath",
@@ -212,7 +220,10 @@
       "channel",
       "groupCount",
       "flvGroupCount",
-      "errorName"
+      "errorName",
+      "state",
+      "mirror",
+      "reason"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),
@@ -615,7 +626,7 @@
   }
 
   // src/build-id.js
-  var BUILT_BUILD_ID = true ? "src-f0e178d862a5e36868ba54c7" : "source-build";
+  var BUILT_BUILD_ID = true ? "src-570581068e5e42acfa6019db" : "source-build";
   function readBuildId() {
     return BUILT_BUILD_ID;
   }

@@ -51,6 +51,7 @@ export function emptyLiveFacts() {
     engagement: undefined,
     pairedAddressAvailable: false,
     pairRejected: false,
+    flvBackup: undefined,
   };
 }
 
@@ -69,6 +70,12 @@ export function foldLiveEvent(facts, event) {
     if (event?.data?.mismatch === true) facts.pairRejected = true;
     return facts;
   }
+  // FLV 后备只服务 fMP4 分片接管：取最近一条状态；播放器改拉 FLV 流时后备随之关闭，
+  // 那一轮接管不再带后备状态。
+  if (event?.code === 'live.flv.backup') {
+    if (typeof event?.data?.state === 'string') facts.flvBackup = event.data.state;
+    return facts;
+  }
   if (event?.code !== 'bank.serve') return facts;
   const data = event?.data !== null && typeof event?.data === 'object' ? event.data : {};
   facts.serveCount += 1;
@@ -78,6 +85,7 @@ export function foldLiveEvent(facts, event) {
     facts.engagement = 'engaged';
     facts.pairedAddressAvailable = data.pairedAddressAvailable === true;
     facts.pairRejected = false;
+    if (typeof data.reason !== 'string' || !data.reason.startsWith('live_hls_segment')) facts.flvBackup = undefined;
   } else if (klass === 'failed') {
     facts.engagement = 'failed';
   }

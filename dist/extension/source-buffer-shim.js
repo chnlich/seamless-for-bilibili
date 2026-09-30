@@ -29,6 +29,12 @@
     raceLegs: 2,
     pairFreshnessMs: 36e5
   });
+  var LIVE_FLV_BACKUP_CONFIG = Object.freeze({
+    windowMs: 3e4,
+    maxReconnects: 3,
+    reconnectDelayMs: 1e3,
+    maxCalibrationAttempts: 10
+  });
 
   // src/diagnostics/catalog.js
   var MEDIA_EVENT_NAMES = Object.freeze([
@@ -86,6 +92,7 @@
     "bank.inventory",
     "live.stream.stitch",
     "live.playurl_observed",
+    "live.flv.backup",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
@@ -190,7 +197,8 @@
       "disabled",
       "routeActive",
       "pairedAddressAvailable",
-      "resources"
+      "resources",
+      "winner"
     ]),
     live: Object.freeze([
       "streamPath",
@@ -200,7 +208,10 @@
       "channel",
       "groupCount",
       "flvGroupCount",
-      "errorName"
+      "errorName",
+      "state",
+      "mirror",
+      "reason"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),

@@ -174,12 +174,22 @@ export function renderCdnLines(documentObject, container, { rows, message } = {}
   container.append(empty);
 }
 
+const FLV_BACKUP_TEXT = Object.freeze({
+  connected: 'FLV 后备校准中',
+  calibrated: 'FLV 后备已接上',
+  reconnecting: 'FLV 后备重连中',
+  given_up: 'FLV 后备已断开',
+  unavailable: '无 FLV 后备',
+});
+
 export function liveTakeoverText(facts, { liveEnabled } = {}) {
   if (facts && facts.serveCount > 0) {
     if (facts.engagement === 'engaged') {
-      if (facts.pairedAddressAvailable && !facts.pairRejected) return '正在按两条线路竞速下载';
+      const backup = FLV_BACKUP_TEXT[facts.flvBackup];
+      const suffix = backup === undefined ? '' : `，${backup}`;
+      if (facts.pairedAddressAvailable && !facts.pairRejected) return `正在按两条线路竞速下载${suffix}`;
       // 未配到备用线路，或备用线路前缀比对不一致被撤销，都只剩播放器所名的一路。
-      return '单路接管（无可用备用线路）';
+      return `单路接管（无可用备用线路）${suffix}`;
     }
     if (facts.engagement === 'failed') return '接管请求失败';
     // 只有放行事件（例如播放器未使用直播媒体流）时，接管从未介入，不能谎报成接管。

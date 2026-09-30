@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BANK_CONFIG } from '../src/constants.js';
+import { BANK_CONFIG, LIVE_FLV_BACKUP_CONFIG } from '../src/constants.js';
 import {
   BANK_ENABLED_ATTRIBUTE,
   BANK_MESSAGE_NAMESPACE,
@@ -27,6 +27,16 @@ import {
 } from '../src/bank/storage.js';
 import { SegmentBank } from '../src/bank/main.js';
 import { createBankXMLHttpRequestClass } from '../src/bank/xhr.js';
+import {
+  FlvSegmentRebuilder,
+  FlvTagReader,
+  FlvUnsupportedError,
+  buildFragment,
+  crc32,
+  parseBiliPlaylist,
+  parseMediaSegment,
+  planSegment,
+} from '../src/bank/flv-rebuild.js';
 import {
   LiveStreamStitcher,
   classifyLiveRequest,
@@ -3720,4 +3730,690 @@ test('hls segment byte comparison treats length differences as mismatches', asyn
   assert.equal(compareSegmentBytes(encoded('ABCD'), encoded('ABCE')), 3);
   assert.equal(compareSegmentBytes(encoded('ABC'), encoded('ABCD')), 3);
   assert.equal(compareSegmentBytes(encoded('ABCD'), encoded('ABC')), 3);
+});
+
+// ---- FLV 后备拼接 ----
+
+function concatBytes(parts) {
+  const bytes = new Uint8Array(parts.reduce((sum, part) => sum + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.byteLength;
+  }
+  return bytes;
+}
+
+const FLV_FILE_HEADER = Uint8Array.of(0x46, 0x4c, 0x56, 0x01, 0x05, 0, 0, 0, 9, 0, 0, 0, 0);
+
+function flvTag(type, ts, body) {
+  const tag = new Uint8Array(11 + body.byteLength + 4);
+  tag[0] = type;
+  tag[1] = (body.byteLength >> 16) & 0xff;
+  tag[2] = (body.byteLength >> 8) & 0xff;
+  tag[3] = body.byteLength & 0xff;
+  tag[4] = (ts >> 16) & 0xff;
+  tag[5] = (ts >> 8) & 0xff;
+  tag[6] = ts & 0xff;
+  tag[7] = (ts >>> 24) & 0xff;
+  tag.set(body, 11);
+  new DataView(tag.buffer).setUint32(11 + body.byteLength, 11 + body.byteLength);
+  return tag;
+}
+
+function flvVideoTag(ts, { key = false, cts = 0, packetType = 1, codecId = 7, data = new Uint8Array(0) } = {}) {
+  const body = new Uint8Array(5 + data.byteLength);
+  body[0] = ((key ? 1 : 2) << 4) | codecId;
+  body[1] = packetType;
+  body[2] = (cts >> 16) & 0xff;
+  body[3] = (cts >> 8) & 0xff;
+  body[4] = cts & 0xff;
+  body.set(data, 5);
+  return flvTag(9, ts, body);
+}
+
+function flvAudioTag(ts, { packetType = 1, soundFormat = 10, data = new Uint8Array(0) } = {}) {
+  return flvTag(8, ts, concatBytes([Uint8Array.of((soundFormat << 4) | 0x0f, packetType), data]));
+}
+
+// 每帧负载互不相同（前两字节是帧号）；视频与音频的负载长度区间不重叠。
+function framePayload(kind, index) {
+  const length = kind === 'video' ? 24 + (index % 5) * 9 : 12 + (index % 3) * 5;
+  return Uint8Array.from({ length }, (_value, offset) => {
+    if (offset === 0) return index >> 8;
+    if (offset === 1) return index & 0xff;
+    return (index * 13 + offset * 7 + (kind === 'video' ? 0 : 101)) & 0xff;
+  });
+}
+
+// 录制分片实测的盒子形状：tfhd/trun 标志、tfdt 与 trun 均为 version 1。
+const REAL_VIDEO_SHAPE = Object.freeze({
+  tfhdFlags: 0x20022,
+  sampleDescriptionIndex: 1,
+  defaultFlags: 0x1010000,
+  tfdtVersion: 1,
+  trunVersion: 1,
+  trunFlags: 0xb05,
+});
+const REAL_AUDIO_SHAPE = Object.freeze({
+  tfhdFlags: 0x2002a,
+  sampleDescriptionIndex: 1,
+  defaultDuration: 1024,
+  defaultFlags: 0x2000000,
+  tfdtVersion: 1,
+  trunVersion: 1,
+  trunFlags: 0x205,
+});
+
+// 合成直播间：30 fps 视频（关键帧位置由 keyFrames 给出，非关键帧带 33 毫秒 CTS）与
+// 48 kHz AAC 音频（每帧 1024 个采样），FLV 标签按时间交错、同时刻音频在前。真分片与
+// 模块独立地按规则切出：关键帧或距分片首帧满 1000 毫秒开新分片，距小片段首帧满
+// 250 毫秒开新小片段，音频按精确时间归入小片段，同时刻按标签顺序归前一个。
+// audioFirst 模拟原画档的 traf 次序（音频轨 1 在前）。
+function syntheticLive({ videoCount, keyFrames, audioFirst = false, firstMsn = 423384050, firstSeq = 700 }) {
+  const flvStart = 100000;
+  const clockMs = 7200000;
+  const video = Array.from({ length: videoCount }, (_value, index) => {
+    const key = keyFrames.includes(index);
+    return { index, ts: flvStart + Math.round((index * 100) / 3), key, cts: key ? 0 : 33, data: framePayload('video', index) };
+  });
+  const audioCount = Math.ceil((videoCount * 100) / 64) + 8;
+  const audio = Array.from({ length: audioCount }, (_value, index) => ({
+    index,
+    ts: flvStart + Math.round((index * 64) / 3),
+    data: framePayload('audio', index),
+  }));
+  const tags = [
+    ...audio.map((frame) => ({ ts: frame.ts, rank: 0, frame, bytes: flvAudioTag(frame.ts, { data: frame.data }) })),
+    ...video.map((frame) => ({
+      ts: frame.ts,
+      rank: 1,
+      frame,
+      bytes: flvVideoTag(frame.ts, { key: frame.key, cts: frame.cts, data: frame.data }),
+    })),
+  ].sort((left, right) => left.ts - right.ts || left.rank - right.rank);
+  tags.forEach((tag, order) => { tag.frame.order = order; });
+  const header = concatBytes([
+    FLV_FILE_HEADER,
+    flvTag(18, 0, encoded('onMetaData')),
+    flvVideoTag(0, { key: true, packetType: 0, data: Uint8Array.of(1, 0x64, 0, 0x1f) }),
+    flvAudioTag(0, { packetType: 0, data: Uint8Array.of(0x11, 0x90) }),
+  ]);
+  const videoTime = (frame) => 90 * clockMs + 90 * (frame.ts - flvStart);
+  const audioTime = (frame) => 48 * clockMs + 1024 * frame.index;
+  // 两轨换到同一单位比较：audio/48000 与 video/90000 秒。
+  const audioBefore = (sound, picture) => {
+    const left = audioTime(sound) * 15;
+    const right = videoTime(picture) * 8;
+    return left !== right ? left < right : sound.order < picture.order;
+  };
+  const videoShape = { ...REAL_VIDEO_SHAPE, trackId: audioFirst ? 2 : 1 };
+  const audioShape = { ...REAL_AUDIO_SHAPE, trackId: audioFirst ? 1 : 2 };
+  const template = audioFirst ? [audioShape, videoShape] : [videoShape, audioShape];
+  const segments = [];
+  let audioCursor = 0;
+  while (audioBefore(audio[audioCursor], video[0])) audioCursor += 1;
+  let seq = firstSeq;
+  let start = 0;
+  for (;;) {
+    let end = start + 1;
+    while (end < video.length && !video[end].key && video[end].ts - video[start].ts < 1000) end += 1;
+    if (end >= video.length) break;
+    const fragmentStarts = [start];
+    for (let index = start + 1; index < end; index += 1) {
+      if (video[index].ts - video[fragmentStarts.at(-1)].ts >= 250) fragmentStarts.push(index);
+    }
+    const bounds = [...fragmentStarts, end];
+    const pieces = fragmentStarts.map((_fragmentStart, fragmentIndex) => {
+      const pictures = video.slice(bounds[fragmentIndex], bounds[fragmentIndex + 1]);
+      const next = video[bounds[fragmentIndex + 1]];
+      const sounds = [];
+      while (audioBefore(audio[audioCursor], next)) {
+        sounds.push(audio[audioCursor]);
+        audioCursor += 1;
+      }
+      const videoTrack = {
+        baseTime: videoTime(pictures[0]),
+        firstSampleFlags: pictures[0].key ? 0x2000000 : 0x1010000,
+        samples: pictures.map((frame, index) => ({
+          data: frame.data,
+          duration: videoTime(pictures[index + 1] ?? next) - videoTime(frame),
+          cts: frame.cts * 90,
+        })),
+      };
+      const audioTrack = {
+        baseTime: audioTime(sounds[0]),
+        firstSampleFlags: 0x1010000,
+        samples: sounds.map((frame) => ({ data: frame.data })),
+      };
+      const piece = buildFragment(template, seq, audioFirst ? [audioTrack, videoTrack] : [videoTrack, audioTrack]);
+      seq += 1;
+      return piece;
+    });
+    const bytes = concatBytes(pieces);
+    const first = video[start];
+    const msn = firstMsn + segments.length;
+    segments.push({
+      bytes,
+      frames: end - start,
+      fragmentStarts,
+      aux: {
+        name: `${msn}.m4s`,
+        msn,
+        duration: Number(((video[end].ts - first.ts) / 1000).toFixed(3)),
+        ptsMs: clockMs + (first.ts - flvStart) + first.cts,
+        key: first.key,
+        size: bytes.byteLength,
+        crc: crc32(bytes),
+      },
+    });
+    start = end;
+  }
+  return {
+    header,
+    tags,
+    segments,
+    flv: concatBytes([header, ...tags.map((tag) => tag.bytes)]),
+    // FLV 字节按时间切段：[fromMs, toMs) 相对首帧，from 为 0 时带文件头。
+    flvBetween(fromMs, toMs) {
+      const parts = tags.filter((tag) => tag.ts - flvStart >= fromMs && tag.ts - flvStart < toMs).map((tag) => tag.bytes);
+      return concatBytes(fromMs === 0 ? [header, ...parts] : parts);
+    },
+  };
+}
+
+function syntheticPlaylist(segments, { mapUri = 'h1790783173.m4s', crcOf = (segment) => segment.aux.crc } = {}) {
+  const lines = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:7',
+    `#EXT-X-MEDIA-SEQUENCE:${segments[0].aux.msn}`,
+    '#EXT-X-TARGETDURATION:1',
+    `#EXT-X-MAP:URI="${mapUri}?trid=1"`,
+  ];
+  for (const [index, segment] of segments.entries()) {
+    const { aux } = segment;
+    lines.push(`#EXT-BILI-AUX:${aux.ptsMs.toString(16)}|${aux.key ? 'K' : 'N'}|${aux.size.toString(16)}|${crcOf(segment, index).toString(16)}`);
+    lines.push(`#EXTINF:${aux.duration.toFixed(3)},`);
+    lines.push(`${aux.name}?trid=1`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+test('crc32 matches the standard check values', () => {
+  assert.equal(crc32(new Uint8Array(0)), 0);
+  assert.equal(crc32(encoded('123456789')), 0xcbf43926);
+  assert.equal(crc32(encoded('The quick brown fox jumps over the lazy dog')), 0x414fa339);
+});
+
+test('flv tag reader yields AVC/HEVC NALU frames and AAC raw frames across any chunking, skipping headers', () => {
+  const bytes = concatBytes([
+    FLV_FILE_HEADER,
+    flvTag(18, 0, encoded('onMetaData')),
+    flvVideoTag(0, { key: true, packetType: 0, data: Uint8Array.of(1, 2, 3) }),
+    flvAudioTag(0, { packetType: 0, data: Uint8Array.of(0x11, 0x90) }),
+    flvVideoTag(0x01020304, { key: true, cts: 66, data: Uint8Array.of(9, 9) }),
+    flvAudioTag(40, { data: Uint8Array.of(7, 7, 7) }),
+    flvVideoTag(73, { cts: -33, codecId: 12, data: Uint8Array.of(5) }),
+    flvTag(9, 80, Uint8Array.of(0x57, 0, 0, 0, 0)),
+    flvVideoTag(90, { key: true, packetType: 2 }),
+  ]);
+  const expected = [
+    { kind: 'video', ts: 0x01020304, cts: 66, key: true, data: [9, 9] },
+    { kind: 'audio', ts: 40, data: [7, 7, 7] },
+    { kind: 'video', ts: 73, cts: -33, key: false, data: [5] },
+  ];
+  const summarize = (frames) => frames.map(({ order: _order, data, ...rest }) => ({ ...rest, data: [...data] }));
+  const whole = new FlvTagReader().push(bytes);
+  assert.deepEqual(summarize(whole), expected);
+  assert.equal(whole[0].order < whole[1].order && whole[1].order < whole[2].order, true);
+  const reader = new FlvTagReader();
+  const byteByByte = [];
+  for (let offset = 0; offset < bytes.byteLength; offset += 1) byteByByte.push(...reader.push(bytes.subarray(offset, offset + 1)));
+  assert.deepEqual(summarize(byteByByte), expected);
+  assert.deepEqual(byteByByte.map((frame) => frame.order), whole.map((frame) => frame.order));
+
+  const unsupported = [
+    flvVideoTag(0, { codecId: 2, data: Uint8Array.of(1) }),
+    flvAudioTag(0, { soundFormat: 2, data: Uint8Array.of(1) }),
+    flvTag(9, 0, Uint8Array.of(0x91, 0x68, 0x76, 0x63, 0x31)),
+  ];
+  for (const tag of unsupported) {
+    assert.throws(() => new FlvTagReader().push(concatBytes([FLV_FILE_HEADER, tag])), FlvUnsupportedError);
+  }
+});
+
+test('bili playlist parsing keeps each segment EXTINF, key flag, size, and unpadded CRC32 by name', () => {
+  const text = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:7',
+    '#EXT-X-MEDIA-SEQUENCE:423384050',
+    '#EXT-X-TARGETDURATION:1',
+    '#EXT-X-MAP:URI="h1790783173.m4s?trid=abc"',
+    '#EXT-BILI-AUX:1d8e2f0a1|K|1a2b3|9f3e21',
+    '#EXTINF:1.00,',
+    '423384050.m4s?trid=abc',
+    '#EXTINF:1.00,',
+    '423384051.m4s',
+    '#EXT-BILI-AUX:1d8e2f4e9|N|3c4|f',
+    '#EXTINF:0.17,',
+    `https://d1--ov-gotcha207.bilivideo.com${HLS_STREAM_DIR}423384052.m4s?trid=abc`,
+  ].join('\r\n');
+  assert.deepEqual(parseBiliPlaylist(text), {
+    mediaSequence: 423384050,
+    mapUri: 'h1790783173.m4s',
+    entries: [
+      { name: '423384050.m4s', msn: 423384050, duration: 1, ptsMs: 0x1d8e2f0a1, key: true, size: 0x1a2b3, crc: 0x9f3e21 },
+      { name: '423384052.m4s', msn: 423384052, duration: 0.17, ptsMs: 0x1d8e2f4e9, key: false, size: 0x3c4, crc: 0xf },
+    ],
+  });
+  assert.throws(() => parseBiliPlaylist('#EXT-X-MEDIA-SEQUENCE:1\n#EXT-BILI-AUX:1|X|2|3\n#EXTINF:1,\n1.m4s'));
+  assert.throws(() => parseBiliPlaylist('#EXT-X-MEDIA-SEQUENCE:1\n#EXT-BILI-AUX:1|K|zz|3\n#EXTINF:1,\n1.m4s'));
+});
+
+test('fragment building round-trips through the segment parser with the recorded box shapes', () => {
+  const template = [{ ...REAL_VIDEO_SHAPE, trackId: 1 }, { ...REAL_AUDIO_SHAPE, trackId: 2 }];
+  const video = {
+    baseTime: 2 ** 33 + 90,
+    firstSampleFlags: 0x2000000,
+    samples: [
+      { data: Uint8Array.of(1, 2, 3), duration: 2970, cts: 0 },
+      { data: Uint8Array.of(4, 5), duration: 3060, cts: 2970 },
+    ],
+  };
+  const audio = { baseTime: 345600000, firstSampleFlags: 0x1010000, samples: [{ data: Uint8Array.of(6) }, { data: Uint8Array.of(7, 8) }] };
+  const bytes = concatBytes([buildFragment(template, 41, [video, audio]), buildFragment(template, 42, [video, audio])]);
+  const fragments = parseMediaSegment(bytes);
+  assert.deepEqual(fragments.map((fragment) => fragment.seq), [41, 42]);
+  const [videoTraf, audioTraf] = fragments[0].trafs;
+  assert.deepEqual(
+    [videoTraf.trackId, videoTraf.tfhdFlags, videoTraf.defaultFlags, videoTraf.tfdtVersion, videoTraf.baseTime],
+    [1, 0x20022, 0x1010000, 1, 2 ** 33 + 90],
+  );
+  assert.deepEqual([videoTraf.trun.version, videoTraf.trun.flags, videoTraf.trun.firstSampleFlags], [1, 0xb05, 0x2000000]);
+  assert.deepEqual(videoTraf.samples.map(({ data, time, duration, cts }) => [[...data], time, duration, cts]), [
+    [[1, 2, 3], 2 ** 33 + 90, 2970, 0],
+    [[4, 5], 2 ** 33 + 90 + 2970, 3060, 2970],
+  ]);
+  assert.deepEqual(
+    [audioTraf.trackId, audioTraf.tfhdFlags, audioTraf.defaultDuration, audioTraf.trun.flags, audioTraf.trun.firstSampleFlags],
+    [2, 0x2002a, 1024, 0x205, 0x1010000],
+  );
+  assert.deepEqual(audioTraf.samples.map(({ data, time, duration }) => [[...data], time, duration]), [
+    [[6], 345600000, 1024],
+    [[7, 8], 345601024, 1024],
+  ]);
+});
+
+test('segment and fragment frame selection follows keyframes and the 1000/250 ms thresholds, short segments included', () => {
+  const live = syntheticLive({ videoCount: 160, keyFrames: [0, 125] });
+  const video = new FlvTagReader().push(live.flv).filter((frame) => frame.kind === 'video');
+  const timing = {
+    video: { base: 0, flvTs: video[0].ts, ptsBase: 0, flvPts: video[0].ts, grid: 90 },
+    audio: { base: 0, flvTs: video[0].ts, grids: [1024] },
+  };
+  assert.deepEqual(planSegment(video, 0, timing), { endIndex: 30, fragmentStarts: [0, 8, 16, 24] });
+  assert.deepEqual(planSegment(video, 90, timing), { endIndex: 120, fragmentStarts: [90, 98, 106, 114] });
+  // 关键帧前的 0.17 秒短分片：5 帧、一个小片段。
+  assert.deepEqual(planSegment(video, 120, timing), { endIndex: 125, fragmentStarts: [120] });
+  assert.deepEqual(live.segments.map((segment) => segment.frames), [30, 30, 30, 30, 5, 30]);
+  assert.deepEqual(live.segments.map((segment) => segment.aux.duration), [1, 1, 1, 1, 0.167, 1]);
+  // 下一分片首帧未到时不出结果。
+  assert.equal(planSegment(video.slice(0, 30), 0, timing), undefined);
+});
+
+test('the rebuilder calibrates on a real-shaped segment and rebuilds later segments byte for byte', () => {
+  for (const audioFirst of [false, true]) {
+    const live = syntheticLive({ videoCount: 290, keyFrames: [0, 125, 250], audioFirst });
+    assert.deepEqual(live.segments.map((segment) => segment.frames), [30, 30, 30, 30, 5, 30, 30, 30, 30, 5, 30]);
+    const rebuilder = new FlvSegmentRebuilder({ windowMs: 30000 });
+    rebuilder.appendFrames(new FlvTagReader().push(live.flv));
+    const [calibration, ...later] = live.segments;
+    assert.equal(rebuilder.calibrated, false);
+    assert.deepEqual(rebuilder.noteRealSegment(calibration.aux, calibration.bytes), { calibrated: true });
+    for (const segment of later) {
+      const result = rebuilder.attempt(segment.aux);
+      assert.equal(result.status, 'verified', `${segment.aux.name} audioFirst=${audioFirst}`);
+      assert.equal(Buffer.compare(Buffer.from(result.bytes), Buffer.from(segment.bytes)), 0);
+    }
+    // 拼出的字节与播放列表的 CRC32 或长度不符时只报 mismatch，不给出可交付的结果。
+    const target = later[3].aux;
+    assert.deepEqual(rebuilder.attempt({ ...target, crc: (target.crc ^ 1) >>> 0 }), { status: 'mismatch', bytes: target.size });
+    assert.equal(rebuilder.attempt({ ...target, size: target.size + 1 }).status, 'mismatch');
+  }
+});
+
+// FLV 后备的页面夹具：地址簿含同流名、同编码的 fMP4 与 FLV 条目；FLV 连接与各网络腿
+// 的字节都由测试手动推送，计时器手动触发。segmentModes 按分片名让网络腿挂起到取消
+// （hold，连响应头都不回）或回 HTTP 500（fail）。
+const FLV_BACKUP_HOST = 'd1--cn-gotcha04.bilivideo.com';
+const FLV_BACKUP_PATH = '/live-bvc/791488/live_i9bl9s_SIPAZ9L_1b53ey_4000.flv';
+const FLV_BACKUP_URL = `https://${FLV_BACKUP_HOST}${FLV_BACKUP_PATH}?expires=4102444800&sign=flv04`;
+
+function flvBackupPlayinfo({ flvCodec = 'avc' } = {}) {
+  const group = (formatName, codecName, baseUrl, urls) => ({
+    format: [{ format_name: formatName, codec: [{ codec_name: codecName, base_url: baseUrl, url_info: urls.map(liveUrlInfoEntry) }] }],
+  });
+  return {
+    data: {
+      playurl_info: {
+        playurl: {
+          stream: [
+            group('fmp4', 'avc', `${HLS_STREAM_DIR}index.m3u8?`, [HLS_MAIN_PLAYLIST, HLS_BACKUP_PLAYLIST]),
+            group('flv', flvCodec, `${FLV_BACKUP_PATH}?`, [FLV_BACKUP_URL]),
+          ],
+        },
+      },
+    },
+  };
+}
+
+function hlsSegmentUrls(name) {
+  return {
+    player: `https://d1--ov-gotcha207.bilivideo.com${HLS_STREAM_DIR}${name}?expires=4102444800&sign=seg207`,
+    pair: `https://d1--ov-gotcha105.bilivideo.com${HLS_STREAM_DIR}${name}?expires=4102444800&sign=hls105`,
+  };
+}
+
+function flvBackupHarness({ playlistText, enabled = true, playinfo = flvBackupPlayinfo(), flvResponder } = {}) {
+  const timers = manualTimers();
+  const flvFeed = liveFeed();
+  const feeds = new Map();
+  const segmentModes = new Map();
+  const calls = [];
+  const feedFor = (url) => {
+    if (!feeds.has(url)) feeds.set(url, liveFeed({ headers: { 'Content-Type': 'video/mp4' } }));
+    return feeds.get(url);
+  };
+  const fixture = createBank({
+    timers,
+    config: liveConfig(),
+    location: LIVE_LOCATION,
+    enabled,
+    nativeFetch: async (url, init = {}) => {
+      calls.push(url);
+      if (url === FLV_BACKUP_URL) return flvResponder === undefined ? flvFeed.response : flvResponder();
+      const pathname = new URL(url).pathname;
+      if (pathname.endsWith('.m3u8')) {
+        return new Response(playlistText, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } });
+      }
+      const mode = segmentModes.get(pathname.slice(pathname.lastIndexOf('/') + 1));
+      if (mode === 'fail') return new Response('', { status: 500 });
+      if (mode === 'hold') {
+        return new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')), { once: true });
+        });
+      }
+      return feedFor(url).response;
+    },
+  });
+  fixture.windowObject.__NEPTUNE_IS_MY_WAIFU__ = playinfo;
+  return {
+    ...fixture,
+    timers,
+    flvFeed,
+    calls,
+    feedFor,
+    segmentModes,
+    deliver(segment) {
+      for (const url of Object.values(hlsSegmentUrls(segment.aux.name))) {
+        const feed = feedFor(url);
+        feed.push(segment.bytes);
+        feed.close();
+      }
+    },
+    events(code, from = 0) {
+      return fixture.windowObject.messages.slice(from).filter((message) => message.code === code).map(({ data }) => data);
+    },
+  };
+}
+
+async function settle(rounds = 4) {
+  for (let round = 0; round < rounds; round += 1) await tick();
+}
+
+// 校准：先推 FLV 字节，再让首个分片走网络腿送达。
+async function calibrateOverFetch(harness, live, flvBytes) {
+  const [first] = live.segments;
+  const response = hlsFetchThrough(harness.bank, hlsSegmentUrls(first.aux.name).player);
+  await settle();
+  harness.flvFeed.push(flvBytes);
+  await settle();
+  harness.deliver(first);
+  const body = new Uint8Array(await (await response).arrayBuffer());
+  assert.equal(Buffer.compare(Buffer.from(body), Buffer.from(first.bytes)), 0);
+  await settle();
+}
+
+test('hls fetch serves segments from the verified FLV rebuild when the network is slow, and the network when it is not', async () => {
+  const live = syntheticLive({ videoCount: 160, keyFrames: [0, 125] });
+  const [first, second, third, fourth, short] = live.segments;
+  const playlistText = syntheticPlaylist(live.segments, {
+    crcOf: (segment, index) => (index === 3 ? (segment.aux.crc ^ 1) >>> 0 : segment.aux.crc),
+  });
+  const harness = flvBackupHarness({ playlistText });
+  const { bank } = harness;
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    // 播放列表原样到达播放器，AUX 值被记下。
+    const playlistResponse = await liveFetchThrough(bank, HLS_MAIN_PLAYLIST);
+    assert.equal(await playlistResponse.text(), playlistText);
+    assert.deepEqual(bank.livePlaylistAuxFor(HLS_STREAM_DIR, second.aux.name), second.aux);
+
+    // 首个分片：连接随首个分片请求打开，校准前没有拼接腿。FLV 先只到第二个分片的终点帧之前。
+    await calibrateOverFetch(harness, live, live.flvBetween(0, 1990));
+    assert.deepEqual(harness.events('live.flv.backup'), [
+      { state: 'connected', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
+      { state: 'calibrated', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
+    ]);
+    assert.deepEqual(harness.events('bank.fetch.chunk').map((data) => data.slot).sort(), [0, 1]);
+    assert.equal(harness.events('bank.serve').at(-1).winner, 'network');
+
+    // 网络先到：拼接腿还在等终点帧，被取消记 lost_race。
+    let mark = bank.windowObject.messages.length;
+    const secondResponse = await hlsFetchThrough(bank, hlsSegmentUrls(second.aux.name).player);
+    const secondBody = secondResponse.arrayBuffer();
+    await settle();
+    harness.deliver(second);
+    assert.equal(Buffer.compare(Buffer.from(new Uint8Array(await secondBody)), Buffer.from(second.bytes)), 0);
+    await settle();
+    assert.equal(harness.events('bank.serve', mark).at(-1).winner, 'network');
+    const rebuildLost = harness.events('bank.fetch.chunk', mark).find((data) => data.slot === 2);
+    assert.deepEqual([rebuildLost.result, rebuildLost.mirror, rebuildLost.bytes], ['lost_race', FLV_BACKUP_HOST, 0]);
+
+    // 网络两腿都回 500：失败先不交给播放器，等 FLV 帧到齐后由拼接腿交付；响应头沿用上一个网络分片。
+    mark = bank.windowObject.messages.length;
+    harness.segmentModes.set(third.aux.name, 'fail');
+    const thirdResponse = hlsFetchThrough(bank, hlsSegmentUrls(third.aux.name).player);
+    await settle();
+    assert.deepEqual(harness.events('bank.fetch.chunk', mark).map((data) => [data.slot, data.result]).sort(), [
+      [0, 'http_error'],
+      [1, 'http_error'],
+    ]);
+    assert.equal(harness.events('bank.serve', mark).length, 0);
+    harness.flvFeed.push(live.flvBetween(1990, 1e9));
+    const rescued = await thirdResponse;
+    assert.equal(rescued.status, 200);
+    assert.equal(rescued.headers.get('Content-Type'), 'video/mp4');
+    assert.equal(Buffer.compare(Buffer.from(new Uint8Array(await rescued.arrayBuffer())), Buffer.from(third.bytes)), 0);
+    const rescuedServe = harness.events('bank.serve', mark).at(-1);
+    assert.deepEqual([rescuedServe.result, rescuedServe.winner], ['hit', 'flv_rebuild']);
+    const rebuildFetched = harness.events('bank.fetch.chunk', mark).find((data) => data.slot === 2);
+    assert.deepEqual(
+      [rebuildFetched.result, rebuildFetched.mirror, rebuildFetched.source, rebuildFetched.bytes],
+      ['fetched', FLV_BACKUP_HOST, hlsSegmentUrls(third.aux.name).player.split('?')[0], third.bytes.byteLength],
+    );
+
+    // CRC32 对不上：拼出的字节丢弃并记 crc_mismatch，分片等网络腿交付。
+    mark = bank.windowObject.messages.length;
+    const fourthResponse = await hlsFetchThrough(bank, hlsSegmentUrls(fourth.aux.name).player);
+    let fourthDone = false;
+    const fourthBody = fourthResponse.arrayBuffer().then((buffer) => {
+      fourthDone = true;
+      return buffer;
+    });
+    await settle();
+    const mismatch = harness.events('bank.fetch.chunk', mark).find((data) => data.slot === 2);
+    assert.deepEqual([mismatch.result, mismatch.bytes], ['crc_mismatch', fourth.bytes.byteLength]);
+    assert.equal(fourthDone, false);
+    harness.deliver(fourth);
+    assert.equal(Buffer.compare(Buffer.from(new Uint8Array(await fourthBody)), Buffer.from(fourth.bytes)), 0);
+    assert.equal(harness.events('bank.serve', mark).at(-1).winner, 'network');
+
+    // 0.17 秒短分片：网络腿连响应头都不回，拼接腿胜出，网络腿取消记 lost_race。
+    mark = bank.windowObject.messages.length;
+    harness.segmentModes.set(short.aux.name, 'hold');
+    const shortResponse = await hlsFetchThrough(bank, hlsSegmentUrls(short.aux.name).player);
+    assert.equal(Buffer.compare(Buffer.from(new Uint8Array(await shortResponse.arrayBuffer())), Buffer.from(short.bytes)), 0);
+    await settle();
+    assert.equal(harness.events('bank.serve', mark).at(-1).winner, 'flv_rebuild');
+    assert.deepEqual(harness.events('bank.fetch.chunk', mark).map((data) => [data.slot, data.result]).sort(), [
+      [0, 'lost_race'],
+      [1, 'lost_race'],
+      [2, 'fetched'],
+    ]);
+    assert.equal(harness.calls.filter((url) => url === FLV_BACKUP_URL).length, 1);
+  } finally {
+    console.error = originalError;
+  }
+  assert.deepEqual(errors, []);
+  bank.destroy();
+  assert.equal(harness.flvFeed.cancelled, true);
+});
+
+test('hls XHR reads playlists from the native response and serves the verified FLV rebuild like the fetch channel', async () => {
+  const live = syntheticLive({ videoCount: 160, keyFrames: [0, 125] });
+  const [first, second] = live.segments;
+  const playlistText = syntheticPlaylist(live.segments);
+  const harness = flvBackupHarness({ playlistText });
+  const { bank, windowObject } = harness;
+  windowObject.XMLHttpRequest = createBankXMLHttpRequestClass({ windowObject, nativeConstructor: NativeXHR, bank });
+
+  const playlistXhr = new windowObject.XMLHttpRequest();
+  playlistXhr.open('GET', HLS_MAIN_PLAYLIST);
+  playlistXhr.send();
+  assert.equal(playlistXhr._native.sendCalls.length, 1);
+  playlistXhr._native.status = 200;
+  playlistXhr._native.responseText = playlistText;
+  playlistXhr._native.emit('load');
+  assert.equal(playlistXhr.responseText, playlistText);
+  assert.deepEqual(bank.livePlaylistAuxFor(HLS_STREAM_DIR, second.aux.name), second.aux);
+
+  const segmentThroughXhr = (segment) => {
+    const xhr = new windowObject.XMLHttpRequest();
+    xhr.responseType = 'arraybuffer';
+    const done = new Promise((resolve) => xhr.addEventListener('loadend', resolve));
+    xhr.open('GET', hlsSegmentUrls(segment.aux.name).player);
+    xhr.send();
+    return { xhr, done };
+  };
+  const calibration = segmentThroughXhr(first);
+  await settle();
+  harness.flvFeed.push(live.flv);
+  await settle();
+  harness.deliver(first);
+  await calibration.done;
+  assert.equal(Buffer.compare(Buffer.from(new Uint8Array(calibration.xhr.response)), Buffer.from(first.bytes)), 0);
+  await settle();
+  assert.deepEqual(harness.events('live.flv.backup').map((data) => data.state), ['connected', 'calibrated']);
+
+  const mark = windowObject.messages.length;
+  harness.segmentModes.set(second.aux.name, 'hold');
+  const rebuilt = segmentThroughXhr(second);
+  await rebuilt.done;
+  assert.equal(rebuilt.xhr.status, 200);
+  assert.equal(rebuilt.xhr.getResponseHeader('Content-Type'), 'video/mp4');
+  assert.equal(Buffer.compare(Buffer.from(new Uint8Array(rebuilt.xhr.response)), Buffer.from(second.bytes)), 0);
+  await settle();
+  assert.equal(harness.events('bank.serve', mark).at(-1).winner, 'flv_rebuild');
+  assert.deepEqual(harness.events('bank.fetch.chunk', mark).map((data) => [data.slot, data.result]).sort(), [
+    [0, 'lost_race'],
+    [1, 'lost_race'],
+    [2, 'fetched'],
+  ]);
+  bank.destroy();
+});
+
+test('with the live switch off neither channel reads playlists or opens an FLV connection', async () => {
+  const live = syntheticLive({ videoCount: 70, keyFrames: [0] });
+  const harness = flvBackupHarness({ playlistText: syntheticPlaylist(live.segments), enabled: false });
+  const { bank, windowObject } = harness;
+  windowObject.XMLHttpRequest = createBankXMLHttpRequestClass({ windowObject, nativeConstructor: NativeXHR, bank });
+  await liveFetchThrough(bank, HLS_MAIN_PLAYLIST);
+  await hlsFetchThrough(bank, hlsSegmentUrls(live.segments[0].aux.name).player);
+  const xhr = new windowObject.XMLHttpRequest();
+  xhr.open('GET', hlsSegmentUrls(live.segments[1].aux.name).player);
+  xhr.send();
+  assert.equal(xhr._native.sendCalls.length, 1);
+  await settle();
+  assert.equal(harness.calls.includes(FLV_BACKUP_URL), false);
+  assert.equal(bank.livePlaylists.size, 0);
+  assert.deepEqual(harness.events('live.flv.backup'), []);
+  bank.destroy();
+});
+
+test('the FLV backup needs a same-name same-codec address and reports unavailable once per stream and reason', async () => {
+  const live = syntheticLive({ videoCount: 70, keyFrames: [0] });
+  const harness = flvBackupHarness({
+    playlistText: syntheticPlaylist(live.segments),
+    playinfo: flvBackupPlayinfo({ flvCodec: 'hevc' }),
+  });
+  const { bank } = harness;
+  for (const segment of live.segments) {
+    const response = hlsFetchThrough(bank, hlsSegmentUrls(segment.aux.name).player);
+    harness.deliver(segment);
+    await (await response).arrayBuffer();
+  }
+  assert.deepEqual(harness.events('live.flv.backup'), [
+    { state: 'unavailable', streamPath: HLS_STREAM_DIR, reason: 'no_flv_entry' },
+  ]);
+  assert.equal(harness.calls.includes(FLV_BACKUP_URL), false);
+  assert.deepEqual(harness.events('bank.fetch.chunk').filter((data) => data.slot === 2), []);
+  bank.destroy();
+});
+
+test('the FLV backup reconnects at most three times, then gives up with a full-rate error while segments keep the network legs', async () => {
+  const live = syntheticLive({ videoCount: 70, keyFrames: [0] });
+  const [first, second] = live.segments;
+  let flvAttempts = 0;
+  const harness = flvBackupHarness({
+    playlistText: syntheticPlaylist(live.segments),
+    flvResponder: async () => {
+      flvAttempts += 1;
+      throw new TypeError('Failed to fetch');
+    },
+  });
+  const { bank, timers } = harness;
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    const response = hlsFetchThrough(bank, hlsSegmentUrls(first.aux.name).player);
+    for (let reconnect = 0; reconnect < 3; reconnect += 1) {
+      await settle();
+      timers.fire(LIVE_FLV_BACKUP_CONFIG.reconnectDelayMs);
+    }
+    await settle();
+    harness.deliver(first);
+    assert.equal(Buffer.compare(Buffer.from(new Uint8Array(await (await response).arrayBuffer())), Buffer.from(first.bytes)), 0);
+    const followUp = hlsFetchThrough(bank, hlsSegmentUrls(second.aux.name).player);
+    harness.deliver(second);
+    await (await followUp).arrayBuffer();
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(flvAttempts, 4);
+  assert.deepEqual(harness.events('live.flv.backup').map((data) => [data.state, data.reason]), [
+    ['reconnecting', 'network_error'],
+    ['reconnecting', 'network_error'],
+    ['reconnecting', 'network_error'],
+    ['given_up', 'network_error'],
+  ]);
+  const flvErrors = harness.events('log.error').filter((data) => data.code === 'LIVE_FLV_BACKUP');
+  assert.equal(flvErrors.length, 1);
+  assert.equal(flvErrors[0].errorName, 'TypeError');
+  assert.equal(errors.length, 1);
+  assert.deepEqual(harness.events('bank.serve').map((data) => data.winner), ['network', 'network']);
+  bank.destroy();
 });

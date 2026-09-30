@@ -36,4 +36,13 @@ export const BANK_CONFIG = Object.freeze({
   pairFreshnessMs: 3600000,
 });
 
+// 直播 FLV 后备：帧窗口 30 秒（覆盖 20 秒量级的分片卡顿）；断线连续重连最多 3 次，
+// 每次间隔 1 秒；网络分片连续 10 次校准不上即判这条流不可用。无字节停滞沿用 stallMs。
+export const LIVE_FLV_BACKUP_CONFIG = Object.freeze({
+  windowMs: 30000,
+  maxReconnects: 3,
+  reconnectDelayMs: 1000,
+  maxCalibrationAttempts: 10,
+});
+
 export const DIAGNOSTIC_MESSAGE_VERSION = 1;

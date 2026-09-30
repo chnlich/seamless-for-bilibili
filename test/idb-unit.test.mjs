@@ -520,6 +520,11 @@ test('live summary folds a recent session takeover facts in a store holding many
       mismatch: true,
       phase: 'stream',
     }),
+    event(target.sessionId, 8, 'live.flv.backup', {
+      state: 'calibrated',
+      streamPath: '/live-bvc/1/x.flv',
+      mirror: 'd1--cn-gotcha04.bilivideo.com',
+    }),
   ]), sender(200, '/live'), indexedDb);
 
   const summary = await readLogs({
@@ -532,8 +537,9 @@ test('live summary folds a recent session takeover facts in a store holding many
     engagement: 'engaged',
     pairedAddressAvailable: true,
     pairRejected: true,
+    flvBackup: 'calibrated',
   });
-  assert.equal(summary.sampleCount, 6, 'sampleCount 只统计 bank.serve 与 live.stream.stitch');
+  assert.equal(summary.sampleCount, 7, 'sampleCount 只统计 bank.serve、live.stream.stitch 与 live.flv.backup');
   assert.equal(Number.isInteger(summary.maxEventId) && summary.maxEventId > 0, true);
 
   // 空 session 返回零值事实，不抛错。
@@ -544,7 +550,13 @@ test('live summary folds a recent session takeover facts in a store holding many
     version: 1,
     sessionId: quiet.sessionId,
   }, indexedDb);
-  assert.deepEqual(empty.facts, { serveCount: 0, engagement: undefined, pairedAddressAvailable: false, pairRejected: false });
+  assert.deepEqual(empty.facts, {
+    serveCount: 0,
+    engagement: undefined,
+    pairedAddressAvailable: false,
+    pairRejected: false,
+    flvBackup: undefined,
+  });
   assert.equal(empty.sampleCount, 0);
 });
 

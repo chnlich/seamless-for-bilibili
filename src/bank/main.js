@@ -1,4 +1,4 @@
-import { BANK_CONFIG } from '../constants.js';
+import { BANK_CONFIG, LIVE_FLV_BACKUP_CONFIG } from '../constants.js';
 import { scrubUrl } from '../diagnostics/privacy.js';
 import { BankFallbackError, BankNetworkError } from './errors.js';
 import { routeIdentity } from '../route.js';
@@ -30,11 +30,15 @@ import {
   readMemoryRange,
   writeMemoryChunk,
 } from './storage.js';
+import { FlvRebuildFailure, LiveFlvBackup } from './flv-backup.js';
+import { parseBiliPlaylist } from './flv-rebuild.js';
 import {
   LiveStreamStitcher,
   classifyLiveRequest,
   compareSegmentBytes,
+  flvStreamNameOf,
   hlsSegmentPairUrl,
+  hlsStreamNameOf,
   hlsStreamPathOf,
   isLiveLocation,
   isLivePlayurlUrl,
@@ -161,12 +165,14 @@ export class SegmentBank {
     nativeFetch = windowObject.fetch,
     maxPrefetchConcurrency = MAX_PREFETCH_CONCURRENCY,
     config = BANK_CONFIG,
+    flvBackupConfig = LIVE_FLV_BACKUP_CONFIG,
     chunks = new Map(),
     now = Date.now,
   } = {}) {
     this.windowObject = windowObject;
     this.nativeFetch = nativeFetch;
     this.config = config;
+    this.flvBackupConfig = flvBackupConfig;
     this.maxPrefetchConcurrency = maxPrefetchConcurrency;
     this.now = now;
     // 默认让路：扩展内容脚本读到用户开关（controller.js 的 preference read）并写入
@@ -182,6 +188,11 @@ export class SegmentBank {
     this.recentResourceKeys = [];
     // HLS 直播分片的流身份门：key 为去分片名的流目录，值为 { verdict, attempts }。
     this.liveSegmentIdentity = new Map();
+    // fMP4 播放列表的 EXT-BILI-AUX：key 为流目录，值为 { mapUri, entries: Map<分片名, aux> }。
+    this.livePlaylists = new Map();
+    // 当前 fMP4 流的 FLV 后备（一页一个播放器，同时只有一条）；unavailable 记已报告过的原因。
+    this.liveFlvBackup = undefined;
+    this.liveFlvUnavailable = new Map();
     this.addressBook = new Map();
     this.lastInventoryPayload = undefined;
     this.lastInventoryPublishedAt = undefined;
@@ -363,6 +374,104 @@ export class SegmentBank {
     }
   }
 
+  // 播放器拿到的播放列表：读克隆体，不改播放器收到的内容；记下每个分片的 AUX 值。
+  async observeLivePlaylistResponse(url, response) {
+    if (response.status < 200 || response.status >= 300) return;
+    const text = await response.clone().text();
+    this.observeLivePlaylistText(url, text);
+  }
+
+  observeLivePlaylistText(url, text) {
+    const streamPath = hlsStreamPathOf(new URL(url).pathname);
+    const playlist = parseBiliPlaylist(text);
+    let state = this.livePlaylists.get(streamPath);
+    if (state === undefined) {
+      state = { mapUri: undefined, entries: new Map() };
+      this.livePlaylists.set(streamPath, state);
+      while (this.livePlaylists.size > 8) this.livePlaylists.delete(this.livePlaylists.keys().next().value);
+    }
+    if (playlist.mapUri !== undefined) {
+      if (state.mapUri !== undefined && state.mapUri !== playlist.mapUri
+        && this.liveFlvBackup?.hlsStreamPath === streamPath) {
+        this.liveFlvBackup.resetCalibration();
+      }
+      state.mapUri = playlist.mapUri;
+    }
+    for (const entry of playlist.entries) {
+      state.entries.delete(entry.name);
+      state.entries.set(entry.name, entry);
+    }
+    while (state.entries.size > 256) state.entries.delete(state.entries.keys().next().value);
+  }
+
+  livePlaylistAuxFor(streamPath, name) {
+    return this.livePlaylists.get(streamPath)?.entries.get(name);
+  }
+
+  // FLV 后备地址：地址簿里与该 fMP4 流同流名、同编码的 .flv 条目（Bilibili 自带的地址，
+  // 不合成主机）。
+  flvBackupUrlsFor(hlsStreamPath) {
+    let hlsEntry;
+    for (const [pathname, entry] of this.addressBook) {
+      if (!pathname.endsWith('.m3u8') || hlsStreamPathOf(pathname) !== hlsStreamPath) continue;
+      hlsEntry = entry;
+      break;
+    }
+    if (hlsEntry === undefined) return { urls: undefined, miss: 'no_hls_entry' };
+    const streamName = hlsStreamNameOf(hlsStreamPath);
+    for (const [pathname, entry] of this.addressBook) {
+      if (!pathname.endsWith('.flv') || entry.codec !== hlsEntry.codec) continue;
+      if (flvStreamNameOf(pathname) !== streamName) continue;
+      return { urls: entry.urls };
+    }
+    return { urls: undefined, miss: 'no_flv_entry' };
+  }
+
+  // 当前 fMP4 流的 FLV 后备：流目录一变就关掉旧连接另开；同一条流关闭后（given_up、
+  // unavailable）不再重开。地址簿缺可用地址时不开，下一个分片再查，同一条流同一原因只记
+  // 一次 unavailable。
+  ensureLiveFlvBackup(streamPath, credentials) {
+    if (this.liveFlvBackup?.hlsStreamPath === streamPath) return this.liveFlvBackup;
+    this.closeLiveFlvBackup();
+    const backup = new LiveFlvBackup({
+      hlsStreamPath: streamPath,
+      resolveUrls: () => this.flvBackupUrlsFor(streamPath),
+      fetchImpl: (url, init) => this.nativeFetch.call(this.windowObject, url, init),
+      credentials,
+      timers: {
+        setTimeout: (callback, ms) => this.windowObject.setTimeout(callback, ms),
+        clearTimeout: (timer) => this.windowObject.clearTimeout(timer),
+      },
+      now: this.now,
+      emitState: (payload) => this.emitDiagnostic('live.flv.backup', payload),
+      reportError: (message, error) => this.reportLiveError('LIVE_FLV_BACKUP', message, error),
+      config: { ...this.flvBackupConfig, stallMs: this.config.stallMs },
+    });
+    let miss = backup.start();
+    if (miss !== undefined && !this.liveFlvUnavailable.has(streamPath)) {
+      this.readInlineLivePlayinfo();
+      miss = backup.start();
+    }
+    if (miss === undefined) {
+      this.liveFlvBackup = backup;
+      return backup;
+    }
+    if (this.liveFlvUnavailable.get(streamPath) !== miss) {
+      this.liveFlvUnavailable.delete(streamPath);
+      this.liveFlvUnavailable.set(streamPath, miss);
+      while (this.liveFlvUnavailable.size > 16) {
+        this.liveFlvUnavailable.delete(this.liveFlvUnavailable.keys().next().value);
+      }
+      backup.emitState('unavailable', miss);
+    }
+    return undefined;
+  }
+
+  closeLiveFlvBackup() {
+    this.liveFlvBackup?.close();
+    this.liveFlvBackup = undefined;
+  }
+
   readInlineLivePlayinfo() {
     const addressBook = new Map(this.addressBook);
     try {
@@ -402,13 +511,13 @@ export class SegmentBank {
     let groupCount = 0;
     let flvGroupCount = 0;
     let groupErrorName;
-    visitLiveUrlInfoGroups(data, (group, groupBaseUrl) => {
+    visitLiveUrlInfoGroups(data, (group, groupBaseUrl, codec) => {
       try {
         const urls = group.map((info) => new URL(urlFromLiveUrlInfo(info, groupBaseUrl)).href);
         const pathnames = new Set(urls.map((entry) => new URL(entry).pathname));
         if (pathnames.size !== 1) throw new Error('直播主备地址路径不一致');
         const pathname = new URL(urls[0]).pathname;
-        this.addressBook.set(pathname, { urls, observedAt });
+        this.addressBook.set(pathname, { urls, observedAt, codec });
         groupCount += 1;
         if (pathname.endsWith('.flv')) flvGroupCount += 1;
       } catch (error) {
@@ -668,6 +777,11 @@ export class SegmentBank {
           this.reportLiveError('LIVE_PLAYURL', '直播 playurl 地址簿读取失败', error);
         });
       }
+      if (classification.reason === 'live_hls_playlist') {
+        await this.observeLivePlaylistResponse(request.url, response).catch((error) => {
+          this.reportLiveError('LIVE_PLAYLIST', '直播播放列表读取失败', error);
+        });
+      }
       return response;
     }
     let takeover;
@@ -731,6 +845,7 @@ export class SegmentBank {
 
   serveLiveStream({ url, credentials, signal }) {
     if (signal?.aborted) throw abortError();
+    this.closeLiveFlvBackup();
     const startedAt = performanceNow(this.windowObject);
     let serveFailed = false;
     const emitFailedServe = (error) => {
@@ -909,11 +1024,16 @@ export class SegmentBank {
   // HLS 直播分片接管：整段文件双腿竞速（视频页分片同形）。身份门未决的首个竞速
   // 分片对等双腿收齐后整体比对，一致才开放竞速；不一致或门期反复无法完整比对则
   // 永久降级为播放器所名地址单腿。双腿全灭或签名到期且无新地址时显式失败。
+  // fMP4 分片另有第三腿（slot 2）：FLV 后备已校准且播放列表给出该分片的 AUX 值时，
+  // 从 FLV 帧拼出同一分片，长度与 CRC32 都对上才交付；先完整到手且已核对的一腿胜出。
   serveLiveSegment({ url, credentials, signal }) {
     if (signal?.aborted) throw abortError();
     const startedAt = performanceNow(this.windowObject);
     const playerUrl = new URL(url);
     const streamPath = hlsStreamPathOf(playerUrl.pathname);
+    const segmentName = playerUrl.pathname.slice(playerUrl.pathname.lastIndexOf('/') + 1);
+    const aux = this.livePlaylistAuxFor(streamPath, segmentName);
+    const backup = segmentName.endsWith('.m4s') ? this.ensureLiveFlvBackup(streamPath, credentials) : undefined;
     let serveFailed = false;
     const emitFailedServe = (error) => {
       if (serveFailed) return;
@@ -976,6 +1096,18 @@ export class SegmentBank {
       outcome: undefined,
       cancelledByWinner: false,
     }));
+    const rebuildLeg = backup?.ready === true && aux !== undefined
+      ? {
+        slot: 2,
+        url,
+        mirror: backup.mirror,
+        startedAt: performanceNow(this.windowObject),
+        ttfbAt: undefined,
+        byteCount: 0,
+        settled: false,
+        request: backup.requestSegment(aux),
+      }
+      : undefined;
     let headersSettled = false;
     let resolveHeaders;
     let rejectHeaders;
@@ -993,10 +1125,11 @@ export class SegmentBank {
     };
     let finished = false;
     let cancelled = false;
+    let deferredFailure;
     const emitSegmentChunk = (leg, result, detail = {}) => {
       const payload = {
         source: scrubUrl(leg.url),
-        mirror: mirrorForUrl(leg.url),
+        mirror: leg.mirror ?? mirrorForUrl(leg.url),
         chunkIndex: 0,
         start: 0,
         end: leg.byteCount > 0 ? leg.byteCount - 1 : 0,
@@ -1011,13 +1144,14 @@ export class SegmentBank {
       if (typeof detail.errorName === 'string' && detail.errorName.length > 0) payload.errorName = detail.errorName;
       this.emitDiagnostic('bank.fetch.chunk', payload);
     };
-    const emitSegmentServeHit = () => {
+    const emitSegmentServeHit = (winner) => {
       const served = {
         source: scrubUrl(url),
         mirror: mirrorForUrl(url),
         durationMs: performanceNow(this.windowObject) - startedAt,
         result: 'hit',
         reason: legs.length > 1 ? 'live_hls_segment' : 'live_hls_segment_unpaired',
+        winner,
       };
       if (legs.length > 1) served.pairedAddressAvailable = true;
       else if (pairDecision.miss !== undefined) served.pairMiss = pairDecision.miss;
@@ -1038,21 +1172,47 @@ export class SegmentBank {
         });
       }
     };
+    const settleHeaders = (info) => {
+      if (headersSettled) return;
+      headersSettled = true;
+      takeover.onHeaders?.(info);
+      resolveHeaders(info);
+    };
+    // 分片已由另一腿交付后才完整到手的腿记 lost_race；播放器已取消时不记。
     const deliverSegment = (leg, value) => {
-      if (finished) return;
+      if (finished) {
+        if (!cancelled) emitSegmentChunk(leg, 'lost_race');
+        return;
+      }
       finished = true;
+      const rebuilt = leg === rebuildLeg;
+      // 拼接腿胜出时网络腿可能还没收到响应头：沿用最近一个网络分片的响应头。
+      if (rebuilt) settleHeaders(backup.lastHeaders);
       emitSegmentChunk(leg, 'fetched');
-      emitSegmentServeHit();
+      emitSegmentServeHit(rebuilt ? 'flv_rebuild' : 'network');
       for (const other of legs) {
         if (other === leg || other.outcome !== undefined) continue;
         other.cancelledByWinner = true;
         cancelSegmentLeg(other);
       }
+      if (!rebuilt) rebuildLeg?.request.cancel();
       takeover.onBytes?.(value.bytes);
       takeover.onEnd?.();
+      if (!rebuilt && aux !== undefined && backup !== undefined) {
+        backup.noteNetworkSegment({
+          aux,
+          bytes: value.bytes,
+          headers: { status: value.status, statusText: value.statusText, contentType: value.contentType },
+        });
+      }
     };
+    // 网络腿全灭而拼接腿还在等时先不失败，等拼接腿的结果。
     const failSegment = (error) => {
       if (finished) return;
+      if (rebuildLeg !== undefined && !rebuildLeg.settled) {
+        deferredFailure = error;
+        return;
+      }
       finished = true;
       for (const leg of legs) clearSegmentLegStall(leg);
       emitFailedServe(error);
@@ -1067,6 +1227,7 @@ export class SegmentBank {
       if (cancelled || finished) return;
       cancelled = true;
       finished = true;
+      rebuildLeg?.request.cancel();
       for (const leg of legs) {
         clearSegmentLegStall(leg);
         leg.controller.abort();
@@ -1087,16 +1248,35 @@ export class SegmentBank {
       signal.addEventListener('abort', () => takeover.cancel(), { once: true });
     }
     const noteHeaders = (leg, response) => {
-      if (headersSettled) return;
-      headersSettled = true;
-      const info = {
+      settleHeaders({
         status: response.status,
         statusText: response.statusText,
         contentType: headerValue(response.headers, 'Content-Type') || undefined,
-      };
-      takeover.onHeaders?.(info);
-      resolveHeaders(info);
+      });
     };
+    if (rebuildLeg !== undefined) {
+      rebuildLeg.request.promise.then(
+        (value) => {
+          rebuildLeg.settled = true;
+          rebuildLeg.byteCount = value.bytes.byteLength;
+          deliverSegment(rebuildLeg, value);
+        },
+        (error) => {
+          rebuildLeg.settled = true;
+          if (error instanceof FlvRebuildFailure) {
+            rebuildLeg.byteCount = error.bytes;
+            emitSegmentChunk(rebuildLeg, error.result);
+          } else if (isAbortError(error)) {
+            emitSegmentChunk(rebuildLeg, cancelled ? 'aborted' : 'lost_race');
+          } else {
+            throw error;
+          }
+          if (deferredFailure !== undefined) failSegment(deferredFailure);
+        },
+      ).catch((error) => {
+        this.reportLiveError('LIVE_LEG', '直播分片拼接腿执行失败', error);
+      });
+    }
     const settlements = legs.map((leg) => this.runLiveSegmentLeg(leg, { credentials, noteHeaders }).then(
       (value) => ({ kind: 'done', leg, value }),
       (error) => ({ kind: 'failed', leg, error }),
@@ -1127,7 +1307,8 @@ export class SegmentBank {
   }) {
     const settlementOf = (leg) => settlements[legs.indexOf(leg)];
     const emitFailure = (settlement) => {
-      const fallback = isAbortError(settlement.error) ? 'aborted' : 'network_error';
+      let fallback = isAbortError(settlement.error) ? 'aborted' : 'network_error';
+      if (settlement.leg.cancelledByWinner) fallback = 'lost_race';
       emitSegmentChunk(settlement.leg, settlement.leg.outcome ?? fallback, {
         httpStatus: settlement.leg.httpStatus,
         errorName: settlement.leg.errorName ?? settlement.error?.name,
@@ -1207,9 +1388,13 @@ export class SegmentBank {
       failSegment(new BankNetworkError('直播分片双腿取数失败'));
       return;
     }
-    identity.attempts += 1;
-    if (identity.attempts >= maxGateAttempts) identity.verdict = 'rejected';
     const survivor = firstSettlement.kind === 'done' ? firstSettlement : secondSettlement;
+    const casualty = survivor === firstSettlement ? secondSettlement : firstSettlement;
+    // 被拼接腿胜出取消的腿不算一次无法比对的门期尝试。
+    if (!casualty.leg.cancelledByWinner) {
+      identity.attempts += 1;
+      if (identity.attempts >= maxGateAttempts) identity.verdict = 'rejected';
+    }
     deliverSegment(survivor.leg, survivor.value);
   }
 
@@ -1282,6 +1467,7 @@ export class SegmentBank {
       return {
         bytes,
         status: response.status,
+        statusText: response.statusText,
         contentType: headerValue(response.headers, 'Content-Type') || undefined,
       };
     } finally {
@@ -1577,6 +1763,7 @@ export class SegmentBank {
       if (this.inflight.get(task.cacheKey) === task) this.inflight.delete(task.cacheKey);
     }
     this.queue = [];
+    this.closeLiveFlvBackup();
     this.emitDiagnostic('bank.disabled', { reason });
   }
 
@@ -2055,6 +2242,7 @@ export class SegmentBank {
       if (this.inflight.get(task.cacheKey) === task) this.inflight.delete(task.cacheKey);
     }
     this.queue = [];
+    this.closeLiveFlvBackup();
     this.releaseSession();
   }
 }

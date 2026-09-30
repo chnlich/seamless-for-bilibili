@@ -29,6 +29,12 @@
     raceLegs: 2,
     pairFreshnessMs: 36e5
   });
+  var LIVE_FLV_BACKUP_CONFIG = Object.freeze({
+    windowMs: 3e4,
+    maxReconnects: 3,
+    reconnectDelayMs: 1e3,
+    maxCalibrationAttempts: 10
+  });
 
   // src/diagnostics/log-session.js
   var UNKNOWN_SESSION_ID = "未提供";
@@ -87,7 +93,8 @@
       serveCount: 0,
       engagement: void 0,
       pairedAddressAvailable: false,
-      pairRejected: false
+      pairRejected: false,
+      flvBackup: void 0
     };
   }
 
@@ -233,11 +240,20 @@
     empty.textContent = message === void 0 || message === "" ? "还没有线路数据" : message;
     container.append(empty);
   }
+  var FLV_BACKUP_TEXT = Object.freeze({
+    connected: "FLV 后备校准中",
+    calibrated: "FLV 后备已接上",
+    reconnecting: "FLV 后备重连中",
+    given_up: "FLV 后备已断开",
+    unavailable: "无 FLV 后备"
+  });
   function liveTakeoverText(facts, { liveEnabled: liveEnabled2 } = {}) {
     if (facts && facts.serveCount > 0) {
       if (facts.engagement === "engaged") {
-        if (facts.pairedAddressAvailable && !facts.pairRejected) return "正在按两条线路竞速下载";
-        return "单路接管（无可用备用线路）";
+        const backup = FLV_BACKUP_TEXT[facts.flvBackup];
+        const suffix = backup === void 0 ? "" : `，${backup}`;
+        if (facts.pairedAddressAvailable && !facts.pairRejected) return `正在按两条线路竞速下载${suffix}`;
+        return `单路接管（无可用备用线路）${suffix}`;
       }
       if (facts.engagement === "failed") return "接管请求失败";
       return "未接管（未发现直播媒体流）";

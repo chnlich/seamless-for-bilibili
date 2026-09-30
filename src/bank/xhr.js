@@ -56,6 +56,14 @@ function mirrorForUrl(url) {
   return new URL(url).hostname;
 }
 
+// 播放器收到的播放列表正文（只读，不改播放器拿到的响应）。
+function playlistResponseText(nativeRequest) {
+  const responseType = nativeRequest.responseType;
+  if (responseType === '' || responseType === 'text') return nativeRequest.responseText;
+  if (responseType === 'arraybuffer') return decodeText(nativeRequest.response);
+  throw new Error(`直播播放列表响应类型不受支持: ${responseType}`);
+}
+
 export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor, bank }) {
   return class SegmentBankXMLHttpRequest {
     static UNSENT = 0;
@@ -89,6 +97,7 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
       this._playurlObservationGeneration = undefined;
       this._playurlObservationUrl = undefined;
       this._livePlayurlObservationUrl = undefined;
+      this._livePlaylistObservationUrl = undefined;
       this._liveTakeover = undefined;
       this._liveChunks = [];
       this._liveLoaded = 0;
@@ -112,6 +121,16 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
                 bank.observeLivePlayurlText(this._native.responseText);
               } catch (error) {
                 bank.reportLiveError('LIVE_PLAYURL', '直播 playurl 地址簿读取失败', error);
+              }
+            }
+            if (event.type === 'load'
+              && this._playurlObservationGeneration === this._generation
+              && this._livePlaylistObservationUrl !== undefined
+              && this._native.status >= 200 && this._native.status < 300) {
+              try {
+                bank.observeLivePlaylistText(this._livePlaylistObservationUrl, playlistResponseText(this._native));
+              } catch (error) {
+                bank.reportLiveError('LIVE_PLAYLIST', '直播播放列表读取失败', error);
               }
             }
             if (event.type === 'loadstart' && this._suppressNativeLoadstart) {
@@ -175,6 +194,7 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
       this._playurlObservationGeneration = undefined;
       this._playurlObservationUrl = undefined;
       this._livePlayurlObservationUrl = undefined;
+      this._livePlaylistObservationUrl = undefined;
       this._liveTakeover = undefined;
       this._liveChunks = [];
       this._liveLoaded = 0;
@@ -356,6 +376,7 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
         enabled,
         locationObject: windowObject.location,
       });
+      this._livePlaylistObservationUrl = classification.reason === 'live_hls_playlist' ? url : undefined;
       if (!asyncFlag) {
         if (enabled) {
           bank.emitDiagnostic('bank.serve', {

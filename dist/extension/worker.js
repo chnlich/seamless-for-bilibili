@@ -29,6 +29,12 @@
     raceLegs: 2,
     pairFreshnessMs: 36e5
   });
+  var LIVE_FLV_BACKUP_CONFIG = Object.freeze({
+    windowMs: 3e4,
+    maxReconnects: 3,
+    reconnectDelayMs: 1e3,
+    maxCalibrationAttempts: 10
+  });
   var DIAGNOSTIC_MESSAGE_VERSION = 1;
 
   // src/diagnostics/catalog.js
@@ -87,6 +93,7 @@
     "bank.inventory",
     "live.stream.stitch",
     "live.playurl_observed",
+    "live.flv.backup",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
@@ -201,7 +208,8 @@
       "disabled",
       "routeActive",
       "pairedAddressAvailable",
-      "resources"
+      "resources",
+      "winner"
     ]),
     live: Object.freeze([
       "streamPath",
@@ -211,7 +219,10 @@
       "channel",
       "groupCount",
       "flvGroupCount",
-      "errorName"
+      "errorName",
+      "state",
+      "mirror",
+      "reason"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),
@@ -998,7 +1009,8 @@
       serveCount: 0,
       engagement: void 0,
       pairedAddressAvailable: false,
-      pairRejected: false
+      pairRejected: false,
+      flvBackup: void 0
     };
   }
   function liveServeClass(result) {
@@ -1011,6 +1023,10 @@
       if (event?.data?.mismatch === true) facts.pairRejected = true;
       return facts;
     }
+    if (event?.code === "live.flv.backup") {
+      if (typeof event?.data?.state === "string") facts.flvBackup = event.data.state;
+      return facts;
+    }
     if (event?.code !== "bank.serve") return facts;
     const data = event?.data !== null && typeof event?.data === "object" ? event.data : {};
     facts.serveCount += 1;
@@ -1019,6 +1035,7 @@
       facts.engagement = "engaged";
       facts.pairedAddressAvailable = data.pairedAddressAvailable === true;
       facts.pairRejected = false;
+      if (typeof data.reason !== "string" || !data.reason.startsWith("live_hls_segment")) facts.flvBackup = void 0;
     } else if (klass === "failed") {
       facts.engagement = "failed";
     }
@@ -1457,7 +1474,7 @@
         const event = cursor.value;
         const eventId = cursor.primaryKey ?? event.eventId;
         if (Number.isInteger(eventId) && eventId > maxEventId) maxEventId = eventId;
-        if (event.code === "bank.serve" || event.code === "live.stream.stitch") {
+        if (event.code === "bank.serve" || event.code === "live.stream.stitch" || event.code === "live.flv.backup") {
           sampleCount += 1;
           foldLiveEvent(facts, event);
         }

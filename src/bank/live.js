@@ -33,6 +33,17 @@ export function hlsStreamPathOf(pathname) {
   return pathname.slice(0, cut + 1);
 }
 
+// 直播流名（live_…_<档位>）：HLS 流目录的最后一段，或 FLV 路径去掉 .flv 的文件名。
+// 同一直播间同名同编码的 FLV 与 fMP4 是同一份编码。
+export function hlsStreamNameOf(streamPath) {
+  return streamPath.split('/').filter((part) => part.length > 0).at(-1);
+}
+
+export function flvStreamNameOf(pathname) {
+  if (!pathname.endsWith('.flv')) throw new Error(`不是 FLV 路径: ${pathname}`);
+  return pathname.slice(pathname.lastIndexOf('/') + 1, -'.flv'.length);
+}
+
 // 整段分片比对：长度不同即不一致（FLV 的前缀比对只在固定窗口内，分片必须连长度一起比）。
 export function compareSegmentBytes(left, right) {
   if (left.byteLength !== right.byteLength) {
@@ -89,7 +100,7 @@ export function visitLiveUrlInfoGroups(value, callback) {
       if (info === null || typeof info !== 'object') continue;
       group.push({ host: info.host, base_url: info.base_url, extra: info.extra, url: info.url });
     }
-    if (group.length > 0) callback(group, value.base_url);
+    if (group.length > 0) callback(group, value.base_url, value.codec_name);
   }
   for (const child of Object.values(value)) visitLiveUrlInfoGroups(child, callback);
 }

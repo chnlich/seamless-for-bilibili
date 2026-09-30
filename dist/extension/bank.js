@@ -29,6 +29,12 @@
     raceLegs: 2,
     pairFreshnessMs: 36e5
   });
+  var LIVE_FLV_BACKUP_CONFIG = Object.freeze({
+    windowMs: 3e4,
+    maxReconnects: 3,
+    reconnectDelayMs: 1e3,
+    maxCalibrationAttempts: 10
+  });
 
   // src/diagnostics/catalog.js
   var MEDIA_EVENT_NAMES = Object.freeze([
@@ -86,6 +92,7 @@
     "bank.inventory",
     "live.stream.stitch",
     "live.playurl_observed",
+    "live.flv.backup",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
@@ -190,7 +197,8 @@
       "disabled",
       "routeActive",
       "pairedAddressAvailable",
-      "resources"
+      "resources",
+      "winner"
     ]),
     live: Object.freeze([
       "streamPath",
@@ -200,7 +208,10 @@
       "channel",
       "groupCount",
       "flvGroupCount",
-      "errorName"
+      "errorName",
+      "state",
+      "mirror",
+      "reason"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),
@@ -700,6 +711,759 @@
     chunks.clear();
   }
 
+  // src/bank/flv-rebuild.js
+  var SEGMENT_TICKS = 9e4;
+  var FRAGMENT_TICKS = 22500;
+  var VIDEO_TICKS_PER_MS = 90;
+  var AUDIO_TICKS_PER_MS = 48;
+  var TFHD_BASE_DATA_OFFSET = 1;
+  var TFHD_SAMPLE_DESCRIPTION_INDEX = 2;
+  var TFHD_DEFAULT_DURATION = 8;
+  var TFHD_DEFAULT_SIZE = 16;
+  var TFHD_DEFAULT_FLAGS = 32;
+  var TFHD_DEFAULT_BASE_IS_MOOF = 131072;
+  var TRUN_DATA_OFFSET = 1;
+  var TRUN_FIRST_SAMPLE_FLAGS = 4;
+  var TRUN_SAMPLE_DURATION = 256;
+  var TRUN_SAMPLE_SIZE = 512;
+  var TRUN_SAMPLE_FLAGS = 1024;
+  var TRUN_SAMPLE_CTS = 2048;
+  var SYNC_SAMPLE_FLAGS = 33554432;
+  var CRC_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let index = 0; index < 256; index += 1) {
+      let value = index;
+      for (let bit = 0; bit < 8; bit += 1) value = value & 1 ? 3988292384 ^ value >>> 1 : value >>> 1;
+      table[index] = value >>> 0;
+    }
+    return table;
+  })();
+  function crc32(bytes) {
+    let crc = 4294967295;
+    for (let index = 0; index < bytes.byteLength; index += 1) {
+      crc = CRC_TABLE[(crc ^ bytes[index]) & 255] ^ crc >>> 8;
+    }
+    return (crc ^ 4294967295) >>> 0;
+  }
+  function hexValue(text, label) {
+    if (!/^[0-9a-fA-F]+$/.test(text)) throw new Error(`播放列表 ${label} 不是十六进制: ${text}`);
+    return Number.parseInt(text, 16);
+  }
+  function parseBiliPlaylist(text) {
+    const lines = text.split(/\r?\n/);
+    let mediaSequence;
+    let mapUri;
+    let pendingAux;
+    let pendingDuration;
+    let index = 0;
+    const entries = [];
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (line.length === 0) continue;
+      if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
+        mediaSequence = Number(line.slice("#EXT-X-MEDIA-SEQUENCE:".length));
+        if (!Number.isSafeInteger(mediaSequence)) throw new Error(`播放列表媒体序号无效: ${line}`);
+        continue;
+      }
+      if (line.startsWith("#EXT-X-MAP:")) {
+        const match = /URI="([^"]+)"/.exec(line);
+        if (match === null) throw new Error(`播放列表 EXT-X-MAP 缺少 URI: ${line}`);
+        mapUri = match[1].split("?", 1)[0];
+        continue;
+      }
+      if (line.startsWith("#EXT-BILI-AUX:")) {
+        const fields = line.slice("#EXT-BILI-AUX:".length).split("|");
+        if (fields.length < 4 || fields[1] !== "K" && fields[1] !== "N") {
+          throw new Error(`播放列表 EXT-BILI-AUX 格式无效: ${line}`);
+        }
+        pendingAux = {
+          ptsMs: hexValue(fields[0], "显示时间"),
+          key: fields[1] === "K",
+          size: hexValue(fields[2], "字节数"),
+          crc: hexValue(fields[3], "CRC32")
+        };
+        continue;
+      }
+      if (line.startsWith("#EXTINF:")) {
+        pendingDuration = Number.parseFloat(line.slice("#EXTINF:".length));
+        continue;
+      }
+      if (line.startsWith("#")) continue;
+      if (mediaSequence === void 0) throw new Error("播放列表分片出现在 EXT-X-MEDIA-SEQUENCE 之前");
+      const name = line.split("?", 1)[0].split("/").at(-1);
+      if (pendingAux !== void 0) {
+        entries.push({ name, msn: mediaSequence + index, duration: pendingDuration, ...pendingAux });
+      }
+      index += 1;
+      pendingAux = void 0;
+      pendingDuration = void 0;
+    }
+    return { mediaSequence, mapUri, entries };
+  }
+  var FlvUnsupportedError = class extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "FlvUnsupportedError";
+    }
+  };
+  var FlvTagReader = class {
+    constructor() {
+      this.pending = new Uint8Array(0);
+      this.headerDone = false;
+      this.order = 0;
+    }
+    push(chunk) {
+      const buffer = new Uint8Array(this.pending.byteLength + chunk.byteLength);
+      buffer.set(this.pending, 0);
+      buffer.set(chunk, this.pending.byteLength);
+      let offset = 0;
+      const frames = [];
+      if (!this.headerDone) {
+        if (buffer.byteLength < 9) {
+          this.pending = buffer;
+          return frames;
+        }
+        if (buffer[0] !== 70 || buffer[1] !== 76 || buffer[2] !== 86) throw new Error("FLV 头签名无效");
+        const headerSize = (buffer[5] << 24 | buffer[6] << 16 | buffer[7] << 8 | buffer[8]) >>> 0;
+        if (buffer.byteLength < headerSize + 4) {
+          this.pending = buffer;
+          return frames;
+        }
+        offset = headerSize + 4;
+        this.headerDone = true;
+      }
+      while (buffer.byteLength - offset >= 11) {
+        const type = buffer[offset];
+        const size = buffer[offset + 1] << 16 | buffer[offset + 2] << 8 | buffer[offset + 3];
+        if (buffer.byteLength - offset < 11 + size + 4) break;
+        const ts = (buffer[offset + 7] << 24 | buffer[offset + 4] << 16 | buffer[offset + 5] << 8 | buffer[offset + 6]) >>> 0;
+        const data = buffer.subarray(offset + 11, offset + 11 + size);
+        const order = this.order;
+        this.order += 1;
+        const frame = type === 9 ? videoFrameOf(data, ts, order) : type === 8 ? audioFrameOf(data, ts, order) : void 0;
+        if (frame !== void 0) frames.push(frame);
+        offset += 11 + size + 4;
+      }
+      this.pending = buffer.slice(offset);
+      return frames;
+    }
+  };
+  function videoFrameOf(data, ts, order) {
+    if (data.byteLength < 5) return void 0;
+    if ((data[0] & 128) !== 0) throw new FlvUnsupportedError("FLV 扩展视频头不受支持");
+    const frameType = data[0] >> 4;
+    const codecId = data[0] & 15;
+    if (frameType === 5) return void 0;
+    if (codecId !== 7 && codecId !== 12) throw new FlvUnsupportedError(`FLV 视频编码不受支持: ${codecId}`);
+    if (data[1] !== 1) return void 0;
+    const cts = (data[2] << 16 | data[3] << 8 | data[4]) << 8 >> 8;
+    return { kind: "video", ts, cts, key: frameType === 1, data: data.slice(5), order };
+  }
+  function audioFrameOf(data, ts, order) {
+    if (data.byteLength < 2) return void 0;
+    if (data[0] >> 4 !== 10) throw new FlvUnsupportedError(`FLV 音频编码不受支持: ${data[0] >> 4}`);
+    if (data[1] !== 1) return void 0;
+    return { kind: "audio", ts, data: data.slice(2), order };
+  }
+  function readUint32(bytes, offset) {
+    return (bytes[offset] << 24 | bytes[offset + 1] << 16 | bytes[offset + 2] << 8 | bytes[offset + 3]) >>> 0;
+  }
+  function readInt32(bytes, offset) {
+    return readUint32(bytes, offset) | 0;
+  }
+  function readUint64(bytes, offset) {
+    return readUint32(bytes, offset) * 2 ** 32 + readUint32(bytes, offset + 4);
+  }
+  function boxesOf(bytes, start, end) {
+    const boxes = [];
+    let offset = start;
+    while (offset < end) {
+      if (end - offset < 8) throw new Error("fMP4 盒子头被截断");
+      const size = readUint32(bytes, offset);
+      const type = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+      if (size < 8 || offset + size > end) throw new Error(`fMP4 盒子长度无效: ${type} ${size}`);
+      boxes.push({ type, start: offset, payload: offset + 8, end: offset + size });
+      offset += size;
+    }
+    return boxes;
+  }
+  function parseTraf(bytes, traf, moofStart) {
+    const result = { trun: void 0 };
+    for (const child of boxesOf(bytes, traf.payload, traf.end)) {
+      const body = child.payload;
+      if (child.type === "tfhd") {
+        const flags = readUint32(bytes, body) & 16777215;
+        let cursor = body + 8;
+        result.trackId = readUint32(bytes, body + 4);
+        result.tfhdFlags = flags;
+        if (flags & TFHD_BASE_DATA_OFFSET) throw new Error("fMP4 tfhd base-data-offset 不受支持");
+        if (flags & TFHD_SAMPLE_DESCRIPTION_INDEX) {
+          result.sampleDescriptionIndex = readUint32(bytes, cursor);
+          cursor += 4;
+        }
+        if (flags & TFHD_DEFAULT_DURATION) {
+          result.defaultDuration = readUint32(bytes, cursor);
+          cursor += 4;
+        }
+        if (flags & TFHD_DEFAULT_SIZE) {
+          result.defaultSize = readUint32(bytes, cursor);
+          cursor += 4;
+        }
+        if (flags & TFHD_DEFAULT_FLAGS) {
+          result.defaultFlags = readUint32(bytes, cursor);
+          cursor += 4;
+        }
+      } else if (child.type === "tfdt") {
+        result.tfdtVersion = bytes[body];
+        result.baseTime = bytes[body] === 1 ? readUint64(bytes, body + 4) : readUint32(bytes, body + 4);
+      } else if (child.type === "trun") {
+        if (result.trun !== void 0) throw new Error("fMP4 traf 含多个 trun，不受支持");
+        const version = bytes[body];
+        const flags = readUint32(bytes, body) & 16777215;
+        const count = readUint32(bytes, body + 4);
+        let cursor = body + 8;
+        const trun = { version, flags, entries: [] };
+        if (flags & TRUN_DATA_OFFSET) {
+          trun.dataOffset = readInt32(bytes, cursor);
+          cursor += 4;
+        }
+        if (flags & TRUN_FIRST_SAMPLE_FLAGS) {
+          trun.firstSampleFlags = readUint32(bytes, cursor);
+          cursor += 4;
+        }
+        for (let index = 0; index < count; index += 1) {
+          const entry = {};
+          if (flags & TRUN_SAMPLE_DURATION) {
+            entry.duration = readUint32(bytes, cursor);
+            cursor += 4;
+          }
+          if (flags & TRUN_SAMPLE_SIZE) {
+            entry.size = readUint32(bytes, cursor);
+            cursor += 4;
+          }
+          if (flags & TRUN_SAMPLE_FLAGS) {
+            entry.flags = readUint32(bytes, cursor);
+            cursor += 4;
+          }
+          if (flags & TRUN_SAMPLE_CTS) {
+            entry.cts = version === 1 ? readInt32(bytes, cursor) : readUint32(bytes, cursor);
+            cursor += 4;
+          }
+          trun.entries.push(entry);
+        }
+        result.trun = trun;
+      } else {
+        throw new Error(`fMP4 traf 子盒子不受支持: ${child.type}`);
+      }
+    }
+    if (result.trackId === void 0 || result.baseTime === void 0 || result.trun === void 0) {
+      throw new Error("fMP4 traf 缺少 tfhd/tfdt/trun");
+    }
+    if (!(result.tfhdFlags & TFHD_DEFAULT_BASE_IS_MOOF) || result.trun.dataOffset === void 0) {
+      throw new Error("fMP4 traf 数据偏移不是相对 moof");
+    }
+    let dataCursor = moofStart + result.trun.dataOffset;
+    let time = result.baseTime;
+    result.samples = result.trun.entries.map((entry) => {
+      const size = entry.size ?? result.defaultSize;
+      const duration = entry.duration ?? result.defaultDuration;
+      if (!Number.isSafeInteger(size) || !Number.isSafeInteger(duration)) throw new Error("fMP4 样本缺少长度或时长");
+      const sample = { data: bytes.subarray(dataCursor, dataCursor + size), time, duration, cts: entry.cts ?? 0 };
+      if (dataCursor + size > bytes.byteLength) throw new Error("fMP4 样本越过分片末尾");
+      dataCursor += size;
+      time += duration;
+      return sample;
+    });
+    return result;
+  }
+  function parseMediaSegment(bytes) {
+    const fragments = [];
+    for (const box of boxesOf(bytes, 0, bytes.byteLength)) {
+      if (box.type === "moof") {
+        const fragment = { seq: void 0, trafs: [], hasMdat: false };
+        for (const child of boxesOf(bytes, box.payload, box.end)) {
+          if (child.type === "mfhd") fragment.seq = readUint32(bytes, child.payload + 4);
+          else if (child.type === "traf") fragment.trafs.push(parseTraf(bytes, child, box.start));
+          else throw new Error(`fMP4 moof 子盒子不受支持: ${child.type}`);
+        }
+        if (fragment.seq === void 0) throw new Error("fMP4 moof 缺少 mfhd");
+        fragments.push(fragment);
+      } else if (box.type === "mdat") {
+        if (fragments.length === 0 || fragments.at(-1).hasMdat) throw new Error("fMP4 mdat 前没有对应的 moof");
+        fragments.at(-1).hasMdat = true;
+      } else {
+        throw new Error(`fMP4 顶层盒子不受支持: ${box.type}`);
+      }
+    }
+    if (fragments.length === 0 || !fragments.every((fragment) => fragment.hasMdat)) {
+      throw new Error("fMP4 分片没有完整的 moof+mdat");
+    }
+    return fragments;
+  }
+  function bytesEqual(left, right) {
+    if (left.byteLength !== right.byteLength) return false;
+    for (let index = 0; index < left.byteLength; index += 1) {
+      if (left[index] !== right[index]) return false;
+    }
+    return true;
+  }
+  function matchFrameRun(frames, samples) {
+    if (samples.length === 0) return -1;
+    for (let start = 0; start + samples.length <= frames.length; start += 1) {
+      let matched = true;
+      for (let offset = 0; offset < samples.length; offset += 1) {
+        if (!bytesEqual(frames[start + offset].data, samples[offset].data)) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) return start;
+    }
+    return -1;
+  }
+  function gcd(left, right) {
+    let a = Math.abs(left);
+    let b = Math.abs(right);
+    while (b !== 0) [a, b] = [b, a % b];
+    return a;
+  }
+  function snap(base, delta, grid) {
+    return base + grid * Math.round(delta / grid);
+  }
+  function videoDecodeTime(timing, frame) {
+    return snap(timing.video.base, (frame.ts - timing.video.flvTs) * VIDEO_TICKS_PER_MS, timing.video.grid);
+  }
+  function videoPresentationTime(timing, frame) {
+    return snap(
+      timing.video.ptsBase,
+      (frame.ts + frame.cts - timing.video.flvPts) * VIDEO_TICKS_PER_MS,
+      timing.video.grid
+    );
+  }
+  function audioTime(timing, frame, grid) {
+    return snap(timing.audio.base, (frame.ts - timing.audio.flvTs) * AUDIO_TICKS_PER_MS, grid);
+  }
+  function trafTemplate(traf, kind) {
+    const trun = traf.trun;
+    if (trun.flags & TRUN_SAMPLE_FLAGS) return { error: "template_unsupported" };
+    if (!(trun.flags & TRUN_SAMPLE_SIZE)) return { error: "template_unsupported" };
+    if (kind === "audio" && trun.flags & (TRUN_SAMPLE_DURATION | TRUN_SAMPLE_CTS)) {
+      return { error: "template_unsupported" };
+    }
+    return {
+      kind,
+      trackId: traf.trackId,
+      tfhdFlags: traf.tfhdFlags,
+      sampleDescriptionIndex: traf.sampleDescriptionIndex,
+      defaultDuration: traf.defaultDuration,
+      defaultSize: traf.defaultSize,
+      defaultFlags: traf.defaultFlags,
+      tfdtVersion: traf.tfdtVersion,
+      trunVersion: trun.version,
+      trunFlags: trun.flags,
+      firstSampleFlags: trun.firstSampleFlags
+    };
+  }
+  function sameTrafShape(left, right) {
+    return left.trackId === right.trackId && left.tfhdFlags === right.tfhdFlags && left.sampleDescriptionIndex === right.sampleDescriptionIndex && left.defaultDuration === right.defaultDuration && left.defaultSize === right.defaultSize && left.defaultFlags === right.defaultFlags && left.tfdtVersion === right.tfdtVersion && left.trun.version === right.trun.version && left.trun.flags === right.trun.flags;
+  }
+  function calibrateFromSegment(segmentBytes, frameWindow) {
+    const fragments = parseMediaSegment(segmentBytes);
+    const first = fragments[0];
+    if (first.trafs.length !== 2) return { ok: false, reason: "template_unsupported" };
+    for (const fragment of fragments) {
+      if (fragment.trafs.length !== 2) return { ok: false, reason: "template_unsupported" };
+      for (let index = 0; index < 2; index += 1) {
+        if (!sameTrafShape(first.trafs[index], fragment.trafs[index])) return { ok: false, reason: "template_unsupported" };
+      }
+    }
+    const kinds = first.trafs.map((traf) => {
+      if (matchFrameRun(frameWindow.video, traf.samples) !== -1) return "video";
+      if (matchFrameRun(frameWindow.audio, traf.samples) !== -1) return "audio";
+      return void 0;
+    });
+    if (kinds.includes(void 0)) return { ok: false, reason: "frames_not_found" };
+    if (!kinds.includes("video") || !kinds.includes("audio")) return { ok: false, reason: "template_unsupported" };
+    const videoIndex = kinds.indexOf("video");
+    const audioIndex = kinds.indexOf("audio");
+    const videoSamples = fragments.flatMap((fragment) => fragment.trafs[videoIndex].samples);
+    const audioTrafs = fragments.map((fragment) => fragment.trafs[audioIndex]);
+    const audioSamples = audioTrafs.flatMap((traf) => traf.samples);
+    const videoStart = matchFrameRun(frameWindow.video, videoSamples);
+    const audioStart = matchFrameRun(frameWindow.audio, audioSamples);
+    if (videoStart === -1 || audioStart === -1) return { ok: false, reason: "frames_not_found" };
+    const template = [];
+    for (const [index, kind] of kinds.entries()) {
+      const shape = trafTemplate(first.trafs[index], kind);
+      if (shape.error !== void 0) return { ok: false, reason: shape.error };
+      template.push(shape);
+    }
+    const videoTemplate = template[videoIndex];
+    const keyFlags = { key: SYNC_SAMPLE_FLAGS, nonKey: videoTemplate.defaultFlags };
+    let frameCursor = videoStart;
+    for (const fragment of fragments) {
+      const traf = fragment.trafs[videoIndex];
+      if (traf.trun.firstSampleFlags !== void 0) {
+        if (frameWindow.video[frameCursor].key) keyFlags.key = traf.trun.firstSampleFlags;
+        else keyFlags.nonKey = traf.trun.firstSampleFlags;
+      }
+      frameCursor += traf.samples.length;
+    }
+    videoTemplate.keyFlags = keyFlags;
+    let grid = 0;
+    for (const sample of videoSamples) grid = gcd(gcd(grid, sample.duration), sample.cts);
+    const anchor = frameWindow.video[videoStart];
+    const timing = {
+      video: {
+        base: videoSamples[0].time,
+        flvTs: anchor.ts,
+        ptsBase: videoSamples[0].time + videoSamples[0].cts,
+        flvPts: anchor.ts + anchor.cts,
+        grid
+      },
+      audio: { base: audioTrafs[0].baseTime, flvTs: frameWindow.audio[audioStart].ts, grids: [] }
+    };
+    for (const [offset, sample] of videoSamples.entries()) {
+      const frame = frameWindow.video[videoStart + offset];
+      if (videoDecodeTime(timing, frame) !== sample.time || videoPresentationTime(timing, frame) !== sample.time + sample.cts) {
+        return { ok: false, reason: "timing_mismatch" };
+      }
+    }
+    let audioCursor = audioStart;
+    const audioStarts = audioTrafs.map((traf) => {
+      const frame = frameWindow.audio[audioCursor];
+      audioCursor += traf.samples.length;
+      return { frame, time: traf.baseTime };
+    });
+    for (const candidate of [AUDIO_TICKS_PER_MS, template[audioIndex].defaultDuration]) {
+      if (audioStarts.every(({ frame, time }) => audioTime(timing, frame, candidate) === time)) {
+        timing.audio.grids.push(candidate);
+      }
+    }
+    if (timing.audio.grids.length === 0) return { ok: false, reason: "timing_mismatch" };
+    return {
+      ok: true,
+      calibration: { template, timing },
+      segment: {
+        seq: first.seq,
+        fragmentCount: fragments.length,
+        startTs: anchor.ts
+      }
+    };
+  }
+  function planSegment(video, startIndex, timing) {
+    const segmentStart = videoDecodeTime(timing, video[startIndex]);
+    const fragmentStarts = [startIndex];
+    let fragmentStart = segmentStart;
+    for (let index = startIndex + 1; index < video.length; index += 1) {
+      const decodeTime = videoDecodeTime(timing, video[index]);
+      if (video[index].key || decodeTime - segmentStart >= SEGMENT_TICKS) return { endIndex: index, fragmentStarts };
+      if (decodeTime - fragmentStart >= FRAGMENT_TICKS) {
+        fragmentStarts.push(index);
+        fragmentStart = decodeTime;
+      }
+    }
+    return void 0;
+  }
+  function audioBefore(timing, audioFrame, audioGrid, videoFrame) {
+    const audioScaled = audioTime(timing, audioFrame, audioGrid) * VIDEO_TICKS_PER_MS;
+    const videoScaled = videoDecodeTime(timing, videoFrame) * AUDIO_TICKS_PER_MS;
+    if (audioScaled !== videoScaled) return audioScaled < videoScaled;
+    return audioFrame.order < videoFrame.order;
+  }
+  function locateSegmentStart(video, timing, aux) {
+    for (let index = 0; index < video.length; index += 1) {
+      const frame = video[index];
+      if (frame.key !== aux.key) continue;
+      if (Math.abs(videoPresentationTime(timing, frame) / VIDEO_TICKS_PER_MS - aux.ptsMs) <= 1) return index;
+    }
+    return -1;
+  }
+  var ByteWriter = class {
+    constructor(size) {
+      this.bytes = new Uint8Array(size);
+      this.view = new DataView(this.bytes.buffer);
+      this.offset = 0;
+    }
+    u8(value) {
+      this.view.setUint8(this.offset, value);
+      this.offset += 1;
+    }
+    u24(value) {
+      this.u8(value >>> 16 & 255);
+      this.u8(value >>> 8 & 255);
+      this.u8(value & 255);
+    }
+    u32(value) {
+      this.view.setUint32(this.offset, value >>> 0);
+      this.offset += 4;
+    }
+    i32(value) {
+      this.view.setInt32(this.offset, value);
+      this.offset += 4;
+    }
+    u64(value) {
+      this.u32(Math.floor(value / 2 ** 32));
+      this.u32(value % 2 ** 32);
+    }
+    type(name) {
+      for (const char of name) this.u8(char.charCodeAt(0));
+    }
+    raw(bytes) {
+      this.bytes.set(bytes, this.offset);
+      this.offset += bytes.byteLength;
+    }
+  };
+  function trafSize(shape, sampleCount) {
+    let tfhd = 16;
+    for (const flag of [TFHD_SAMPLE_DESCRIPTION_INDEX, TFHD_DEFAULT_DURATION, TFHD_DEFAULT_SIZE, TFHD_DEFAULT_FLAGS]) {
+      if (shape.tfhdFlags & flag) tfhd += 4;
+    }
+    const tfdt = shape.tfdtVersion === 1 ? 20 : 16;
+    let entry = 0;
+    for (const flag of [TRUN_SAMPLE_DURATION, TRUN_SAMPLE_SIZE, TRUN_SAMPLE_CTS]) {
+      if (shape.trunFlags & flag) entry += 4;
+    }
+    let trunHead = 20;
+    if (shape.trunFlags & TRUN_FIRST_SAMPLE_FLAGS) trunHead += 4;
+    return 8 + tfhd + tfdt + trunHead + entry * sampleCount;
+  }
+  function writeFullBoxHeader(writer, size, type, version, flags) {
+    writer.u32(size);
+    writer.type(type);
+    writer.u8(version);
+    writer.u24(flags);
+  }
+  function writeTraf(writer, shape, track, dataOffset) {
+    const start = writer.offset;
+    const size = trafSize(shape, track.samples.length);
+    writer.u32(size);
+    writer.type("traf");
+    let tfhdSize = 16;
+    for (const flag of [TFHD_SAMPLE_DESCRIPTION_INDEX, TFHD_DEFAULT_DURATION, TFHD_DEFAULT_SIZE, TFHD_DEFAULT_FLAGS]) {
+      if (shape.tfhdFlags & flag) tfhdSize += 4;
+    }
+    writeFullBoxHeader(writer, tfhdSize, "tfhd", 0, shape.tfhdFlags);
+    writer.u32(shape.trackId);
+    if (shape.tfhdFlags & TFHD_SAMPLE_DESCRIPTION_INDEX) writer.u32(shape.sampleDescriptionIndex);
+    if (shape.tfhdFlags & TFHD_DEFAULT_DURATION) writer.u32(shape.defaultDuration);
+    if (shape.tfhdFlags & TFHD_DEFAULT_SIZE) writer.u32(shape.defaultSize);
+    if (shape.tfhdFlags & TFHD_DEFAULT_FLAGS) writer.u32(shape.defaultFlags);
+    writeFullBoxHeader(writer, shape.tfdtVersion === 1 ? 20 : 16, "tfdt", shape.tfdtVersion, 0);
+    if (shape.tfdtVersion === 1) writer.u64(track.baseTime);
+    else writer.u32(track.baseTime);
+    writeFullBoxHeader(writer, start + size - writer.offset, "trun", shape.trunVersion, shape.trunFlags);
+    writer.u32(track.samples.length);
+    writer.i32(dataOffset);
+    if (shape.trunFlags & TRUN_FIRST_SAMPLE_FLAGS) writer.u32(track.firstSampleFlags);
+    for (const sample of track.samples) {
+      if (shape.trunFlags & TRUN_SAMPLE_DURATION) writer.u32(sample.duration);
+      if (shape.trunFlags & TRUN_SAMPLE_SIZE) writer.u32(sample.data.byteLength);
+      if (shape.trunFlags & TRUN_SAMPLE_CTS) writer.i32(sample.cts);
+    }
+  }
+  function buildFragment(template, seq, tracks) {
+    const moofSize = 8 + 16 + template.reduce((sum, shape, index) => sum + trafSize(shape, tracks[index].samples.length), 0);
+    const payloadSizes = tracks.map((track) => track.samples.reduce((sum, sample) => sum + sample.data.byteLength, 0));
+    const mdatSize = 8 + payloadSizes.reduce((sum, size) => sum + size, 0);
+    const writer = new ByteWriter(moofSize + mdatSize);
+    writer.u32(moofSize);
+    writer.type("moof");
+    writeFullBoxHeader(writer, 16, "mfhd", 0, 0);
+    writer.u32(seq);
+    let dataOffset = moofSize + 8;
+    for (const [index, shape] of template.entries()) {
+      writeTraf(writer, shape, tracks[index], dataOffset);
+      dataOffset += payloadSizes[index];
+    }
+    writer.u32(mdatSize);
+    writer.type("mdat");
+    for (const track of tracks) for (const sample of track.samples) writer.raw(sample.data);
+    return writer.bytes;
+  }
+  function buildSegment({ frameWindow, calibration, startIndex, plan, seq, audioGrid }) {
+    const { template, timing } = calibration;
+    const { video, audio } = frameWindow;
+    const bounds = [...plan.fragmentStarts, plan.endIndex];
+    let audioCursor = 0;
+    while (audioCursor < audio.length && audioBefore(timing, audio[audioCursor], audioGrid, video[bounds[0]])) {
+      audioCursor += 1;
+    }
+    const pieces = [];
+    for (let fragmentIndex = 0; fragmentIndex < plan.fragmentStarts.length; fragmentIndex += 1) {
+      const videoFrames = video.slice(bounds[fragmentIndex], bounds[fragmentIndex + 1]);
+      const audioFrames = [];
+      while (audioCursor < audio.length && audioBefore(timing, audio[audioCursor], audioGrid, video[bounds[fragmentIndex + 1]])) {
+        audioFrames.push(audio[audioCursor]);
+        audioCursor += 1;
+      }
+      if (audioFrames.length === 0) return void 0;
+      const decodeTimes = [...videoFrames, video[bounds[fragmentIndex + 1]]].map((frame) => videoDecodeTime(timing, frame));
+      const tracks = template.map((shape) => {
+        if (shape.kind === "video") {
+          return {
+            baseTime: decodeTimes[0],
+            firstSampleFlags: videoFrames[0].key ? shape.keyFlags.key : shape.keyFlags.nonKey,
+            samples: videoFrames.map((frame, index) => ({
+              data: frame.data,
+              duration: decodeTimes[index + 1] - decodeTimes[index],
+              cts: videoPresentationTime(timing, frame) - decodeTimes[index]
+            }))
+          };
+        }
+        return {
+          baseTime: audioTime(timing, audioFrames[0], audioGrid),
+          firstSampleFlags: shape.firstSampleFlags,
+          samples: audioFrames.map((frame) => ({ data: frame.data }))
+        };
+      });
+      pieces.push(buildFragment(template, seq + fragmentIndex, tracks));
+    }
+    const total = pieces.reduce((sum, piece) => sum + piece.byteLength, 0);
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const piece of pieces) {
+      bytes.set(piece, offset);
+      offset += piece.byteLength;
+    }
+    return bytes;
+  }
+  function rebuildSegment({ frameWindow, calibration, aux, seq, startIndex }) {
+    const { timing } = calibration;
+    const { video, audio } = frameWindow;
+    const plan = planSegment(video, startIndex, timing);
+    if (plan === void 0) return { status: "waiting" };
+    const boundary = video[plan.endIndex];
+    const grids = timing.audio.grids;
+    const lastAudio = audio.at(-1);
+    if (lastAudio === void 0 || grids.some((grid) => audioBefore(timing, lastAudio, grid, boundary))) {
+      return { status: "waiting" };
+    }
+    let mismatchBytes = 0;
+    for (const grid of grids) {
+      const bytes = buildSegment({ frameWindow, calibration, startIndex, plan, seq, audioGrid: grid });
+      if (bytes === void 0) continue;
+      if (bytes.byteLength === aux.size && crc32(bytes) === aux.crc) {
+        return { status: "verified", bytes, fragmentCount: plan.fragmentStarts.length, audioGrid: grid };
+      }
+      mismatchBytes = bytes.byteLength;
+    }
+    return { status: "mismatch", bytes: mismatchBytes };
+  }
+  function segmentStartState(video, timing, aux) {
+    const index = locateSegmentStart(video, timing, aux);
+    if (index !== -1) return { state: "found", index };
+    if (video.length === 0) return { state: "waiting" };
+    const oldestMs = videoDecodeTime(timing, video[0]) / VIDEO_TICKS_PER_MS;
+    const newestMs = videoDecodeTime(timing, video.at(-1)) / VIDEO_TICKS_PER_MS;
+    if (aux.ptsMs < oldestMs || newestMs > aux.ptsMs + SEGMENT_TICKS / VIDEO_TICKS_PER_MS) return { state: "missing" };
+    return { state: "waiting" };
+  }
+  var FlvSegmentRebuilder = class {
+    constructor({ windowMs }) {
+      this.windowMs = windowMs;
+      this.video = [];
+      this.audio = [];
+      this.calibration = void 0;
+      this.chain = /* @__PURE__ */ new Map();
+    }
+    get frameWindow() {
+      return { video: this.video, audio: this.audio };
+    }
+    get calibrated() {
+      return this.calibration !== void 0;
+    }
+    reset() {
+      this.video = [];
+      this.audio = [];
+      this.calibration = void 0;
+      this.chain.clear();
+    }
+    resetCalibration() {
+      this.calibration = void 0;
+      this.chain.clear();
+    }
+    appendFrames(frames) {
+      for (const frame of frames) (frame.kind === "video" ? this.video : this.audio).push(frame);
+      const newest = Math.max(this.video.at(-1)?.ts ?? 0, this.audio.at(-1)?.ts ?? 0);
+      const cutoff = newest - this.windowMs;
+      let videoDrop = 0;
+      while (videoDrop < this.video.length && this.video[videoDrop].ts < cutoff) videoDrop += 1;
+      if (videoDrop > 0) this.video.splice(0, videoDrop);
+      let audioDrop = 0;
+      while (audioDrop < this.audio.length && this.audio[audioDrop].ts < cutoff) audioDrop += 1;
+      if (audioDrop > 0) this.audio.splice(0, audioDrop);
+    }
+    recordSegment(msn, record) {
+      this.chain.set(msn, record);
+      for (const known of this.chain.keys()) {
+        if (known < msn - 128) this.chain.delete(known);
+      }
+    }
+    // 网络送达的真分片：未校准时拿它校准，已校准时记入分片链。
+    noteRealSegment(aux, bytes) {
+      if (this.calibration === void 0) {
+        const result = calibrateFromSegment(bytes, this.frameWindow);
+        if (!result.ok) return { calibrated: false, reason: result.reason };
+        this.calibration = result.calibration;
+        this.recordSegment(aux.msn, result.segment);
+        return { calibrated: true };
+      }
+      const fragments = parseMediaSegment(bytes);
+      const startIndex = locateSegmentStart(this.video, this.calibration.timing, aux);
+      this.recordSegment(aux.msn, {
+        seq: fragments[0].seq,
+        fragmentCount: fragments.length,
+        startTs: startIndex === -1 ? void 0 : this.video[startIndex].ts
+      });
+      return { calibrated: false };
+    }
+    seqFor(msn) {
+      const previous = this.chain.get(msn - 1);
+      if (previous !== void 0) return previous.seq + previous.fragmentCount;
+      let anchorMsn;
+      for (const [known, record] of this.chain) {
+        if (known < msn && record.startTs !== void 0 && (anchorMsn === void 0 || known > anchorMsn)) anchorMsn = known;
+      }
+      if (anchorMsn === void 0) return void 0;
+      const anchor = this.chain.get(anchorMsn);
+      let index = this.video.findIndex((frame) => frame.ts === anchor.startTs);
+      if (index === -1) return void 0;
+      let seq = anchor.seq;
+      for (let current = anchorMsn; current < msn; current += 1) {
+        const plan = planSegment(this.video, index, this.calibration.timing);
+        if (plan === void 0) return void 0;
+        seq += plan.fragmentStarts.length;
+        index = plan.endIndex;
+      }
+      return seq;
+    }
+    // 一次拼接尝试：waiting / frames_missing / verified（bytes）/ mismatch（bytes 为长度）。
+    attempt(aux) {
+      const start = segmentStartState(this.video, this.calibration.timing, aux);
+      if (start.state === "waiting") return { status: "waiting" };
+      if (start.state === "missing") return { status: "frames_missing" };
+      const seq = this.seqFor(aux.msn);
+      if (seq === void 0) return { status: "frames_missing" };
+      const result = rebuildSegment({
+        frameWindow: this.frameWindow,
+        calibration: this.calibration,
+        aux,
+        seq,
+        startIndex: start.index
+      });
+      if (result.status === "verified") {
+        this.calibration.timing.audio.grids = [result.audioGrid];
+        this.recordSegment(aux.msn, {
+          seq,
+          fragmentCount: result.fragmentCount,
+          startTs: this.video[start.index].ts
+        });
+      }
+      return result;
+    }
+  };
+
   // src/bank/live.js
   function isLiveLocation(locationObject) {
     return locationObject !== void 0 && locationObject.hostname === "live.bilibili.com";
@@ -727,6 +1491,13 @@
     }
     const cut = pathname.lastIndexOf("/");
     return pathname.slice(0, cut + 1);
+  }
+  function hlsStreamNameOf(streamPath) {
+    return streamPath.split("/").filter((part) => part.length > 0).at(-1);
+  }
+  function flvStreamNameOf(pathname) {
+    if (!pathname.endsWith(".flv")) throw new Error(`不是 FLV 路径: ${pathname}`);
+    return pathname.slice(pathname.lastIndexOf("/") + 1, -".flv".length);
   }
   function compareSegmentBytes(left, right) {
     if (left.byteLength !== right.byteLength) {
@@ -774,7 +1545,7 @@
         if (info === null || typeof info !== "object") continue;
         group.push({ host: info.host, base_url: info.base_url, extra: info.extra, url: info.url });
       }
-      if (group.length > 0) callback(group, value.base_url);
+      if (group.length > 0) callback(group, value.base_url, value.codec_name);
     }
     for (const child of Object.values(value)) visitLiveUrlInfoGroups(child, callback);
   }
@@ -1155,6 +1926,281 @@
     }
   };
 
+  // src/bank/flv-backup.js
+  var FlvRebuildFailure = class extends Error {
+    constructor(result, bytes = 0) {
+      super(`FLV 后备拼接未交付: ${result}`);
+      this.name = "FlvRebuildFailure";
+      this.result = result;
+      this.bytes = bytes;
+    }
+  };
+  function abortError() {
+    return new DOMException("The operation was aborted", "AbortError");
+  }
+  var LiveFlvBackup = class {
+    constructor({
+      hlsStreamPath,
+      resolveUrls,
+      fetchImpl,
+      credentials,
+      timers,
+      now,
+      emitState,
+      reportError,
+      config
+    }) {
+      this.hlsStreamPath = hlsStreamPath;
+      this.resolveUrls = resolveUrls;
+      this.fetchImpl = fetchImpl;
+      this.credentials = credentials;
+      this.timers = timers;
+      this.now = now;
+      this.emitStateCallback = emitState;
+      this.reportError = reportError;
+      this.config = config;
+      this.rebuilder = new FlvSegmentRebuilder({ windowMs: config.windowMs });
+      this.pending = /* @__PURE__ */ new Set();
+      this.closed = false;
+      this.reconnects = 0;
+      this.attempt = 0;
+      this.calibrationFailures = 0;
+      this.connection = void 0;
+      this.reconnectTimer = void 0;
+      this.url = void 0;
+      this.lastHeaders = void 0;
+    }
+    get mirror() {
+      return this.url === void 0 ? void 0 : new URL(this.url).hostname;
+    }
+    get streamPath() {
+      return this.url === void 0 ? this.hlsStreamPath : new URL(this.url).pathname;
+    }
+    get ready() {
+      return !this.closed && this.rebuilder.calibrated;
+    }
+    emitState(state, reason) {
+      const payload = { state, streamPath: this.streamPath };
+      if (this.mirror !== void 0) payload.mirror = this.mirror;
+      if (reason !== void 0) payload.reason = reason;
+      this.emitStateCallback(payload);
+    }
+    // 每次连接现取地址簿（签名可能已更新），跳过已过期的地址，在 Bilibili 给出的地址间轮换。
+    pickUrl() {
+      const lookup = this.resolveUrls();
+      if (lookup.urls === void 0) return { miss: lookup.miss };
+      const usable = lookup.urls.filter((url2) => {
+        const expiresAt = liveUrlExpiresAt(url2);
+        return expiresAt === void 0 || this.now() < expiresAt;
+      });
+      if (usable.length === 0) return { miss: "address_expired" };
+      const url = usable[this.attempt % usable.length];
+      this.attempt += 1;
+      return { url };
+    }
+    // 开连接；地址簿里没有可用地址时不开，返回缺失原因（由调用方记 unavailable）。
+    start() {
+      const picked = this.pickUrl();
+      if (picked.url === void 0) return picked.miss;
+      this.url = picked.url;
+      void this.connect();
+      return void 0;
+    }
+    async connect() {
+      const controller = new AbortController();
+      const connection = {
+        controller,
+        stallTimer: void 0,
+        reader: void 0,
+        firstTs: void 0,
+        fullWindow: false,
+        stalled: false
+      };
+      this.connection = connection;
+      const tagReader = new FlvTagReader();
+      const armStall = () => {
+        if (connection.stallTimer !== void 0) this.timers.clearTimeout(connection.stallTimer);
+        connection.stallTimer = this.timers.setTimeout(() => {
+          connection.stalled = true;
+          controller.abort();
+          void connection.reader?.cancel().catch((error) => {
+            if (error?.name !== "AbortError") this.reportError("FLV 后备停滞读取取消失败", error);
+          });
+        }, this.config.stallMs);
+      };
+      armStall();
+      let reason;
+      let failure;
+      try {
+        const response = await this.fetchImpl(this.url, { credentials: this.credentials, signal: controller.signal });
+        if (response.status < 200 || response.status >= 300) {
+          reason = "http_error";
+          failure = new Error(`FLV 后备响应状态无效: ${response.status}`);
+        } else {
+          connection.reader = response.body.getReader();
+          for (; ; ) {
+            const read = await connection.reader.read();
+            if (read.done) break;
+            if (read.value.byteLength === 0) continue;
+            armStall();
+            this.noteFrames(connection, tagReader.push(read.value));
+            if (this.closed || this.connection !== connection) return;
+          }
+          reason = "stream_ended";
+        }
+      } catch (error) {
+        if (this.closed || this.connection !== connection) return;
+        if (error instanceof FlvUnsupportedError) {
+          this.reportError("FLV 后备流格式不受支持", error);
+          this.emitState("unavailable", "flv_codec_unsupported");
+          this.close();
+          return;
+        }
+        reason = connection.stalled ? "stalled" : "network_error";
+        failure = error;
+      } finally {
+        if (connection.stallTimer !== void 0) this.timers.clearTimeout(connection.stallTimer);
+      }
+      if (this.closed || this.connection !== connection) return;
+      this.disconnected(reason, failure);
+    }
+    noteFrames(connection, frames) {
+      if (frames.length === 0) return;
+      const firstFrames = connection.firstTs === void 0;
+      if (firstFrames) connection.firstTs = frames[0].ts;
+      this.rebuilder.appendFrames(frames);
+      if (firstFrames) this.emitState("connected");
+      if (!connection.fullWindow && frames.at(-1).ts - connection.firstTs >= this.config.windowMs) {
+        connection.fullWindow = true;
+        this.reconnects = 0;
+      }
+      for (const request of [...this.pending]) this.progressRequest(request);
+    }
+    // 断线：新连接的时间戳重新起算，窗口、校准与分片链一并作废，等下一个网络分片重新校准。
+    disconnected(reason, error) {
+      this.connection = void 0;
+      this.rebuilder.reset();
+      this.failPending("frames_missing");
+      if (this.reconnects >= this.config.maxReconnects) {
+        this.emitState("given_up", reason);
+        this.reportError("FLV 后备连接重连用尽", error ?? new Error(reason));
+        this.close();
+        return;
+      }
+      this.reconnects += 1;
+      this.emitState("reconnecting", reason);
+      this.reconnectTimer = this.timers.setTimeout(() => {
+        this.reconnectTimer = void 0;
+        if (this.closed) return;
+        const picked = this.pickUrl();
+        if (picked.url === void 0) {
+          this.disconnected(picked.miss, new Error(`FLV 后备无可用地址: ${picked.miss}`));
+          return;
+        }
+        this.url = picked.url;
+        void this.connect();
+      }, this.config.reconnectDelayMs);
+    }
+    close() {
+      if (this.closed) return;
+      this.closed = true;
+      if (this.reconnectTimer !== void 0) this.timers.clearTimeout(this.reconnectTimer);
+      const connection = this.connection;
+      this.connection = void 0;
+      if (connection !== void 0) {
+        if (connection.stallTimer !== void 0) this.timers.clearTimeout(connection.stallTimer);
+        connection.controller.abort();
+        void connection.reader?.cancel().catch((error) => {
+          if (error?.name !== "AbortError") this.reportError("FLV 后备读取取消失败", error);
+        });
+      }
+      this.failPending("frames_missing");
+      this.rebuilder.reset();
+    }
+    // init 分片更换（播放列表 EXT-X-MAP 变了）后旧模板作废，等下一个网络分片重新校准。
+    resetCalibration() {
+      this.rebuilder.resetCalibration();
+      this.failPending("frames_missing");
+    }
+    // 网络送达的真分片：记下响应头（拼接腿胜出时沿用），未校准时拿它校准，已校准时续分片链。
+    // 连接供帧满一个窗口后仍连续 maxCalibrationAttempts 个分片校准不上，或分片结构不受支持，
+    // 判这条流 unavailable 并关闭连接。
+    noteNetworkSegment({ aux, bytes, headers }) {
+      this.lastHeaders = headers;
+      if (this.closed) return;
+      const wasCalibrated = this.rebuilder.calibrated;
+      let outcome;
+      try {
+        outcome = this.rebuilder.noteRealSegment(aux, bytes);
+      } catch (error) {
+        this.reportError("FLV 后备读取网络分片失败", error);
+        return;
+      }
+      if (wasCalibrated) return;
+      if (outcome.calibrated) {
+        this.calibrationFailures = 0;
+        this.emitState("calibrated");
+        return;
+      }
+      if (outcome.reason !== "template_unsupported") {
+        if (this.connection?.fullWindow !== true) return;
+        this.calibrationFailures += 1;
+        if (this.calibrationFailures < this.config.maxCalibrationAttempts) return;
+      }
+      this.emitState("unavailable", `calibration_${outcome.reason}`);
+      this.close();
+    }
+    // 拼接腿：返回 { promise, cancel }。promise 以 { bytes } 兑现（字节数与 CRC32 已核对），
+    // 或以 FlvRebuildFailure 拒绝；等待最多 stallMs。
+    requestSegment(aux) {
+      let resolve;
+      let reject;
+      const promise = new Promise((resolveArg, rejectArg) => {
+        resolve = resolveArg;
+        reject = rejectArg;
+      });
+      const request = { aux, resolve, reject, timer: void 0, settled: false };
+      request.timer = this.timers.setTimeout(() => {
+        this.settle(request, void 0, new FlvRebuildFailure("frames_missing"));
+      }, this.config.stallMs);
+      this.pending.add(request);
+      this.progressRequest(request);
+      return {
+        promise,
+        cancel: () => this.settle(request, void 0, abortError())
+      };
+    }
+    settle(request, value, error) {
+      if (request.settled) return;
+      request.settled = true;
+      this.pending.delete(request);
+      this.timers.clearTimeout(request.timer);
+      if (error === void 0) request.resolve(value);
+      else request.reject(error);
+    }
+    failPending(result) {
+      for (const request of [...this.pending]) this.settle(request, void 0, new FlvRebuildFailure(result));
+    }
+    progressRequest(request) {
+      if (!this.rebuilder.calibrated) {
+        this.settle(request, void 0, new FlvRebuildFailure("frames_missing"));
+        return;
+      }
+      let result;
+      try {
+        result = this.rebuilder.attempt(request.aux);
+      } catch (error) {
+        this.reportError("FLV 后备拼接失败", error);
+        this.settle(request, void 0, new FlvRebuildFailure("frames_missing"));
+        return;
+      }
+      if (result.status === "waiting") return;
+      if (result.status === "verified") this.settle(request, { bytes: result.bytes });
+      else if (result.status === "mismatch") this.settle(request, void 0, new FlvRebuildFailure("crc_mismatch", result.bytes));
+      else this.settle(request, void 0, new FlvRebuildFailure("frames_missing"));
+    }
+  };
+
   // src/bank/xhr.js
   var EVENT_NAMES = Object.freeze([
     "readystatechange",
@@ -1202,6 +2248,12 @@
   function mirrorForUrl(url) {
     return new URL(url).hostname;
   }
+  function playlistResponseText(nativeRequest) {
+    const responseType = nativeRequest.responseType;
+    if (responseType === "" || responseType === "text") return nativeRequest.responseText;
+    if (responseType === "arraybuffer") return decodeText(nativeRequest.response);
+    throw new Error(`直播播放列表响应类型不受支持: ${responseType}`);
+  }
   function createBankXMLHttpRequestClass({ windowObject, nativeConstructor, bank }) {
     return class SegmentBankXMLHttpRequest {
       static UNSENT = 0;
@@ -1234,6 +2286,7 @@
         this._playurlObservationGeneration = void 0;
         this._playurlObservationUrl = void 0;
         this._livePlayurlObservationUrl = void 0;
+        this._livePlaylistObservationUrl = void 0;
         this._liveTakeover = void 0;
         this._liveChunks = [];
         this._liveLoaded = 0;
@@ -1253,6 +2306,13 @@
                   bank.observeLivePlayurlText(this._native.responseText);
                 } catch (error) {
                   bank.reportLiveError("LIVE_PLAYURL", "直播 playurl 地址簿读取失败", error);
+                }
+              }
+              if (event.type === "load" && this._playurlObservationGeneration === this._generation && this._livePlaylistObservationUrl !== void 0 && this._native.status >= 200 && this._native.status < 300) {
+                try {
+                  bank.observeLivePlaylistText(this._livePlaylistObservationUrl, playlistResponseText(this._native));
+                } catch (error) {
+                  bank.reportLiveError("LIVE_PLAYLIST", "直播播放列表读取失败", error);
                 }
               }
               if (event.type === "loadstart" && this._suppressNativeLoadstart) {
@@ -1321,6 +2381,7 @@
         this._playurlObservationGeneration = void 0;
         this._playurlObservationUrl = void 0;
         this._livePlayurlObservationUrl = void 0;
+        this._livePlaylistObservationUrl = void 0;
         this._liveTakeover = void 0;
         this._liveChunks = [];
         this._liveLoaded = 0;
@@ -1486,6 +2547,7 @@
           enabled,
           locationObject: windowObject.location
         });
+        this._livePlaylistObservationUrl = classification.reason === "live_hls_playlist" ? url : void 0;
         if (!asyncFlag) {
           if (enabled) {
             bank.emitDiagnostic("bank.serve", {
@@ -1711,7 +2773,7 @@
 
   // src/bank/main.js
   var MAX_PREFETCH_CONCURRENCY = 4;
-  function abortError() {
+  function abortError2() {
     return new DOMException("The operation was aborted", "AbortError");
   }
   function isAbortError2(error) {
@@ -1808,12 +2870,14 @@
       nativeFetch = windowObject.fetch,
       maxPrefetchConcurrency = MAX_PREFETCH_CONCURRENCY,
       config = BANK_CONFIG,
+      flvBackupConfig = LIVE_FLV_BACKUP_CONFIG,
       chunks = /* @__PURE__ */ new Map(),
       now = Date.now
     } = {}) {
       this.windowObject = windowObject;
       this.nativeFetch = nativeFetch;
       this.config = config;
+      this.flvBackupConfig = flvBackupConfig;
       this.maxPrefetchConcurrency = maxPrefetchConcurrency;
       this.now = now;
       this.enabled = false;
@@ -1825,6 +2889,9 @@
       this.resourceState = /* @__PURE__ */ new Map();
       this.recentResourceKeys = [];
       this.liveSegmentIdentity = /* @__PURE__ */ new Map();
+      this.livePlaylists = /* @__PURE__ */ new Map();
+      this.liveFlvBackup = void 0;
+      this.liveFlvUnavailable = /* @__PURE__ */ new Map();
       this.addressBook = /* @__PURE__ */ new Map();
       this.lastInventoryPayload = void 0;
       this.lastInventoryPublishedAt = void 0;
@@ -1904,7 +2971,7 @@
       for (const task of this.queue) {
         task.controller.abort();
         task.settled = true;
-        task.reject(abortError());
+        task.reject(abortError2());
         if (this.inflight.get(task.cacheKey) === task) this.inflight.delete(task.cacheKey);
       }
       this.queue = [];
@@ -1984,6 +3051,97 @@
         this.reportLiveError("LIVE_PLAYURL", "直播 playurl 地址簿解析失败", error);
       }
     }
+    // 播放器拿到的播放列表：读克隆体，不改播放器收到的内容；记下每个分片的 AUX 值。
+    async observeLivePlaylistResponse(url, response) {
+      if (response.status < 200 || response.status >= 300) return;
+      const text = await response.clone().text();
+      this.observeLivePlaylistText(url, text);
+    }
+    observeLivePlaylistText(url, text) {
+      const streamPath = hlsStreamPathOf(new URL(url).pathname);
+      const playlist = parseBiliPlaylist(text);
+      let state = this.livePlaylists.get(streamPath);
+      if (state === void 0) {
+        state = { mapUri: void 0, entries: /* @__PURE__ */ new Map() };
+        this.livePlaylists.set(streamPath, state);
+        while (this.livePlaylists.size > 8) this.livePlaylists.delete(this.livePlaylists.keys().next().value);
+      }
+      if (playlist.mapUri !== void 0) {
+        if (state.mapUri !== void 0 && state.mapUri !== playlist.mapUri && this.liveFlvBackup?.hlsStreamPath === streamPath) {
+          this.liveFlvBackup.resetCalibration();
+        }
+        state.mapUri = playlist.mapUri;
+      }
+      for (const entry of playlist.entries) {
+        state.entries.delete(entry.name);
+        state.entries.set(entry.name, entry);
+      }
+      while (state.entries.size > 256) state.entries.delete(state.entries.keys().next().value);
+    }
+    livePlaylistAuxFor(streamPath, name) {
+      return this.livePlaylists.get(streamPath)?.entries.get(name);
+    }
+    // FLV 后备地址：地址簿里与该 fMP4 流同流名、同编码的 .flv 条目（Bilibili 自带的地址，
+    // 不合成主机）。
+    flvBackupUrlsFor(hlsStreamPath) {
+      let hlsEntry;
+      for (const [pathname, entry] of this.addressBook) {
+        if (!pathname.endsWith(".m3u8") || hlsStreamPathOf(pathname) !== hlsStreamPath) continue;
+        hlsEntry = entry;
+        break;
+      }
+      if (hlsEntry === void 0) return { urls: void 0, miss: "no_hls_entry" };
+      const streamName = hlsStreamNameOf(hlsStreamPath);
+      for (const [pathname, entry] of this.addressBook) {
+        if (!pathname.endsWith(".flv") || entry.codec !== hlsEntry.codec) continue;
+        if (flvStreamNameOf(pathname) !== streamName) continue;
+        return { urls: entry.urls };
+      }
+      return { urls: void 0, miss: "no_flv_entry" };
+    }
+    // 当前 fMP4 流的 FLV 后备：流目录一变就关掉旧连接另开；同一条流关闭后（given_up、
+    // unavailable）不再重开。地址簿缺可用地址时不开，下一个分片再查，同一条流同一原因只记
+    // 一次 unavailable。
+    ensureLiveFlvBackup(streamPath, credentials) {
+      if (this.liveFlvBackup?.hlsStreamPath === streamPath) return this.liveFlvBackup;
+      this.closeLiveFlvBackup();
+      const backup = new LiveFlvBackup({
+        hlsStreamPath: streamPath,
+        resolveUrls: () => this.flvBackupUrlsFor(streamPath),
+        fetchImpl: (url, init) => this.nativeFetch.call(this.windowObject, url, init),
+        credentials,
+        timers: {
+          setTimeout: (callback, ms) => this.windowObject.setTimeout(callback, ms),
+          clearTimeout: (timer) => this.windowObject.clearTimeout(timer)
+        },
+        now: this.now,
+        emitState: (payload) => this.emitDiagnostic("live.flv.backup", payload),
+        reportError: (message, error) => this.reportLiveError("LIVE_FLV_BACKUP", message, error),
+        config: { ...this.flvBackupConfig, stallMs: this.config.stallMs }
+      });
+      let miss = backup.start();
+      if (miss !== void 0 && !this.liveFlvUnavailable.has(streamPath)) {
+        this.readInlineLivePlayinfo();
+        miss = backup.start();
+      }
+      if (miss === void 0) {
+        this.liveFlvBackup = backup;
+        return backup;
+      }
+      if (this.liveFlvUnavailable.get(streamPath) !== miss) {
+        this.liveFlvUnavailable.delete(streamPath);
+        this.liveFlvUnavailable.set(streamPath, miss);
+        while (this.liveFlvUnavailable.size > 16) {
+          this.liveFlvUnavailable.delete(this.liveFlvUnavailable.keys().next().value);
+        }
+        backup.emitState("unavailable", miss);
+      }
+      return void 0;
+    }
+    closeLiveFlvBackup() {
+      this.liveFlvBackup?.close();
+      this.liveFlvBackup = void 0;
+    }
     readInlineLivePlayinfo() {
       const addressBook = new Map(this.addressBook);
       try {
@@ -2022,13 +3180,13 @@
       let groupCount = 0;
       let flvGroupCount = 0;
       let groupErrorName;
-      visitLiveUrlInfoGroups(data, (group, groupBaseUrl) => {
+      visitLiveUrlInfoGroups(data, (group, groupBaseUrl, codec) => {
         try {
           const urls = group.map((info) => new URL(urlFromLiveUrlInfo(info, groupBaseUrl)).href);
           const pathnames = new Set(urls.map((entry) => new URL(entry).pathname));
           if (pathnames.size !== 1) throw new Error("直播主备地址路径不一致");
           const pathname = new URL(urls[0]).pathname;
-          this.addressBook.set(pathname, { urls, observedAt });
+          this.addressBook.set(pathname, { urls, observedAt, codec });
           groupCount += 1;
           if (pathname.endsWith(".flv")) flvGroupCount += 1;
         } catch (error) {
@@ -2277,6 +3435,11 @@
             this.reportLiveError("LIVE_PLAYURL", "直播 playurl 地址簿读取失败", error);
           });
         }
+        if (classification.reason === "live_hls_playlist") {
+          await this.observeLivePlaylistResponse(request.url, response2).catch((error) => {
+            this.reportLiveError("LIVE_PLAYLIST", "直播播放列表读取失败", error);
+          });
+        }
         return response2;
       }
       let takeover;
@@ -2337,7 +3500,8 @@
       return this.serveLiveStream({ url, credentials, signal });
     }
     serveLiveStream({ url, credentials, signal }) {
-      if (signal?.aborted) throw abortError();
+      if (signal?.aborted) throw abortError2();
+      this.closeLiveFlvBackup();
       const startedAt = performanceNow(this.windowObject);
       let serveFailed = false;
       const emitFailedServe = (error) => {
@@ -2475,10 +3639,10 @@
         abortAllLegs();
         if (!headersSettled) {
           headersSettled = true;
-          rejectHeaders(abortError());
+          rejectHeaders(abortError2());
           return;
         }
-        takeover.onError?.(abortError());
+        takeover.onError?.(abortError2());
       };
       if (signal !== void 0) {
         signal.addEventListener("abort", () => takeover.cancel(), { once: true });
@@ -2515,11 +3679,16 @@
     // HLS 直播分片接管：整段文件双腿竞速（视频页分片同形）。身份门未决的首个竞速
     // 分片对等双腿收齐后整体比对，一致才开放竞速；不一致或门期反复无法完整比对则
     // 永久降级为播放器所名地址单腿。双腿全灭或签名到期且无新地址时显式失败。
+    // fMP4 分片另有第三腿（slot 2）：FLV 后备已校准且播放列表给出该分片的 AUX 值时，
+    // 从 FLV 帧拼出同一分片，长度与 CRC32 都对上才交付；先完整到手且已核对的一腿胜出。
     serveLiveSegment({ url, credentials, signal }) {
-      if (signal?.aborted) throw abortError();
+      if (signal?.aborted) throw abortError2();
       const startedAt = performanceNow(this.windowObject);
       const playerUrl = new URL(url);
       const streamPath = hlsStreamPathOf(playerUrl.pathname);
+      const segmentName = playerUrl.pathname.slice(playerUrl.pathname.lastIndexOf("/") + 1);
+      const aux = this.livePlaylistAuxFor(streamPath, segmentName);
+      const backup = segmentName.endsWith(".m4s") ? this.ensureLiveFlvBackup(streamPath, credentials) : void 0;
       let serveFailed = false;
       const emitFailedServe = (error) => {
         if (serveFailed) return;
@@ -2582,6 +3751,16 @@
         outcome: void 0,
         cancelledByWinner: false
       }));
+      const rebuildLeg = backup?.ready === true && aux !== void 0 ? {
+        slot: 2,
+        url,
+        mirror: backup.mirror,
+        startedAt: performanceNow(this.windowObject),
+        ttfbAt: void 0,
+        byteCount: 0,
+        settled: false,
+        request: backup.requestSegment(aux)
+      } : void 0;
       let headersSettled = false;
       let resolveHeaders;
       let rejectHeaders;
@@ -2599,10 +3778,11 @@
       };
       let finished = false;
       let cancelled = false;
+      let deferredFailure;
       const emitSegmentChunk = (leg, result, detail = {}) => {
         const payload = {
           source: scrubUrl(leg.url),
-          mirror: mirrorForUrl2(leg.url),
+          mirror: leg.mirror ?? mirrorForUrl2(leg.url),
           chunkIndex: 0,
           start: 0,
           end: leg.byteCount > 0 ? leg.byteCount - 1 : 0,
@@ -2617,13 +3797,14 @@
         if (typeof detail.errorName === "string" && detail.errorName.length > 0) payload.errorName = detail.errorName;
         this.emitDiagnostic("bank.fetch.chunk", payload);
       };
-      const emitSegmentServeHit = () => {
+      const emitSegmentServeHit = (winner) => {
         const served = {
           source: scrubUrl(url),
           mirror: mirrorForUrl2(url),
           durationMs: performanceNow(this.windowObject) - startedAt,
           result: "hit",
-          reason: legs.length > 1 ? "live_hls_segment" : "live_hls_segment_unpaired"
+          reason: legs.length > 1 ? "live_hls_segment" : "live_hls_segment_unpaired",
+          winner
         };
         if (legs.length > 1) served.pairedAddressAvailable = true;
         else if (pairDecision.miss !== void 0) served.pairMiss = pairDecision.miss;
@@ -2644,21 +3825,44 @@
           });
         }
       };
+      const settleHeaders = (info) => {
+        if (headersSettled) return;
+        headersSettled = true;
+        takeover.onHeaders?.(info);
+        resolveHeaders(info);
+      };
       const deliverSegment = (leg, value) => {
-        if (finished) return;
+        if (finished) {
+          if (!cancelled) emitSegmentChunk(leg, "lost_race");
+          return;
+        }
         finished = true;
+        const rebuilt = leg === rebuildLeg;
+        if (rebuilt) settleHeaders(backup.lastHeaders);
         emitSegmentChunk(leg, "fetched");
-        emitSegmentServeHit();
+        emitSegmentServeHit(rebuilt ? "flv_rebuild" : "network");
         for (const other of legs) {
           if (other === leg || other.outcome !== void 0) continue;
           other.cancelledByWinner = true;
           cancelSegmentLeg(other);
         }
+        if (!rebuilt) rebuildLeg?.request.cancel();
         takeover.onBytes?.(value.bytes);
         takeover.onEnd?.();
+        if (!rebuilt && aux !== void 0 && backup !== void 0) {
+          backup.noteNetworkSegment({
+            aux,
+            bytes: value.bytes,
+            headers: { status: value.status, statusText: value.statusText, contentType: value.contentType }
+          });
+        }
       };
       const failSegment = (error) => {
         if (finished) return;
+        if (rebuildLeg !== void 0 && !rebuildLeg.settled) {
+          deferredFailure = error;
+          return;
+        }
         finished = true;
         for (const leg of legs) clearSegmentLegStall(leg);
         emitFailedServe(error);
@@ -2673,6 +3877,7 @@
         if (cancelled || finished) return;
         cancelled = true;
         finished = true;
+        rebuildLeg?.request.cancel();
         for (const leg of legs) {
           clearSegmentLegStall(leg);
           leg.controller.abort();
@@ -2684,25 +3889,44 @@
         }
         if (!headersSettled) {
           headersSettled = true;
-          rejectHeaders(abortError());
+          rejectHeaders(abortError2());
           return;
         }
-        takeover.onError?.(abortError());
+        takeover.onError?.(abortError2());
       };
       if (signal !== void 0) {
         signal.addEventListener("abort", () => takeover.cancel(), { once: true });
       }
       const noteHeaders = (leg, response) => {
-        if (headersSettled) return;
-        headersSettled = true;
-        const info = {
+        settleHeaders({
           status: response.status,
           statusText: response.statusText,
           contentType: headerValue(response.headers, "Content-Type") || void 0
-        };
-        takeover.onHeaders?.(info);
-        resolveHeaders(info);
+        });
       };
+      if (rebuildLeg !== void 0) {
+        rebuildLeg.request.promise.then(
+          (value) => {
+            rebuildLeg.settled = true;
+            rebuildLeg.byteCount = value.bytes.byteLength;
+            deliverSegment(rebuildLeg, value);
+          },
+          (error) => {
+            rebuildLeg.settled = true;
+            if (error instanceof FlvRebuildFailure) {
+              rebuildLeg.byteCount = error.bytes;
+              emitSegmentChunk(rebuildLeg, error.result);
+            } else if (isAbortError2(error)) {
+              emitSegmentChunk(rebuildLeg, cancelled ? "aborted" : "lost_race");
+            } else {
+              throw error;
+            }
+            if (deferredFailure !== void 0) failSegment(deferredFailure);
+          }
+        ).catch((error) => {
+          this.reportLiveError("LIVE_LEG", "直播分片拼接腿执行失败", error);
+        });
+      }
       const settlements = legs.map((leg) => this.runLiveSegmentLeg(leg, { credentials, noteHeaders }).then(
         (value) => ({ kind: "done", leg, value }),
         (error) => ({ kind: "failed", leg, error })
@@ -2732,7 +3956,8 @@
     }) {
       const settlementOf = (leg) => settlements[legs.indexOf(leg)];
       const emitFailure = (settlement) => {
-        const fallback = isAbortError2(settlement.error) ? "aborted" : "network_error";
+        let fallback = isAbortError2(settlement.error) ? "aborted" : "network_error";
+        if (settlement.leg.cancelledByWinner) fallback = "lost_race";
         emitSegmentChunk(settlement.leg, settlement.leg.outcome ?? fallback, {
           httpStatus: settlement.leg.httpStatus,
           errorName: settlement.leg.errorName ?? settlement.error?.name
@@ -2809,9 +4034,12 @@
         failSegment(new BankNetworkError("直播分片双腿取数失败"));
         return;
       }
-      identity.attempts += 1;
-      if (identity.attempts >= maxGateAttempts) identity.verdict = "rejected";
       const survivor = firstSettlement.kind === "done" ? firstSettlement : secondSettlement;
+      const casualty = survivor === firstSettlement ? secondSettlement : firstSettlement;
+      if (!casualty.leg.cancelledByWinner) {
+        identity.attempts += 1;
+        if (identity.attempts >= maxGateAttempts) identity.verdict = "rejected";
+      }
       deliverSegment(survivor.leg, survivor.value);
     }
     async runLiveSegmentLeg(leg, { credentials, noteHeaders }) {
@@ -2844,7 +4072,7 @@
           leg.errorName = error?.name;
           throw new BankNetworkError("直播分片网络取数失败", error);
         }
-        if (leg.controller.signal.aborted) throw abortError();
+        if (leg.controller.signal.aborted) throw abortError2();
         if (response.status < 200 || response.status >= 300) {
           leg.outcome = "http_error";
           leg.httpStatus = response.status;
@@ -2865,7 +4093,7 @@
               leg.byteCount += read.value.byteLength;
               armStall();
             }
-            if (leg.controller.signal.aborted) throw abortError();
+            if (leg.controller.signal.aborted) throw abortError2();
           }
         } catch (error) {
           if (isAbortError2(error) || leg.controller.signal.aborted) throw error;
@@ -2873,7 +4101,7 @@
           leg.errorName = error?.name;
           throw new BankNetworkError("直播分片响应读取失败", error);
         }
-        if (leg.controller.signal.aborted) throw abortError();
+        if (leg.controller.signal.aborted) throw abortError2();
         const bytes = new Uint8Array(leg.byteCount);
         let offset = 0;
         for (const chunk of bodyChunks) {
@@ -2883,6 +4111,7 @@
         return {
           bytes,
           status: response.status,
+          statusText: response.statusText,
           contentType: headerValue(response.headers, "Content-Type") || void 0
         };
       } finally {
@@ -2920,7 +4149,7 @@
           stitcher.noteLegDead(leg.slot, "network_error", { errorName: error?.name });
           return;
         }
-        if (leg.controller.signal.aborted) throw abortError();
+        if (leg.controller.signal.aborted) throw abortError2();
         if (response.status < 200 || response.status >= 300) {
           leg.outcome = "http_error";
           stitcher.noteLegDead(leg.slot, "http_error", { httpStatus: response.status });
@@ -2939,9 +4168,9 @@
               stitcher.noteLegBytes(leg.slot, chunk);
               armStall();
             }
-            if (leg.controller.signal.aborted) throw abortError();
+            if (leg.controller.signal.aborted) throw abortError2();
           }
-          if (leg.controller.signal.aborted) throw abortError();
+          if (leg.controller.signal.aborted) throw abortError2();
           stitcher.noteLegDone(leg.slot);
         } catch (error) {
           if (isAbortError2(error) || leg.controller.signal.aborted) throw error;
@@ -2985,7 +4214,7 @@
       const startedAt = performanceNow(this.windowObject);
       const classification = this.requestClassification(url, headers);
       if (!classification.intercepted) return { intercepted: false };
-      if (signal?.aborted) throw abortError();
+      if (signal?.aborted) throw abortError2();
       const { start, end } = classification.range;
       const resourceKey = bankKey(url);
       this.touchResource(resourceKey);
@@ -2996,7 +4225,7 @@
       state.lastForegroundStart = start;
       state.lastForegroundEnd = end;
       const stored = this.readStoredRange(resourceKey, start, end);
-      if (signal?.aborted) throw abortError();
+      if (signal?.aborted) throw abortError2();
       if (stored?.hit === true) {
         if (!(stored.bytes instanceof ArrayBuffer) || stored.bytes.byteLength !== rangeLength({ start, end })) {
           throw new BankFallbackError("媒体分片存储命中长度不符");
@@ -3058,7 +4287,7 @@
           credentials: state.credentials,
           videoKey: state.videoKey
         })));
-        if (signal?.aborted) throw abortError();
+        if (signal?.aborted) throw abortError2();
         const supplied = this.readStoredRange(resourceKey, start, end);
         if (supplied?.hit !== true) {
           throw new BankNetworkError("媒体分片取数完成后未找到完整分片");
@@ -3161,10 +4390,11 @@
       for (const task of this.queue) {
         task.controller.abort();
         task.settled = true;
-        task.reject(abortError());
+        task.reject(abortError2());
         if (this.inflight.get(task.cacheKey) === task) this.inflight.delete(task.cacheKey);
       }
       this.queue = [];
+      this.closeLiveFlvBackup();
       this.emitDiagnostic("bank.disabled", { reason });
     }
     clearLegStall(leg) {
@@ -3295,7 +4525,7 @@
         if (task.controller.signal.aborted) {
           if (task.abortReason === "superseded") this.emitTaskChunkDiagnostic(task, 0, 0, "superseded");
           task.settled = true;
-          task.reject(abortError());
+          task.reject(abortError2());
           if (this.inflight.get(task.cacheKey) === task) this.inflight.delete(task.cacheKey);
           continue;
         }
@@ -3318,7 +4548,7 @@
           leg.outcome = "network_error";
           throw new BankNetworkError("媒体分片网络取数失败", error);
         }
-        if (leg.controller.signal.aborted) throw abortError();
+        if (leg.controller.signal.aborted) throw abortError2();
         if (response.status < 200 || response.status >= 300) {
           leg.outcome = "http_error";
           throw new BankNetworkError(`媒体分片网络响应状态无效: ${response.status}`);
@@ -3338,15 +4568,15 @@
               leg.byteCount += chunk.byteLength;
               this.armLegStall(task, leg);
             }
-            if (leg.controller.signal.aborted) throw abortError();
+            if (leg.controller.signal.aborted) throw abortError2();
           }
-          if (leg.controller.signal.aborted) throw abortError();
+          if (leg.controller.signal.aborted) throw abortError2();
         } catch (error) {
           if (isAbortError2(error) || leg.controller.signal.aborted) throw error;
           leg.outcome = "network_error";
           throw new BankNetworkError("媒体分片响应读取失败", error);
         }
-        if (leg.controller.signal.aborted) throw abortError();
+        if (leg.controller.signal.aborted) throw abortError2();
         const body = new Uint8Array(leg.byteCount);
         let offset = 0;
         for (const chunk of bodyChunks) {
@@ -3365,7 +4595,7 @@
           leg.outcome = "invalid_response";
           throw new BankFallbackError("媒体分片网络字节长度不匹配");
         }
-        if (leg.controller.signal.aborted) throw abortError();
+        if (leg.controller.signal.aborted) throw abortError2();
         return {
           ...resultRange,
           bytes,
@@ -3377,8 +4607,8 @@
       }
     }
     classifyTaskFailure(task) {
-      if (task.controller.signal.aborted) return abortError();
-      if (task.legs.length === 1 && task.legs[0].outcome === "stalled") return abortError();
+      if (task.controller.signal.aborted) return abortError2();
+      if (task.legs.length === 1 && task.legs[0].outcome === "stalled") return abortError2();
       if (task.legs.every((leg) => leg.outcome === "invalid_response")) {
         return new BankFallbackError("媒体分片所有网络响应均无效");
       }
@@ -3606,10 +4836,11 @@
       }
       for (const task of this.queue) {
         task.settled = true;
-        task.reject(abortError());
+        task.reject(abortError2());
         if (this.inflight.get(task.cacheKey) === task) this.inflight.delete(task.cacheKey);
       }
       this.queue = [];
+      this.closeLiveFlvBackup();
       this.releaseSession();
     }
   };

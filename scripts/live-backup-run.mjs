@@ -1,0 +1,309 @@
+// Browser run of the live FLV backup on one real live room: system Chrome with a fresh temporary
+// profile, muted, headless unless --headed, the extension loaded unpacked from dist/extension.
+//
+//   BILIBILI_E2E_CHROME=<chrome.exe> [BILIBILI_E2E_COMMIT_SHA=<sha>] node scripts/live-backup-run.mjs \
+//     --room <roomId> --minutes <m> [--delay-every <n> --delay-ms <ms>] [--report <file>] [--headed]
+//
+// With --delay-every, every fMP4 media segment whose media sequence number is a multiple of n is
+// held for --delay-ms before its request reaches the network, on every host, so both network legs
+// stall together and only the FLV rebuild leg can deliver it in time.
+//
+// The report covers: playback continuity from a 200 ms in-page sampler of the video element (every
+// stretch of 1 s or more where currentTime stops while the element is not paused), the winner of
+// every served segment and of the delayed ones, the rebuild leg's results, FLV backup states and
+// reconnects, network traffic by kind from CDP Network.dataReceived against the single-stream
+// traffic (one copy of every served segment), a console classification, and provenance.
+// Preflight asserts the Chrome executable, the built extension and that the room is live.
+
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
+import { findAvailablePort, resolveChromeExecutablePath } from './browser-runtime.mjs';
+import { startConsoleCapture, triggerExtensionPositiveControl } from './console-capture.mjs';
+import { installUnpackedExtension } from './install-unpacked-extension.mjs';
+import { readStoredEvents } from './extension-log-pull.mjs';
+import { readProvenance } from './provenance.mjs';
+import { parseBiliPlaylist } from '../src/bank/flv-rebuild.js';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const extensionDirectory = path.join(root, 'dist', 'extension');
+
+function parseArguments(argv) {
+  const options = { headed: false, delayEvery: undefined, delayMs: undefined, report: undefined };
+  for (let index = 0; index < argv.length; index += 1) {
+    const name = argv[index];
+    if (name === '--headed') {
+      options.headed = true;
+      continue;
+    }
+    const value = argv[index + 1];
+    index += 1;
+    if (value === undefined) throw new Error(`${name} needs a value`);
+    if (name === '--room') options.room = value;
+    else if (name === '--minutes') options.minutes = Number(value);
+    else if (name === '--delay-every') options.delayEvery = Number(value);
+    else if (name === '--delay-ms') options.delayMs = Number(value);
+    else if (name === '--report') options.report = value;
+    else throw new Error(`unknown argument ${name}`);
+  }
+  if (!/^\d+$/.test(options.room ?? '')) throw new Error('--room <roomId> is required');
+  if (!(options.minutes > 0)) throw new Error('--minutes <m> is required');
+  if ((options.delayEvery === undefined) !== (options.delayMs === undefined)) {
+    throw new Error('--delay-every and --delay-ms go together');
+  }
+  return options;
+}
+
+// Runs in every frame: silences media and samples the first video element five times a second.
+const pageInit = () => {
+  window.__liveSamples = [];
+  setInterval(() => {
+    for (const element of document.querySelectorAll('video,audio')) {
+      element.muted = true;
+      element.volume = 0;
+    }
+    const video = document.querySelector('video');
+    if (video === null) return;
+    let ahead = 0;
+    for (let index = 0; index < video.buffered.length; index += 1) {
+      if (video.buffered.start(index) <= video.currentTime && video.currentTime <= video.buffered.end(index)) {
+        ahead = video.buffered.end(index) - video.currentTime;
+      }
+    }
+    window.__liveSamples.push([Date.now(), video.currentTime, video.paused, video.readyState, ahead]);
+  }, 200);
+};
+
+function segmentNameOf(url) {
+  const pathname = new URL(url).pathname;
+  return pathname.slice(pathname.lastIndexOf('/') + 1);
+}
+
+function trafficKind(url) {
+  if (!URL.canParse(url)) return 'other';
+  const pathname = new URL(url).pathname;
+  if (pathname.endsWith('.flv')) return 'flv';
+  if (pathname.endsWith('.m4s')) return 'm4s';
+  if (pathname.endsWith('.m3u8')) return 'm3u8';
+  return 'other';
+}
+
+// Stretches of at least minimumMs where currentTime does not move while the element is not paused.
+function playbackStops(samples, minimumMs = 1000) {
+  const stops = [];
+  let stuckSince;
+  for (let index = 1; index < samples.length; index += 1) {
+    const [at, currentTime, paused] = samples[index];
+    const [previousAt, previousTime] = samples[index - 1];
+    const stuck = !paused && currentTime === previousTime;
+    if (stuck && stuckSince === undefined) stuckSince = previousAt;
+    if (!stuck && stuckSince !== undefined) {
+      if (at - stuckSince >= minimumMs) stops.push({ from: stuckSince, to: at, ms: at - stuckSince });
+      stuckSince = undefined;
+    }
+  }
+  const last = samples.at(-1);
+  if (stuckSince !== undefined && last[0] - stuckSince >= minimumMs) {
+    stops.push({ from: stuckSince, to: last[0], ms: last[0] - stuckSince, open: true });
+  }
+  return stops;
+}
+
+function countBy(values) {
+  const counts = {};
+  for (const value of values) counts[value] = (counts[value] ?? 0) + 1;
+  return counts;
+}
+
+// The session record (buildId) and the popup's live summary for one session.
+async function readSessionFacts(context, extensionId, sessionId) {
+  const page = await context.newPage();
+  try {
+    await page.goto(`chrome-extension://${extensionId}/logs.html`, { waitUntil: 'domcontentloaded' });
+    return await page.evaluate((id) => {
+      const send = (message) => new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ version: 1, ...message }, (response) => {
+          if (chrome.runtime.lastError !== undefined) reject(new Error(chrome.runtime.lastError.message));
+          else if (response?.ok !== true) reject(new Error(response?.error?.message ?? 'log read rejected'));
+          else resolve(response);
+        });
+      });
+      return Promise.all([
+        send({ type: 'logs:sessions-page', sessionId: id, limit: 1 }),
+        send({ type: 'logs:live-summary', sessionId: id }),
+      ]).then(([sessions, live]) => ({ session: sessions.sessions[0], facts: live.facts }));
+    }, sessionId);
+  } finally {
+    await page.close();
+  }
+}
+
+const options = parseArguments(process.argv.slice(2));
+const chromeExecutablePath = await resolveChromeExecutablePath();
+await fs.access(path.join(extensionDirectory, 'manifest.json'));
+const roomInfo = await (await fetch(
+  `https://api.live.bilibili.com/room/v1/Room/get_info?room_id=${options.room}`,
+  { headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://live.bilibili.com/' } },
+)).json();
+if (roomInfo?.data?.live_status !== 1) throw new Error(`room ${options.room} is not live (live_status ${roomInfo?.data?.live_status})`);
+const provenance = await readProvenance({ rootDirectory: root, extensionDirectory });
+const cdpPort = await findAvailablePort();
+const profileDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'bilibili-live-backup-'));
+const log = (line) => console.log(`[${new Date().toISOString()}] ${line}`);
+const report = {
+  room: options.room,
+  minutes: options.minutes,
+  injection: options.delayEvery === undefined ? null : { every: options.delayEvery, delayMs: options.delayMs },
+  provenance: {
+    commitSha: process.env.BILIBILI_E2E_COMMIT_SHA ?? provenance.commitSha,
+    buildId: provenance.buildId,
+    profileDirectory,
+    browserVersion: undefined,
+    headless: !options.headed,
+  },
+};
+const injections = [];
+const traffic = { flv: 0, m4s: 0, m3u8: 0, other: 0 };
+const aux = new Map();
+const samples = [];
+let context;
+let consoleCapture;
+try {
+  context = await chromium.launchPersistentContext(profileDirectory, {
+    executablePath: chromeExecutablePath,
+    cdpPort,
+    headless: !options.headed,
+    ignoreDefaultArgs: ['--disable-extensions'],
+    args: ['--mute-audio', '--enable-unsafe-extension-debugging', '--autoplay-policy=no-user-gesture-required'],
+  });
+  report.provenance.browserVersion = context.browser().version();
+  log(`provenance ${JSON.stringify(report.provenance)}`);
+  const extensionId = await installUnpackedExtension(context.browser(), extensionDirectory);
+  consoleCapture = await startConsoleCapture(cdpPort, extensionId);
+  await triggerExtensionPositiveControl(context, extensionId, consoleCapture);
+  await context.addInitScript({ content: `(${pageInit.toString()})()` });
+  if (options.delayEvery !== undefined) {
+    await context.route((url) => {
+      const match = /\/(\d+)\.m4s$/.exec(url.pathname);
+      return match !== null && Number(match[1]) % options.delayEvery === 0;
+    }, async (route) => {
+      const url = route.request().url();
+      const record = { at: Date.now(), name: segmentNameOf(url), host: new URL(url).hostname, delayMs: options.delayMs };
+      injections.push(record);
+      log(`inject hold ${record.name} ${record.host} ${options.delayMs} ms`);
+      await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+      try {
+        await route.continue();
+        record.outcome = 'continued';
+      } catch (error) {
+        // The request was cancelled while held (the rebuild leg won and aborted the network legs).
+        record.outcome = `not_continued: ${error.message.split('\n')[0]}`;
+      }
+      log(`inject release ${record.name} ${record.host} ${record.outcome}`);
+    });
+  }
+  const page = await context.newPage();
+  page.on('response', (response) => {
+    if (!new URL(response.url()).pathname.endsWith('.m3u8') || !response.ok()) return;
+    void response.text().then((text) => {
+      for (const entry of parseBiliPlaylist(text).entries) aux.set(entry.name, entry);
+    }).catch((error) => log(`playlist read failed: ${error.message}`));
+  });
+  const network = await context.newCDPSession(page);
+  const requestKinds = new Map();
+  network.on('Network.requestWillBeSent', ({ requestId, request }) => requestKinds.set(requestId, trafficKind(request.url)));
+  network.on('Network.dataReceived', ({ requestId, dataLength }) => {
+    traffic[requestKinds.get(requestId) ?? 'other'] += dataLength;
+  });
+  await network.send('Network.enable');
+  const startedAt = Date.now();
+  await page.goto(`https://live.bilibili.com/${options.room}`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  const deadline = startedAt + options.minutes * 60000;
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(Math.min(30000, deadline - Date.now()));
+    for (const frame of page.frames()) {
+      const drained = await frame.evaluate(() => window.__liveSamples?.splice(0) ?? []).catch(() => []);
+      samples.push(...drained);
+    }
+    const last = samples.at(-1);
+    log(`progress samples=${samples.length} currentTime=${last?.[1]} readyState=${last?.[3]} ahead=${last?.[4]?.toFixed(2)} `
+      + `traffic=${JSON.stringify(traffic)} injections=${injections.length}`);
+  }
+  samples.sort((left, right) => left[0] - right[0]);
+  await page.close();
+
+  const stored = await readStoredEvents(context, extensionId);
+  const session = stored.events.find((event) => event.code === 'route.session_started'
+    && event.data?.pathname === `/${options.room}`);
+  const events = stored.events.filter((event) => event.sessionId === session?.sessionId);
+  const serves = events.filter((event) => event.code === 'bank.serve' && event.data?.result === 'hit'
+    && event.data?.reason?.startsWith('live_hls_segment'));
+  const chunks = events.filter((event) => event.code === 'bank.fetch.chunk');
+  const rebuildChunks = chunks.filter((event) => event.data?.slot === 2);
+  const backupStates = events.filter((event) => event.code === 'live.flv.backup').map((event) => event.data);
+  const winnerOf = new Map(serves.map((event) => [segmentNameOf(event.data.source), event.data.winner]));
+  const delayedNames = [...new Set(injections.map((record) => record.name))];
+  const rebuildResults = countBy(rebuildChunks.map((event) => (event.data.result === 'lost_race' && event.data.bytes > 0
+    ? 'lost_race_after_build'
+    : event.data.result)));
+  const built = (rebuildResults.fetched ?? 0) + (rebuildResults.lost_race_after_build ?? 0) + (rebuildResults.crc_mismatch ?? 0);
+  const deliveredRebuilds = rebuildChunks.filter((event) => event.data.result === 'fetched');
+  const singleStreamBytes = chunks.filter((event) => event.data?.result === 'fetched'
+    && new URL(event.data.source).pathname.endsWith('.m4s')).reduce((sum, event) => sum + event.data.bytes, 0);
+  const stops = playbackStops(samples);
+  const nearDelayed = stops.filter((stop) => injections.some((record) => record.at <= stop.to + 1000
+    && stop.from <= record.at + options.delayMs + 1000));
+  if (session === undefined) throw new Error(`no extension session recorded for /${options.room}`);
+  const sessionFacts = await readSessionFacts(context, extensionId, session.sessionId);
+  report.session = { sessionId: session.sessionId, buildId: sessionFacts.session?.buildId ?? null };
+  report.playback = {
+    samples: samples.length,
+    firstCurrentTime: samples[0]?.[1],
+    lastCurrentTime: samples.at(-1)?.[1],
+    stopsOfOneSecondOrMore: stops,
+    stopsNearDelayedSegments: nearDelayed,
+  };
+  report.segments = {
+    served: serves.length,
+    winners: countBy(serves.map((event) => event.data.winner)),
+    delayed: delayedNames.map((name) => ({ name, winner: winnerOf.get(name) ?? null })),
+  };
+  report.rebuild = {
+    results: rebuildResults,
+    crcMatchRate: built === 0 ? null : ((rebuildResults.fetched ?? 0) + (rebuildResults.lost_race_after_build ?? 0)) / built,
+    // Every delivered rebuild must carry the playlist's byte length; the CRC32 check is in code.
+    deliveredWithoutPlaylistSize: deliveredRebuilds.filter((event) => {
+      const entry = aux.get(segmentNameOf(event.data.source));
+      return entry === undefined || entry.size !== event.data.bytes;
+    }).map((event) => segmentNameOf(event.data.source)),
+  };
+  report.flvBackup = {
+    states: countBy(backupStates.map((state) => state.state)),
+    reconnects: backupStates.filter((state) => state.state === 'reconnecting').length,
+    reasons: countBy(backupStates.filter((state) => state.reason !== undefined).map((state) => `${state.state}:${state.reason}`)),
+    mirrors: [...new Set(backupStates.map((state) => state.mirror).filter((mirror) => mirror !== undefined))],
+  };
+  report.traffic = {
+    bytes: traffic,
+    singleStreamBytes,
+    totalMediaOverSingleStream: singleStreamBytes === 0 ? null : (traffic.flv + traffic.m4s) / singleStreamBytes,
+    networkLegsOverSingleStream: singleStreamBytes === 0 ? null : traffic.m4s / singleStreamBytes,
+  };
+  report.errors = countBy(events.filter((event) => event.code === 'log.error').map((event) => `${event.data?.code}: ${event.data?.message}`));
+  report.popupFacts = sessionFacts.facts;
+  report.console = consoleCapture.verdict();
+  report.consoleEvents = countBy(consoleCapture.events
+    .filter((event) => event.positiveControl !== true && (event.level === 'error' || event.kind === 'exception'))
+    .map((event) => `${event.source} ${event.kind} ${event.text.slice(0, 160)}`));
+  report.injections = injections;
+} finally {
+  await consoleCapture?.close();
+  await context?.close();
+  await fs.rm(profileDirectory, { recursive: true, force: true });
+}
+
+const output = `${JSON.stringify(report, null, 2)}\n`;
+if (options.report !== undefined) await fs.writeFile(options.report, output, 'utf8');
+console.log(output);

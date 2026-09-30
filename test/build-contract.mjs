@@ -274,6 +274,8 @@ assert.doesNotMatch(`${source}\n${controller}\n${bridge}\n${worker}\n${logs}`, /
 const bankSourceAllowlist = new Set([
   'bank/contract.js',
   'bank/errors.js',
+  'bank/flv-backup.js',
+  'bank/flv-rebuild.js',
   'bank/live.js',
   'bank/logic.js',
   'bank/main.js',
@@ -384,6 +386,7 @@ assert.deepEqual([...DATA_ALLOWLIST.bank].sort(), [
   'routeActive',
   'pairedAddressAvailable',
   'resources',
+  'winner',
 ].sort());
 assert.deepEqual([...DATA_ALLOWLIST.live].sort(), [
   'streamPath',
@@ -394,6 +397,9 @@ assert.deepEqual([...DATA_ALLOWLIST.live].sort(), [
   'groupCount',
   'flvGroupCount',
   'errorName',
+  'state',
+  'mirror',
+  'reason',
 ].sort());
 assert.deepEqual([...DATA_ALLOWLIST.log].sort(), [
   'errorName',
@@ -402,6 +408,7 @@ assert.deepEqual([...DATA_ALLOWLIST.log].sort(), [
 ].sort());
 assert.equal(EVENT_CODES.includes('log.error'), true);
 assert.equal(EVENT_CODES.includes('live.playurl_observed'), true);
+assert.equal(EVENT_CODES.includes('live.flv.backup'), true);
 for (const field of [
   'mediaSourceInstance',
   'sourceBufferInstance',

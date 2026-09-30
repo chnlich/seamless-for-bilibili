@@ -477,7 +477,7 @@ async function readLiveSummary(message, indexedDbObject) {
       const event = cursor.value;
       const eventId = cursor.primaryKey ?? event.eventId;
       if (Number.isInteger(eventId) && eventId > maxEventId) maxEventId = eventId;
-      if (event.code === 'bank.serve' || event.code === 'live.stream.stitch') {
+      if (event.code === 'bank.serve' || event.code === 'live.stream.stitch' || event.code === 'live.flv.backup') {
         sampleCount += 1;
         foldLiveEvent(facts, event);
       }
