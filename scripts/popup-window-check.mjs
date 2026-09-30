@@ -37,6 +37,9 @@
 // 接管行与线路卡镜像行填数都要如实。竞速场景用生产版内嵌 playinfo blob
 // （__NEPTUNE_IS_MY_WAIFU__，serveLiveSegment 配对查找 miss 时的兜底读取路径）
 // 给出双镜像地址，首段身份门整体比对后放开竞速；失败场景两个镜像都答 502。
+// fMP4 分片接管的接管行后接 FLV 后备状态：各房间的地址簿都没有同流名的 FLV 条目，
+// 后备按设计记 unavailable，原因（no_flv_entry 或 no_hls_entry）从该标签页 session
+// 的 live.flv.backup 事件读出核对，面板显示无后备后缀。
 // 断言的期望值一律从 src 的既有导出（liveTakeoverText、cdnLinesView、
 // shortMirrorName）推导，失败场景页面控制台的如实报错充当阳性对照。
 // 第十组是第四组的直播对照组：商店自动更新落在正在拉流的直播页上。直播有自己
@@ -2148,6 +2151,41 @@ async function runLiveTakeoverStatesPack() {
       const tab = await chrome.tabs.create({ url: ${JSON.stringify(url)}, windowId: ${world.windowId}, active: true });
       return tab.id;
     })()`);
+    // 该标签页 session 落库的全部 live.flv.backup 事件（state 与 reason），走生产读取路径。
+    const flvBackupEvents = (tabId) => driver.evaluate(launcher, `(async () => {
+      const send = (message) => new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage(message, (response) => {
+          if (chrome.runtime.lastError !== undefined) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          resolve(response);
+        });
+      });
+      const probe = await chrome.tabs.sendMessage(
+        ${tabId},
+        { version: ${STATUS_MESSAGE_VERSION}, type: 'diagnostics:session-id:get' },
+      );
+      if (probe?.ok !== true || typeof probe.sessionId !== 'string') {
+        throw new Error('live session id probe failed: ' + JSON.stringify(probe));
+      }
+      const snapshot = await send({ version: 1, type: 'logs:max-event-id' });
+      if (snapshot?.ok !== true) throw new Error('log snapshot was rejected');
+      const found = [];
+      let afterSequence = 0;
+      for (;;) {
+        const page = await send({
+          version: 1, type: 'logs:session-events-page', sessionId: probe.sessionId,
+          limit: 250, afterSequence, maxEventId: snapshot.maxEventId,
+        });
+        if (page?.ok !== true) throw new Error('session event page was rejected');
+        for (const event of page.events) {
+          if (event.code === 'live.flv.backup') found.push({ state: event.data.state, reason: event.data.reason });
+        }
+        if (!page.hasMore) return found;
+        afterSequence = page.nextAfterSequence;
+      }
+    })()`);
     const readState = await popupStateReader(driver, popupUrl);
     const popupTarget = await driver.findPageByUrl(popupUrl);
     const popupSession = await driver.attach(popupTarget.targetId);
@@ -2167,21 +2205,28 @@ async function runLiveTakeoverStatesPack() {
 
     // 期望值全部从 src 的既有导出推导：liveTakeoverText 的事实折叠、cdnLinesView
     // 的空态、shortMirrorName 的线路短名。本组检查装配出来的面板，不是文案字面。
+    // FLV 后备状态按各房间的地址簿推出（src/bank/main.js 的 flvBackupUrlsFor）：竞速与
+    // 失败房间的内嵌 playinfo 只有本流目录的 .m3u8 条目、没有同流名的 .flv 条目，首个
+    // .m4s 请求记一次 unavailable/no_flv_entry；单路房间没有地址簿（无内嵌 playinfo，
+    // 也没有 getRoomPlayInfo 流量），记一次 unavailable/no_hls_entry；只拉播放列表的房间
+    // 没有 .m4s 请求，后备从不打开，也没有 live.flv.backup 事件。
     const liveEnabledOn = { liveEnabled: true };
+    const noFlvEntry = [{ state: 'unavailable', reason: 'no_flv_entry' }];
+    const noHlsEntry = [{ state: 'unavailable', reason: 'no_hls_entry' }];
     const raceText = liveTakeoverText(
-      { serveCount: 1, engagement: 'engaged', pairedAddressAvailable: true, pairRejected: false },
+      { serveCount: 1, engagement: 'engaged', pairedAddressAvailable: true, pairRejected: false, flvBackup: 'unavailable' },
       liveEnabledOn,
     );
     const singleText = liveTakeoverText(
-      { serveCount: 1, engagement: 'engaged', pairedAddressAvailable: false, pairRejected: false },
+      { serveCount: 1, engagement: 'engaged', pairedAddressAvailable: false, pairRejected: false, flvBackup: 'unavailable' },
       liveEnabledOn,
     );
     const unhandledText = liveTakeoverText(
-      { serveCount: 1, engagement: undefined, pairedAddressAvailable: false, pairRejected: false },
+      { serveCount: 1, engagement: undefined, pairedAddressAvailable: false, pairRejected: false, flvBackup: undefined },
       liveEnabledOn,
     );
     const failedText = liveTakeoverText(
-      { serveCount: 1, engagement: 'failed', pairedAddressAvailable: false, pairRejected: false },
+      { serveCount: 1, engagement: 'failed', pairedAddressAvailable: false, pairRejected: false, flvBackup: 'unavailable' },
       liveEnabledOn,
     );
     const emptyLinesMessage = cdnLinesView({ sampleCount: 0, summary: { rows: [] } }, undefined, false).message;
@@ -2190,8 +2235,9 @@ async function runLiveTakeoverStatesPack() {
     const countMatches = (text, pattern) => (text.match(pattern) ?? []).length;
 
     // 竞速：内嵌 playinfo 给出双镜像地址簿，首段身份门比过（字节确定性一致）后放开
-    // 竞速。接管行如实报双镜像竞速；线路卡两行镜像如实报正常与连接时间，不出现 NaN。
-    await activateLiveTab(LIVE_RACE_URL);
+    // 竞速。接管行如实报双镜像竞速与无 FLV 后备；线路卡两行镜像如实报正常与连接时间，
+    // 不出现 NaN。
+    const raceTabId = await activateLiveTab(LIVE_RACE_URL);
     await waitForState(
       readState,
       (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
@@ -2205,10 +2251,12 @@ async function runLiveTakeoverStatesPack() {
         : `expected the racing takeover state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
       { timeoutMs: 30000, what: 'popup showing live racing takeover' },
     );
-    markScenario('直播接管竞速中：弹窗接管行如实报双镜像竞速，线路卡两行镜像如实报健康状况与连接时间');
+    assert.deepEqual(await flvBackupEvents(raceTabId), noFlvEntry, '竞速房间的 FLV 后备事件与地址簿不符');
+    markScenario('直播接管竞速中：弹窗接管行如实报双镜像竞速与无 FLV 后备（no_flv_entry），线路卡两行镜像如实报健康状况与连接时间');
 
-    // 单路：无地址簿，只有播放器所名地址，接管行如实报无可用备用线路，线路卡只有一行。
-    await activateLiveTab(LIVE_SINGLE_URL);
+    // 单路：无地址簿，只有播放器所名地址，接管行如实报无可用备用线路与无 FLV 后备，
+    // 线路卡只有一行。
+    const singleTabId = await activateLiveTab(LIVE_SINGLE_URL);
     await waitForState(
       readState,
       (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
@@ -2221,10 +2269,11 @@ async function runLiveTakeoverStatesPack() {
         : `expected the single-leg takeover state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
       { timeoutMs: 30000, what: 'popup showing single-leg live takeover' },
     );
-    markScenario('直播单路接管：弹窗接管行如实报无可用备用线路，线路卡一行镜像如实');
+    assert.deepEqual(await flvBackupEvents(singleTabId), noHlsEntry, '单路房间的 FLV 后备事件与地址簿不符');
+    markScenario('直播单路接管：弹窗接管行如实报无可用备用线路与无 FLV 后备（no_hls_entry），线路卡一行镜像如实');
 
     // 只拉播放列表：接管从未介入（只有 pass 事实），如实报未接管，线路卡如实报还没有数据。
-    await activateLiveTab(LIVE_PLAYLIST_URL);
+    const playlistTabId = await activateLiveTab(LIVE_PLAYLIST_URL);
     await waitForState(
       readState,
       (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
@@ -2235,11 +2284,12 @@ async function runLiveTakeoverStatesPack() {
         : `expected the playlist-only state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
       { timeoutMs: 30000, what: 'popup showing playlist-only live page' },
     );
-    markScenario('直播页面只拉播放列表：弹窗接管行如实报未接管，线路卡如实报还没有数据');
+    assert.deepEqual(await flvBackupEvents(playlistTabId), [], '只拉播放列表的房间不该打开 FLV 后备');
+    markScenario('直播页面只拉播放列表：弹窗接管行如实报未接管，线路卡如实报还没有数据，FLV 后备从未打开');
 
     // 镜像全灭：两条腿的 502 如实落到面板（接管请求失败、线路卡有错误），页面控制台
     // 按既有口径全量如实报错，这份报错同时充当了本组捕获通道的阳性对照。
-    await activateLiveTab(LIVE_FAIL_URL);
+    const failTabId = await activateLiveTab(LIVE_FAIL_URL);
     const failTarget = await driver.findPageByUrl(LIVE_FAIL_URL);
     const failSession = await driver.attach(failTarget.targetId);
     const livePageErrors = [];
@@ -2267,6 +2317,7 @@ async function runLiveTakeoverStatesPack() {
         : `expected the failed takeover state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
       { timeoutMs: 30000, what: 'popup showing failed live takeover' },
     );
+    assert.deepEqual(await flvBackupEvents(failTabId), noFlvEntry, '失败房间的 FLV 后备事件与地址簿不符');
     markScenario('直播镜像全灭接管失败：弹窗接管行如实报接管请求失败，线路卡两行如实报有错误');
     await waitForState(
       () => Promise.resolve(livePageErrors),
