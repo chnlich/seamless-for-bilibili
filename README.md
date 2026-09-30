@@ -8,7 +8,7 @@ Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome �
 
 ## 这是什么、给谁用
 
-海外党在 Bilibili 看视频或直播时经常卡，而自己的测速并不慢，本扩展为这种场景设计。它接管播放器的媒体下载：同一份内容同时从 Bilibili 自带的两个镜像地址下载，先到先用；视频页另向原生播放器申请 120 秒缓冲。视频与直播都支持。视频在 1080p 画质、2 倍速播放下保持流畅：2 倍速时播放器消耗数据的速度加倍，前提 3 的带宽余量按两倍码率计算。
+海外党在 Bilibili 看视频或直播时经常卡，而自己的测速并不慢，本扩展为这种场景设计。它接管播放器的媒体下载：同一份内容同时从 Bilibili 自带的两个镜像地址下载，先到先用；fMP4 直播另从同一直播间的 FLV 线路逐字节拼出同一分片一起竞速；视频页另向原生播放器申请 120 秒缓冲。视频与直播都支持。视频在 1080p 画质、2 倍速播放下保持流畅：2 倍速时播放器消耗数据的速度加倍，前提 3 的带宽余量按两倍码率计算。
 
 它不接管播放：播放、暂停、拖动、倍速、画质、音量与音视频轨的选择仍由你和 Bilibili 播放器决定，扩展不改写、不替换任何 Bilibili 地址。
 
@@ -22,7 +22,7 @@ Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome �
 
 它救「慢节点」，救不了「慢线路」：家庭带宽本身不足时帮不上忙，缓冲持续变浅、最终停顿，这种停顿它无法消除。浏览器解码侧造成的卡顿（缓冲已满仍然卡住，例如硬件解码断供）也不在它的能力范围内。
 
-直播两路实测并不是两台独立的服务器：两个镜像地址解析到同一对 IP 与同一张通配证书（`*.bilivideo.com`），较长时段里 Chrome 还按 HTTP/2 连接合并把两条腿放进同一条连接（实测：Windows、Chrome 154、房间 7734200，两个镜像主机各时段的 HTTP/2 会话承载双方 `:authority` 或落在同一 IP 的两条相邻连接上；152 对竞速分片两腿耗时差在毫秒分辨率下不超过 0.11 毫秒，与用户日常会话里 235 对分片中位 0.2 毫秒一致；视频镜像的同项差约 98 毫秒）。所以直播竞速的作用是同一台服务器上的抢先与字节校验，不是第二台服务器的故障退路。
+直播两路实测并不是两台独立的服务器：两个镜像地址解析到同一对 IP 与同一张通配证书（`*.bilivideo.com`），较长时段里 Chrome 还按 HTTP/2 连接合并把两条腿放进同一条连接（实测：Windows、Chrome 154、房间 7734200，两个镜像主机各时段的 HTTP/2 会话承载双方 `:authority` 或落在同一 IP 的两条相邻连接上；152 对竞速分片两腿耗时差在毫秒分辨率下不超过 0.11 毫秒，与用户日常会话里 235 对分片中位 0.2 毫秒一致；视频镜像的同项差约 98 毫秒）。所以直播两路竞速的作用是同一台服务器上的抢先与字节校验，不是第二台服务器的故障退路。fMP4 直播间的 FLV 后备才是换服务器的退路：同一直播间的 FLV 线路由另一组服务器提供（实测 FLV 走 gotcha07/07b，分片走 gotcha207/207b），扩展从 FLV 帧逐字节拼出同一分片，字节数与 CRC32 都等于播放列表公布的值才交给播放器。超清档 HEVC 的 FLV 地址实测只下发音频，这类流没有这条退路。
 
 有的直播页面把播放器装进独立的 iframe（在赛事房见到的特殊直播形态），扩展的接管脚本只进顶层页面，够不到 iframe 里的播放器：这类房间不接管、不竞速，弹窗按实情显示「未接管」。
 
@@ -32,7 +32,7 @@ Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome �
 
 **视频页**（`/video/*` 与 `/list/watchlater*`，两个路由同一套增强）：接管播放器的媒体分片下载（`fetch` 与 XHR 两条通道）。每个 1 MiB 分片同时向 Bilibili 提供的两个镜像地址请求，先完整到达的存入内存并回应播放器，另一路取消；向前预取（窗口最多 48 个分片、并发上限 4）；分片只存内存（每个标签页上限 512 MiB），离开视频路由或关闭页面即释放，不落盘；每次出现新的播放器或媒体内容时，向原生播放器请求一次 120 秒稳定缓冲。
 
-**直播页**（live.bilibili.com）：接管播放器的 FLV 直播流与 HLS 直播分片（`.m4s` 与 `.ts`，含 init 分片；`.m3u8` 播放列表照常放行给播放器）。地址只配对同一集群的主备两路（如 07 对 07b），不合成、不猜地址：FLV 流先比对两路开头的字节一致，再两路同时下载、先到的字节先交给播放器；HLS 分片先完整比对首个竞速分片对，一致后每个分片两路同时下载、先完成的交给播放器并取消另一路。查无配对或比对不一致时退回播放器原地址单路接管。直播不预取、不设缓冲目标。
+**直播页**（live.bilibili.com）：接管播放器的 FLV 直播流与 HLS 直播分片（`.m4s` 与 `.ts`，含 init 分片；`.m3u8` 播放列表照常放行给播放器）。地址只配对同一集群的主备两路（如 07 对 07b），不合成、不猜地址：FLV 流先比对两路开头的字节一致，再两路同时下载、先到的字节先交给播放器；HLS 分片先完整比对首个竞速分片对，一致后每个分片两路同时下载、先完成的交给播放器并取消另一路。查无配对或比对不一致时退回播放器原地址单路接管。fMP4 分片另有第三路：地址簿里有同流名、同编码的 FLV 地址时，扩展自己开一条 FLV 连接，把最近约 30 秒的帧留在内存；首个经网络到达的分片用来校准，之后每个分片从这些帧逐字节拼出，字节数与 CRC32 都等于播放列表给出的值才参与竞速，对不上的丢弃，从不交给播放器。直播不预取、不设缓冲目标。
 
 两者的下载层失败都会显式报告，不静默退回原生下载。权威行为规格（中文）见下方[下载层](#下载层)；产品约束见 [GOAL.md](GOAL.md)。
 
@@ -41,7 +41,7 @@ Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome �
 按流量套餐衡量再决定装不装：
 
 - **视频竞速浪费**：竞速中落败一路已下载的字节被丢弃。一次实测稳态浪费约 12.6%（每场播放不同；日志页的 CDN 竞速面板显示当场实际浪费率）。
-- **直播流量**：FLV 配对后两路一直同时下载，流量接近单路的两倍；HLS 分片按分片取舍，一次实测（11 分钟直播，668 个分片）竞速浪费约 28%，即总流量约为单路的 1.3 倍（日志页的 CDN 竞速面板显示当场实际浪费率）。
+- **直播流量**：FLV 配对后两路一直同时下载，流量接近单路的两倍；HLS 分片按分片取舍，没有 FLV 后备时一次实测（11 分钟直播，668 个分片）竞速浪费约 28%，即总流量约为单路的 1.3 倍（日志页的 CDN 竞速面板显示当场实际浪费率）。fMP4 直播间有 FLV 后备时，扩展另开一条 FLV 连接，一直下载一路完整的流；这路流通常领先于播放列表发布的分片，多数分片由拼接腿先交付，网络两腿随即取消，实测四个直播间（1.5 到 11 分钟）总流量为单路的 1.03 到 1.15 倍。拼接腿一直赶不上时，网络两腿的竞速花销回到 FLV 那一路之上（按上面的实测约为单路的 2.3 倍）。
 - **提前下载**：120 秒缓冲目标与预取会把还没看到的数据先下载；提前离开视频页，这些字节就白下了。
 - **内存**：每个标签页的媒体缓存最多约 512 MiB。
 - **磁盘**：本地诊断日志只保留最近 3 天（72 小时），超期记录自动删除；实测视频页每打开 1 小时约产生 7 MB，因此占用大致以最近 3 天的用量为上界；卸载扩展即全部删除。
@@ -56,7 +56,7 @@ Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome �
 - **缓冲**：一条缓冲条和「已缓冲 N 秒 / 目标 120 秒」。数值是覆盖当前播放点的连续可播放前向秒数，不是整段视频的缓冲；条到头（120 秒）变绿。
 - **120 秒申请状态**：向播放器申请 120 秒缓存的结果，分为已生效 / 等待生效 / 播放器不支持 / 申请失败四种。视频增强开关关闭时（刷新页面后生效）没有申请，这一行只显示「视频增强开关：已关闭」，缓冲条不再标 120 秒目标，缓冲数字仍是播放器自己的实测缓冲。
 - **下载线路**：本次播放实际用到的每条 CDN 线路（通常两条），每条一个健康词（正常 / 有停滞 / 有错误 / 尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，分别是该线路首字节耗时的 P50 与 P90）。
-- **直播页**同一风格：同样的下载线路卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现直播媒体流）/ 等待直播数据）；直播增强开关关闭时（刷新页面后生效）这一行显示「直播增强开关已关闭」；直播没有缓冲条。
+- **直播页**同一风格：同样的下载线路卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现直播媒体流）/ 等待直播数据）；fMP4 直播间在这一行后面接 FLV 后备状态（FLV 后备校准中 / FLV 后备已接上 / FLV 后备重连中 / FLV 后备已断开 / 无 FLV 后备）；直播增强开关关闭时（刷新页面后生效）这一行显示「直播增强开关已关闭」；直播没有缓冲条。
 - 弹窗只报告它所在窗口的活动标签页，其他窗口的页面不会显示在这里。活动标签页没有内容脚本应答时（不是 Bilibili 页面、页面上没有在播放的内容、或页面早于扩展安装或更新打开：早于安装的页面里没有扩展脚本，更新前的页面里旧脚本已随更新作废），卡片收起，只留一句提示；这类页面刷新一次后，增强才会运行。
 
 ![弹窗特写](store/images/popup-video.png)
@@ -130,8 +130,11 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 
 - 接管受弹窗开关控制：www.bilibili.com 的分片接管只看「视频增强」，live.bilibili.com 的流接管只看「直播增强」，改动在刷新页面后生效。下载层默认让路：页面加载后到内容脚本读到开关值并写入接管标记之前，任何媒体请求都不接管；开关关闭时永远停在让路。让路中的媒体请求由播放器原生下载，不竞速、不缓存，也不产生 `bank.serve`/`bank.fetch.chunk` 记录；页面与开关状态照常进入诊断日志。因此开关开启时，加载最初几毫秒内的个别请求可能由播放器原生下载，这是关闭「先读开关再接管」窗口的代价。
 - 识别为媒体分片且带闭合单段 `Range` 的请求一律由下载层拦截。命中时从内存中的完整分片切片回应，未命中时由扩展用同一 URL 和凭据取回覆盖范围的完整分片，入库后再回应播放器的原始 Range；播放器不会为这类媒体分片另行发起网络请求。非媒体请求、缺少 `Range`、非闭合 `Range`、同步 XHR、直播页的 `.m3u8` 播放列表（`live_hls_playlist`）与其余未识别的直播媒体请求（`live_other_media`），以及下载层自身的 `internal_fallback`/`internal_error` 路径仍按原样放行，并由 `bank.serve` 记录 `pass` 和原因（包括 `range_missing`、`range_not_closed`、`sync_xhr`、`live_hls_playlist`、`live_other_media`）。`bank.serve` 的命中事件记录 `mirror` 与 `durationMs`，`bank.fetch.chunk` 记录 `mirror`。
-- 直播页（`live.bilibili.com`）只做下载接管与双路竞速，不做预拉、不设缓存目标。播放器在直播页发起的 `.flv` 长连接请求由扩展接管：首个此类请求到达时按需同步解析页面内嵌 `playurl_info`，并观察播放器自身的直播 `getRoomPlayInfo` 流量补充地址簿；只配同 cluster 主备两路（如 07 对 07b），跨 cluster 不配，地址不合成、不猜，URL 签名 `expires` 到期按地址失效处理。双腿 reader 并发累积，拼接窗口与前缀门窗口同按 `BANK_CONFIG.chunkBytes`（1 MiB）分窗：共同前缀比对一致才进入竞速交付，先达字节供给，败腿已读字节按既有浪费口径记录；竞速中重叠窗口持续比对，晚到不一致保领先腿、撤销另一腿；门期备腿停滞按单腿死处理，单腿死后余腿独跑、不重连。查无配对或前缀不一致时永久降级为播放器所名 URL 单腿接管（不制造播放故障）。双腿全灭、或签名到期且无新地址时显式失败，不静默退回原生。直播流事件按偏移分窗复用 `bank.fetch.chunk`（`chunkIndex` 为偏移对 `chunkBytes` 下取整，`slot` 标腿）与 `bank.serve`（`result`/`reason` 增 `live_stream`、`live_stream_unpaired`、`live_hls_playlist`、`live_other_media`），拼接裁决记 `live.stream.stitch`（`streamPath` 为去 query 的流路径、`bytesChecked` 为累计比对字节数、`mismatch`、`phase` 为 `prefix` 或 `stream`）。
+- 直播页（`live.bilibili.com`）只做下载接管与竞速（主备两路，fMP4 分片另有 FLV 后备拼接腿），不做预拉、不设缓存目标。播放器在直播页发起的 `.flv` 长连接请求由扩展接管：首个此类请求到达时按需同步解析页面内嵌 `playurl_info`，并观察播放器自身的直播 `getRoomPlayInfo` 流量补充地址簿；只配同 cluster 主备两路（如 07 对 07b），跨 cluster 不配，地址不合成、不猜，URL 签名 `expires` 到期按地址失效处理。双腿 reader 并发累积，拼接窗口与前缀门窗口同按 `BANK_CONFIG.chunkBytes`（1 MiB）分窗：共同前缀比对一致才进入竞速交付，先达字节供给，败腿已读字节按既有浪费口径记录；竞速中重叠窗口持续比对，晚到不一致保领先腿、撤销另一腿；门期备腿停滞按单腿死处理，单腿死后余腿独跑、不重连。查无配对或前缀不一致时永久降级为播放器所名 URL 单腿接管（不制造播放故障）。双腿全灭、或签名到期且无新地址时显式失败，不静默退回原生。直播流事件按偏移分窗复用 `bank.fetch.chunk`（`chunkIndex` 为偏移对 `chunkBytes` 下取整，`slot` 标腿）与 `bank.serve`（`result`/`reason` 增 `live_stream`、`live_stream_unpaired`、`live_hls_playlist`、`live_other_media`），拼接裁决记 `live.stream.stitch`（`streamPath` 为去 query 的流路径、`bytesChecked` 为累计比对字节数、`mismatch`、`phase` 为 `prefix` 或 `stream`）。
 - 直播页 HLS 房间（播放器以 `.m4s`/`.ts` 分片拉流，`.m3u8` 播放列表放行）：每个媒体分片请求由扩展接管并按视频页分片同形双腿竞速，先完整到达且有效的响应交给播放器，败腿取消，其已读字节按既有浪费口径记录。实测分片 URL 自带整段签名 query（与播放列表同一签名）；配对规则与 FLV 同源，只配同一流目录的 `.m3u8` 地址簿条目（内嵌 `playurl_info` 与播放器自身 `getRoomPlayInfo` 流量），配对分片 URL 由该条目的主机加播放器分片的流路径与分片名组成，携带该条目自己的签名 query，不搬播放器的签名、不合成主机；播放器分片不带 query 的流同样不带。竞速只在两路字节确认一致后开放：流身份门取该流首个竞速分片对，双腿收齐后整段比对（连长度一起），一致记 `live.stream.stitch`（`phase` 为 `segment`、`mismatch` 为 false）并开放竞速；不一致永久降级为播放器所名地址单腿。门期一腿死亡（含 10 秒无字节停滞）时存活腿供数当次分片，门期记一次无法完整比对的尝试，连续 `maxChunkAttempts`（3）次后视为无法验证，永久降级单腿。查无配对、条目过期或身份已降级时分片单腿接管播放器所名地址。双腿全灭、或签名到期且无新地址时显式失败（`live_hls_segment_failed`），不静默退回原生。分片事件复用 `bank.fetch.chunk`（`chunkIndex` 为 0、`slot` 标腿、`ttfbMs` 记首字节）与 `bank.serve`（命中 `result`/`reason` 增 `live_hls_segment` 与 `live_hls_segment_unpaired`）。
+- 直播页 fMP4 分片的 FLV 后备（第三腿，`slot` 2）：播放器拉 fMP4 HLS（`.m4s`）时，扩展在 `fetch` 与 XHR 两条通道上读取播放器收到的 `.m3u8` 播放列表（读克隆体或原生响应，不改播放器拿到的内容），按分片名记下 `#EXTINF` 时长与 `#EXT-BILI-AUX:<首帧显示时间毫秒>|<K 或 N>|<字节数>|<CRC32>`（均为十六进制，CRC32 不补前导零；K 表示分片以关键帧开头）。地址簿里有与播放器 `.m3u8` 条目同流名（`live_…_<档位>`）、同 `codec_name` 的 `.flv` 条目时，扩展在该流的首个 `.m4s` 请求到达时自己开一条到该地址的 FLV 连接（地址只取 Bilibili 自带的条目，不合成、不猜主机；签名到期的地址跳过，重连时在条目的地址间轮换），解析出的帧只留在内存里约 30 秒的滚动窗口（`LIVE_FLV_BACKUP_CONFIG.windowMs`），连接的字节从不直接交给播放器。视频只收 AVC 与 HEVC 的 NALU 包，音频只收 AAC；流头标志不含视频（实测超清档 HEVC 的 FLV 地址只下发音频）记 `unavailable`/`flv_no_video` 并关闭，其余编码记 `flv_codec_unsupported` 并报错。连续 10 秒无字节按停滞断开；断开后间隔 1 秒重连，连续最多 3 次，一条连接连续供帧满一个窗口后计数清零；用尽记 `given_up` 并全量报错，此后该流的分片只走网络腿。查无同名同编码的 FLV 地址时不开连接，每条流每个原因记一次 `unavailable`（`no_hls_entry`、`no_flv_entry`、`address_expired`），下一个分片再查。连接在流目录改变（播放器换档或改拉 FLV 流）、页面离开时关闭；直播增强关闭时下载层让路，不开连接。
+- 校准与拼接规则：首个经网络送达、带 AUX 值的分片用来校准：它的样本与窗口里的 FLV 帧逐字节对齐，得出拼装模板（traf 次序、轨道号、tfhd/tfdt/trun 的版本与标志、首样本标志）、两轨的时间锚点与栅格、mfhd 序号；校准前没有拼接腿。经网络送达的 init 分片（`EXT-X-MAP` 所名）字节与上一个不同、或 FLV 重连（FLV 时间戳按连接重新起算）后重新校准；换名而字节不变不算更换（实测有的直播间每分钟换一次 init 分片名，伴随 `EXT-X-DISCONTINUITY`，分片时间线与 mfhd 序号都不断）。连接供帧满一个窗口后仍连续 10 个分片校准不上，或分片结构不受支持，记 `unavailable`/`calibration_<原因>` 并关闭；只含一条轨的分片（实测有 0.02 秒、只有音频的分片）定不出两轨模板，只算一次校准不上（`track_missing`）。拼装规则从真实直播间实测得出：关键帧或解码时间距分片首帧满 1000 毫秒的帧开新分片，距当前小片段首帧满 250 毫秒的帧开新小片段（一对 moof+mdat）；音频帧按精确时间归入 [本小片段首个视频帧, 下一小片段首个视频帧)，同一时刻按 FLV 标签顺序，先到的归前一个；FLV 只有毫秒时间戳，fMP4 的原值按「锚点 + 栅格 × round(毫秒差 × 时基 / 栅格)」还原（视频 90 kHz、音频 48 kHz；FLV 的毫秒时间戳与 CTS 是原值截断到毫秒；视频栅格取校准分片各样本时长、CTS 与 1500（半帧，1/60 秒）的最大公约数，因为有的 30 fps 转码档按 3000 格走时却偶尔走 1500 的半帧，校准分片未必碰到；音频栅格取 48 或 AAC 帧长 1024 中能复现校准分片各小片段起点的那个）。离线核对脚本 `scripts/live-rebuild-offline.mjs` 用扩展自己的拼接器重放「FLV 字节 + 同时拉取的播放列表与分片」录制：设计所依据的录制 40 个分片全部逐字节一致（39 个预测加校准分片的自拼），另外 13 份录制（11 个直播间，含转码档与原画档、HEVC、60 fps、带半帧的 3000 格栅格、音频轨在前、关键帧前 0.17 秒短分片）900 个预测分片 896 个一致；4 个未交付：一个 0.95 秒分片 CRC 不符、紧随其后只有音频的 0.02 秒分片没有视频帧、两个分片的录制在终点帧前结束。前两个夹着该直播间每分钟一次的 `EXT-X-DISCONTINUITY`：之前的分片提前截断（帧的选取与规则一致，但末帧时长只剩 900 格，末尾一帧音频移进之后只有音频的分片），这两类分片不拼，由网络腿交付。另一份超清档 HEVC 录制的 FLV 地址只有音频，按 `flv_no_video` 不拼。
+- 拼接腿：已校准且播放列表给出该分片 AUX 值时，每个分片请求在网络两腿之外另起拼接腿。它等窗口里出现下一分片的首帧（以及越过它的音频），最多等 `stallMs`（10 秒），按规则拼出分片；字节数与 CRC32 都等于 AUX 值才交付，对不上的丢弃并记 `crc_mismatch`（`bytes` 为拼出的长度），从不交给播放器；窗口里没有该分片的帧或等待超时记 `frames_missing`。先完整到手且有效的一路胜出：拼接腿胜出时网络腿取消记 `lost_race`，响应头沿用最近一个网络分片的状态与 `Content-Type`；网络腿胜出时拼接腿取消记 `lost_race`（`bytes` 为 0 表示尚未拼出，大于 0 表示已核对但晚到）。网络两腿都失败而拼接腿还在等时，分片先不失败，等拼接腿的结果。被拼接腿胜出取消的门期腿不计门期尝试。拼接腿事件复用 `bank.fetch.chunk`（`slot` 2、`mirror` 为 FLV 主机、`source` 为播放器分片地址），HLS 分片的 `bank.serve` 命中带 `winner`（`network` 或 `flv_rebuild`）；FLV 后备状态记 `live.flv.backup`（`state` 为 `connected`/`calibrated`/`reconnecting`/`given_up`/`unavailable`，`streamPath` 为去 query 的 FLV 路径，没有 FLV 地址时为 HLS 流目录；`mirror` 为 FLV 主机；`reason`）。
 - 预取窗口按媒体资源分别锚定在仍未供数完成的播放器请求所需的最小块号；没有在途请求时使用最近一次播放器请求的起始块。窗口最多覆盖 48 个块，并发上限 4，只选择窗口内尚未入库且连续失败未达 3 次的前四个块。失败块下一轮自然重新进入窗口，达到上限后向需要它的播放器请求报告错误。
 - 每个块的扩展取数按 `raceLegs=2` 同时向 Bilibili 返回的主/备媒体地址发起双腿竞速，first-finish 的完整响应入库并返回播放器，败选腿已读字节是竞速固有成本；配对地址簿来自网络 playurl 响应，未配对时会按需读取页面内联 `window.__playinfo__`。
 - 前台取数失败和下载层无法供数的异常会向 `console.error` 报告；预取失败由下一轮重试吸收并保留 `bank.fetch.chunk`，不输出 console；正常的停滞取消也不输出 console。
@@ -142,7 +145,7 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 
 - popup 面向普通观众，只讲三件事：缓冲、下载线路、连接时间。视频页显示一条缓冲条和「已缓冲 N 秒 / 目标 120 秒」，数值是覆盖当前播放点的连续可播放前向秒数（`src/extension/popup.js` 的 `renderVideoPanel`、`src/extension/popup-view.js`、`src/extension/readouts.js`）；下方一行报告向播放器申请 120 秒缓存的结果：已生效、等待生效、播放器不支持，或申请失败（`src/ui/panel.js`、`src/vod/controller.js` 的 `updateStatus`）。视频增强开关关闭时不存在缓存申请，申请措辞与 120 秒目标后缀收起，这一行只显示 视频增强开关：已关闭，缓冲数字仍照常显示播放器自己的实测缓冲（`src/extension/popup-view.js` 的 `SWITCH_OFF_TEXT`）。
 - popup 的「下载线路」卡片按镜像列出本次播放实际用到的每条 CDN 线路（通常两条），每条给一个健康状况词（正常、有停滞、有错误、尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，来自 `logs:cdn-summary` 的每镜像 TTFB P50/P90）（`src/extension/popup-view.js`、`src/diagnostics/cdn.js`、`src/diagnostics/worker.js`）。线路名是镜像主机名的可读短名。
-- 直播页（live.bilibili.com）同一风格：同样的「下载线路」卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现直播媒体流）/ 等待直播数据），由后台按 session 索引折叠 `bank.serve` 事件得出；直播增强开关关闭时让路规则不产生 `bank.serve`，这个 session 没有任何接管事实，接管行显示 直播增强开关已关闭 而不是空等数据；直播不设缓冲目标，popup 不显示缓冲条（`src/extension/popup-live.js`、`src/extension/popup-view.js`）。popup 的路由判定优先使用内容侧自报的 `routeKind`，因为 popup 没有 `tabs` 权限、读不到标签页地址（`src/diagnostics/client.js` 的 `getStatus`、`src/extension/readouts.js`）。
+- 直播页（live.bilibili.com）同一风格：同样的「下载线路」卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现直播媒体流）/ 等待直播数据），由后台按 session 索引折叠 `bank.serve` 事件得出；fMP4 直播间的接管行后接 FLV 后备状态，取该 session 最近一条 `live.flv.backup` 的 `state`，播放器改拉 FLV 流的那一轮接管不带后备状态；直播增强开关关闭时让路规则不产生 `bank.serve`，这个 session 没有任何接管事实，接管行显示 直播增强开关已关闭 而不是空等数据；直播不设缓冲目标，popup 不显示缓冲条（`src/extension/popup-live.js`、`src/extension/popup-view.js`）。popup 的路由判定优先使用内容侧自报的 `routeKind`，因为 popup 没有 `tabs` 权限、读不到标签页地址（`src/diagnostics/client.js` 的 `getStatus`、`src/extension/readouts.js`）。
 - popup 面板只读，不影响播放、不上传；内容侧错误只在存在时以一句人话显示。面板只报告它所附着窗口的活动标签页（`chrome.windows.getCurrent()` 定位窗口，在该窗口内取活动标签页），不向其余标签页询问。活动标签页没有内容脚本可答时只显示一句提示：弹窗没有 `tabs` 权限、看不到标签页地址（按 url 过滤也恒为空），分不出「非 Bilibili 页面」与「扩展安装或更新前就已打开的 Bilibili 页面」，两种情况下这句话都成立并给出刷新路径。扩展更新作废的只是旧上下文与日志写库（写库失败继续按既有口径全量报到控制台）：旧页面的下载层跑在页面主世界、不受影响，实测更新后旧页面照常供流、播放不断：视频已入库分片零新增网络请求，直播两条镜像线路竞速不中断、拉流零退回原生通道（`scripts/popup-window-check.mjs` 的两个更新组覆盖）；此时弹窗同样联系不上旧脚本，同一句提示照旧成立，刷新一次后新版本的增强接入（`src/extension/popup.js`、`src/extension/popup-tabs.js`、`src/extension/popup-view.js`）。popup 底部保留「打开开发日志」入口。日志页开头写明保留期限：日志只保留最近 3 天（72 小时），更早的记录自动删除。
 - 所有 `media.*` 事件都附带同一帧周期聚合的 `frameTiming`，包括 presentedTotal、maxFrameGapMs、processingMs、displayLead、mediaStep 与 append 相关指标（`src/diagnostics/media.js`、`src/diagnostics/privacy.js` 的 `safeFrameTiming`）。这些细节只进开发日志；popup 不再展示 readyState、networkState、轨道 ranges、库存计数或持久化状态等开发读数。
 - 下载层库存只列出本次播放实际参与的分轨（`resourceState` 或 `chunks` 中出现过的资源），不展示地址簿里的所有表示（`src/bank/inventory.js` 的资源并集过滤）；它作为 `bank.inventory` 诊断事件进入开发日志。
@@ -182,6 +185,8 @@ npm audit --omit=dev --json
 浏览器脚本明确使用系统 Chrome（可执行文件可用 `BILIBILI_E2E_CHROME` 环境变量指定，默认取系统安装路径），不回退到 Playwright Chromium。`npm run test:e2e` 使用临时 profile；真实播放验收使用 `npm run verify:browser -- --profile <专用登录 profile> --bv <BV号>`。验证输出目录包含 `events.json`、`console.json`、`network.json` 和 `summary.json`；`summary.json` 会记录 commit sha、buildId，以及 `pass`、`fail` 或 `INCONCLUSIVE` 和失败项。
 
 弹窗与日志页的窗口级检查是 `npm run test:popup-window`：直接启动系统 Chrome（`BILIBILI_E2E_CHROME` 指定可执行文件，未设置即报错），headless、`--mute-audio`、每组场景用新建的临时 profile；它面向 Windows 实机运行，不进 `npm test`。
+
+直播 FLV 后备的实机检查是 `node scripts/live-backup-run.mjs --room <房间号> --minutes <分钟>`：系统 Chrome、临时 profile、headless、`--mute-audio`、关闭硬件解码（与日常 Chrome 一致，播放器因此选 AVC 流）；加 `--delay-every <n> --delay-ms <毫秒>` 时把媒体序号为 n 的倍数的 `.m4s` 请求在所有主机上扣住，只有拼接腿能按时交付。报告给出播放连续性、各分片的胜出腿、拼接腿结果与 CRC 一致率、FLV 后备状态与重连、按类别计的流量与单路流量之比、控制台分类和来源信息；同样面向 Windows 实机运行，不进 `npm test`。拼接规则的离线核对与录制用 `scripts/live-rebuild-offline.mjs`，录制是第三方直播内容，放在仓库外，核对完即删。
 
 Playwright 启动的 Chrome 无法产生后台标签页：同窗口切换标签页、以及用 `Browser.setWindowBounds` 最小化窗口（已确认生效），页面都仍报 `visibilityState: 'visible'`，页面自身也收不到 `visibilitychange`；去掉 Playwright 默认传入的 `--disable-backgrounding-occluded-windows`、`--disable-renderer-backgrounding`、`--disable-background-timer-throttling` 三个参数亦无效。需要验证后台相关行为时，自行启动 Chrome 并用原生 CDP 驱动，通过 DevTools HTTP 端点的 `/json/activate/<targetId>` 切换标签页，并在每个阶段断言 `document.hidden`。
 

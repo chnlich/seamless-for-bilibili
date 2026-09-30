@@ -514,7 +514,7 @@ assert.match(readme, /\/list\/watchlater\*/);
 assert.match(source, /\/list\/watchlater/);
 assert.match(goal, /视频[\s\S]*120 秒/);
 assert.match(goal, /视频与直播尽量少卡/);
-assert.match(goal, /直播页（live\.bilibili\.com）只做下载接管与双路竞速/);
+assert.match(goal, /直播页（live\.bilibili\.com）只做下载接管与竞速/);
 assert.match(goal, /live\.bilibili\.com/);
 assert.match(goal, /用户[\s\S]*控制/);
 assert.match(goal, /完整结构化日志/);
