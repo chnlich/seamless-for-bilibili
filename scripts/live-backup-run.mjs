@@ -185,6 +185,8 @@ const injections = [];
 let injectFrom = Number.POSITIVE_INFINITY;
 const traffic = { flv: 0, m4s: 0, m3u8: 0, other: 0 };
 const aux = new Map();
+// Every change of the playlist's EXT-X-MAP name; each one resets the backup's calibration.
+const mapChanges = [];
 const samples = [];
 let context;
 let consoleCapture;
@@ -231,7 +233,11 @@ try {
   page.on('response', (response) => {
     if (!new URL(response.url()).pathname.endsWith('.m3u8') || !response.ok()) return;
     void response.text().then((text) => {
-      for (const entry of parseBiliPlaylist(text).entries) aux.set(entry.name, entry);
+      const playlist = parseBiliPlaylist(text);
+      if (playlist.mapUri !== undefined && playlist.mapUri !== mapChanges.at(-1)?.mapUri) {
+        mapChanges.push({ wallTime: new Date().toISOString(), mapUri: playlist.mapUri });
+      }
+      for (const entry of playlist.entries) aux.set(entry.name, entry);
     }).catch((error) => log(`playlist read failed: ${error.message}`));
   });
   const network = await context.newCDPSession(page);
@@ -291,7 +297,8 @@ try {
     && stop.from <= record.at + options.delayMs + 1000));
   const notable = new Set(['live.flv.backup', 'log.error', 'media.error', 'media.emptied', 'media.waiting', 'live.stream.stitch']);
   report.timeline = events.filter((event) => notable.has(event.code)
-    || (event.code === 'bank.serve' && event.data?.result === 'failed'))
+    || (event.code === 'bank.serve' && event.data?.result === 'failed')
+    || (event.code === 'bank.fetch.chunk' && event.data?.slot === 2 && ['frames_missing', 'crc_mismatch'].includes(event.data.result)))
     .map((event) => ({ wallTime: event.wallTime, code: event.code, data: event.data })).slice(0, 200);
   if (session === undefined) {
     const pathnames = stored.events.filter((event) => event.code === 'route.session_started').map((event) => event.data?.pathname);
@@ -326,6 +333,7 @@ try {
   };
   report.flvBackup = {
     timeline: backupStates.slice(0, 40),
+    playlistMapChanges: mapChanges,
     states: countBy(backupStates.map((state) => state.state)),
     reconnects: backupStates.filter((state) => state.state === 'reconnecting').length,
     reasons: countBy(backupStates.filter((state) => state.reason !== undefined).map((state) => `${state.state}:${state.reason}`)),
