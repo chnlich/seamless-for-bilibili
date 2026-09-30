@@ -6,7 +6,9 @@
 //
 // With --delay-every, every fMP4 media segment whose media sequence number is a multiple of n is
 // held for --delay-ms before its request reaches the network, on every host, so both network legs
-// stall together and only the FLV rebuild leg can deliver it in time.
+// stall together and only the FLV rebuild leg can deliver it in time. Holding starts
+// --delay-after-ms (default 20000) after page load: the first network segment calibrates the
+// rebuild, and before calibration there is no rebuild leg to race.
 //
 // Chrome runs with hardware video decode off, as the daily Chrome does; without hardware decode
 // Chrome cannot play HEVC, so the room's player picks its AVC stream, as it does there.
@@ -34,7 +36,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extensionDirectory = path.join(root, 'dist', 'extension');
 
 function parseArguments(argv) {
-  const options = { headed: false, delayEvery: undefined, delayMs: undefined, report: undefined };
+  const options = { headed: false, delayEvery: undefined, delayMs: undefined, delayAfterMs: 20000, report: undefined };
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index];
     if (name === '--headed') {
@@ -48,6 +50,7 @@ function parseArguments(argv) {
     else if (name === '--minutes') options.minutes = Number(value);
     else if (name === '--delay-every') options.delayEvery = Number(value);
     else if (name === '--delay-ms') options.delayMs = Number(value);
+    else if (name === '--delay-after-ms') options.delayAfterMs = Number(value);
     else if (name === '--report') options.report = value;
     else throw new Error(`unknown argument ${name}`);
   }
@@ -93,25 +96,37 @@ function trafficKind(url) {
   return 'other';
 }
 
-// Stretches of at least minimumMs where currentTime does not move while the element is not paused.
-function playbackStops(samples, minimumMs = 1000) {
-  const stops = [];
+// Playback discontinuities: stretches of at least minimumMs where currentTime does not move while
+// the element is not paused (stop), where no video element was sampled at all (gap), and every
+// backwards jump of currentTime, which means the player rebuilt its element or source (restart).
+function playbackDiscontinuities(samples, minimumMs = 1000) {
+  const found = [];
   let stuckSince;
   for (let index = 1; index < samples.length; index += 1) {
     const [at, currentTime, paused] = samples[index];
     const [previousAt, previousTime] = samples[index - 1];
+    if (at - previousAt >= minimumMs) found.push({ kind: 'gap', from: previousAt, to: at, ms: at - previousAt });
+    if (currentTime < previousTime) found.push({ kind: 'restart', from: previousAt, to: at, fromTime: previousTime, toTime: currentTime });
     const stuck = !paused && currentTime === previousTime;
     if (stuck && stuckSince === undefined) stuckSince = previousAt;
     if (!stuck && stuckSince !== undefined) {
-      if (at - stuckSince >= minimumMs) stops.push({ from: stuckSince, to: at, ms: at - stuckSince });
+      if (at - stuckSince >= minimumMs) found.push({ kind: 'stop', from: stuckSince, to: at, ms: at - stuckSince });
       stuckSince = undefined;
     }
   }
   const last = samples.at(-1);
   if (stuckSince !== undefined && last[0] - stuckSince >= minimumMs) {
-    stops.push({ from: stuckSince, to: last[0], ms: last[0] - stuckSince, open: true });
+    found.push({ kind: 'stop', from: stuckSince, to: last[0], ms: last[0] - stuckSince, open: true });
   }
-  return stops;
+  return found;
+}
+
+async function roomLiveStatus(room) {
+  const response = await fetch(
+    `https://api.live.bilibili.com/room/v1/Room/get_info?room_id=${room}`,
+    { headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://live.bilibili.com/' } },
+  );
+  return (await response.json()).data;
 }
 
 function countBy(values) {
@@ -146,11 +161,8 @@ async function readSessionFacts(context, extensionId, sessionId) {
 const options = parseArguments(process.argv.slice(2));
 const chromeExecutablePath = await resolveChromeExecutablePath();
 await fs.access(path.join(extensionDirectory, 'manifest.json'));
-const roomInfo = await (await fetch(
-  `https://api.live.bilibili.com/room/v1/Room/get_info?room_id=${options.room}`,
-  { headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://live.bilibili.com/' } },
-)).json();
-if (roomInfo?.data?.live_status !== 1) throw new Error(`room ${options.room} is not live (live_status ${roomInfo?.data?.live_status})`);
+const roomInfo = { data: await roomLiveStatus(options.room) };
+if (roomInfo.data?.live_status !== 1) throw new Error(`room ${options.room} is not live (live_status ${roomInfo.data?.live_status})`);
 const provenance = await readProvenance({ rootDirectory: root, extensionDirectory });
 const cdpPort = await findAvailablePort();
 const profileDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'bilibili-live-backup-'));
@@ -158,7 +170,9 @@ const log = (line) => console.log(`[${new Date().toISOString()}] ${line}`);
 const report = {
   room: options.room,
   minutes: options.minutes,
-  injection: options.delayEvery === undefined ? null : { every: options.delayEvery, delayMs: options.delayMs },
+  injection: options.delayEvery === undefined
+    ? null
+    : { every: options.delayEvery, delayMs: options.delayMs, afterMs: options.delayAfterMs },
   provenance: {
     commitSha: process.env.BILIBILI_E2E_COMMIT_SHA ?? provenance.commitSha,
     buildId: provenance.buildId,
@@ -168,6 +182,7 @@ const report = {
   },
 };
 const injections = [];
+let injectFrom = Number.POSITIVE_INFINITY;
 const traffic = { flv: 0, m4s: 0, m3u8: 0, other: 0 };
 const aux = new Map();
 const samples = [];
@@ -195,7 +210,7 @@ try {
   if (options.delayEvery !== undefined) {
     await context.route((url) => {
       const match = /\/(\d+)\.m4s$/.exec(url.pathname);
-      return match !== null && Number(match[1]) % options.delayEvery === 0;
+      return Date.now() >= injectFrom && match !== null && Number(match[1]) % options.delayEvery === 0;
     }, async (route) => {
       const url = route.request().url();
       const record = { at: Date.now(), name: segmentNameOf(url), host: new URL(url).hostname, delayMs: options.delayMs };
@@ -227,6 +242,7 @@ try {
   });
   await network.send('Network.enable');
   const startedAt = Date.now();
+  injectFrom = startedAt + options.delayAfterMs;
   await page.goto(`https://live.bilibili.com/${options.room}`, { waitUntil: 'domcontentloaded', timeout: 60000 });
   const deadline = startedAt + options.minutes * 60000;
   while (Date.now() < deadline) {
@@ -241,6 +257,8 @@ try {
   }
   samples.sort((left, right) => left[0] - right[0]);
   await page.close();
+  // 1 = live; anything else means the broadcast ended during the run (2 = rotation, 0 = offline).
+  report.liveStatusAtEnd = (await roomLiveStatus(options.room)).live_status;
 
   const stored = await readStoredEvents(context, extensionId);
   // The page may carry the room's short id and host the player in a frame of its own
@@ -268,9 +286,13 @@ try {
   const deliveredRebuilds = rebuildChunks.filter((event) => event.data.result === 'fetched');
   const singleStreamBytes = chunks.filter((event) => event.data?.result === 'fetched'
     && new URL(event.data.source).pathname.endsWith('.m4s')).reduce((sum, event) => sum + event.data.bytes, 0);
-  const stops = playbackStops(samples);
+  const stops = playbackDiscontinuities(samples);
   const nearDelayed = stops.filter((stop) => injections.some((record) => record.at <= stop.to + 1000
     && stop.from <= record.at + options.delayMs + 1000));
+  const notable = new Set(['live.flv.backup', 'log.error', 'media.error', 'media.emptied', 'media.waiting', 'live.stream.stitch']);
+  report.timeline = events.filter((event) => notable.has(event.code)
+    || (event.code === 'bank.serve' && event.data?.result === 'failed'))
+    .map((event) => ({ wallTime: event.wallTime, code: event.code, data: event.data })).slice(0, 200);
   if (session === undefined) {
     const pathnames = stored.events.filter((event) => event.code === 'route.session_started').map((event) => event.data?.pathname);
     throw new Error(`no extension session recorded for room ${options.room}; sessions: ${JSON.stringify(pathnames)}`);
@@ -281,8 +303,8 @@ try {
     samples: samples.length,
     firstCurrentTime: samples[0]?.[1],
     lastCurrentTime: samples.at(-1)?.[1],
-    stopsOfOneSecondOrMore: stops,
-    stopsNearDelayedSegments: nearDelayed,
+    discontinuities: stops,
+    discontinuitiesNearDelayedSegments: nearDelayed,
   };
   report.segments = {
     streams: [...new Set(serves.map((event) => {
