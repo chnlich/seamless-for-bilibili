@@ -7,14 +7,17 @@
 // - 分片内解码时间距当前小片段（一对 moof+mdat）首帧满 250 毫秒的帧开新小片段。
 // - 音频帧归入时间落在 [本小片段首个视频帧, 下一小片段首个视频帧) 的小片段；
 //   时间相同则按 FLV 标签顺序，排在该视频帧之前到达的归前一个。
-// - FLV 时间戳只有毫秒，fMP4 用 90 kHz（视频）与 48 kHz（音频）的原值。校准分片
-//   给出锚点与栅格：帧的原值 = 锚点 + 栅格 × round(毫秒差 × 时基 / 栅格)。
+// - FLV 时间戳与 CTS 只有毫秒（原值截断到毫秒），fMP4 用 90 kHz（视频）与 48 kHz（音频）
+//   的原值。校准分片给出锚点与栅格：帧的原值 = 锚点 + 栅格 × round(毫秒差 × 时基 / 栅格)。
 //   毫秒派生的流栅格即每毫秒一格；按帧率或 AAC 帧长（1024）走格的流落在各自栅格上。
 
 export const SEGMENT_TICKS = 90000;
 export const FRAGMENT_TICKS = 22500;
 const VIDEO_TICKS_PER_MS = 90;
 const AUDIO_TICKS_PER_MS = 48;
+// 1/60 秒（90 kHz）。有的 30 fps 转码档偶尔走半帧（时长与 CTS 为 1500 的奇数倍），校准分片
+// 未必碰到；视频栅格取与 1500 的公约数，FLV 毫秒截断误差（小于 2 毫秒）仍远小于半格。
+const HALF_FRAME_TICKS = 1500;
 
 const TFHD_BASE_DATA_OFFSET = 0x1;
 const TFHD_SAMPLE_DESCRIPTION_INDEX = 0x2;
@@ -433,7 +436,7 @@ export function calibrateFromSegment(segmentBytes, frameWindow) {
   }
   videoTemplate.keyFlags = keyFlags;
 
-  let grid = 0;
+  let grid = HALF_FRAME_TICKS;
   for (const sample of videoSamples) grid = gcd(gcd(grid, sample.duration), sample.cts);
   const anchor = frameWindow.video[videoStart];
   const timing = {

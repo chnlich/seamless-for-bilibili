@@ -23,6 +23,7 @@ import path from 'node:path';
 import {
   FlvSegmentRebuilder,
   FlvTagReader,
+  FlvUnsupportedError,
   parseBiliPlaylist,
   rebuildSegment,
   segmentStartState,
@@ -55,7 +56,15 @@ async function checkRecording(directory) {
   const segments = names.filter((name) => name.endsWith('.m4s') && aux.has(name))
     .sort((left, right) => aux.get(left).msn - aux.get(right).msn);
   const rebuilder = new FlvSegmentRebuilder({ windowMs: Number.POSITIVE_INFINITY });
-  rebuilder.appendFrames(await readFlvFrames(path.join(directory, 'stream.flv')));
+  try {
+    rebuilder.appendFrames(await readFlvFrames(path.join(directory, 'stream.flv')));
+  } catch (error) {
+    if (!(error instanceof FlvUnsupportedError)) throw error;
+    // The extension records this stream as unavailable; there is nothing to rebuild from.
+    const summary = { recording: directory, flvUnsupported: error.reason, segments: segments.length };
+    console.log(JSON.stringify(summary));
+    return summary;
+  }
   const counts = { verified: 0, mismatch: 0, frames_missing: 0, waiting: 0, byteDiffers: 0 };
   let calibratedOn;
   let calibrationSelfCheck = null;

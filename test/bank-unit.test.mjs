@@ -3805,17 +3805,40 @@ const REAL_AUDIO_SHAPE = Object.freeze({
   trunFlags: 0x205,
 });
 
-// 合成直播间：30 fps 视频（关键帧位置由 keyFrames 给出，非关键帧带 33 毫秒 CTS）与
-// 48 kHz AAC 音频（每帧 1024 个采样），FLV 标签按时间交错、同时刻音频在前。真分片与
-// 模块独立地按规则切出：关键帧或距分片首帧满 1000 毫秒开新分片，距小片段首帧满
-// 250 毫秒开新小片段，音频按精确时间归入小片段，同时刻按标签顺序归前一个。
-// audioFirst 模拟原画档的 traf 次序（音频轨 1 在前）。
-function syntheticLive({ videoCount, keyFrames, audioFirst = false, firstMsn = 423384050, firstSeq = 700 }) {
+// 合成直播间：30 fps 视频（关键帧位置由 keyFrames 给出）与 48 kHz AAC 音频（每帧 1024 个
+// 采样），FLV 标签按时间交错、同时刻音频在前。真分片与模块独立地按规则切出：关键帧或
+// 距分片首帧满 1000 毫秒开新分片，距小片段首帧满 250 毫秒开新小片段，音频按精确时间归入
+// 小片段，同时刻按标签顺序归前一个。audioFirst 模拟原画档的 traf 次序（音频轨 1 在前）。
+// 默认按毫秒走时（非关键帧 CTS 33 毫秒）；halfFrameAt 给出时改按 3000 格走时（录制实测的
+// 转码档）：该帧时长 1500，其后的关键帧 CTS 为 10500，FLV 的毫秒时间戳与 CTS 为原值截断。
+function syntheticLive({
+  videoCount,
+  keyFrames,
+  audioFirst = false,
+  halfFrameAt,
+  firstMsn = 423384050,
+  firstSeq = 700,
+}) {
   const flvStart = 100000;
   const clockMs = 7200000;
   const video = Array.from({ length: videoCount }, (_value, index) => {
     const key = keyFrames.includes(index);
-    return { index, ts: flvStart + Math.round((index * 100) / 3), key, cts: key ? 0 : 33, data: framePayload('video', index) };
+    if (halfFrameAt === undefined) {
+      const dtsTicks = 90 * Math.round((index * 100) / 3);
+      const ctsTicks = key ? 0 : 33 * 90;
+      return { index, dtsTicks, ctsTicks, ts: flvStart + dtsTicks / 90, key, cts: ctsTicks / 90, data: framePayload('video', index) };
+    }
+    const dtsTicks = 3000 * index - (index > halfFrameAt ? 1500 : 0);
+    const ctsTicks = key ? (index > halfFrameAt ? 10500 : 6000) : 3000 * (1 + (index % 3));
+    return {
+      index,
+      dtsTicks,
+      ctsTicks,
+      ts: flvStart + Math.floor(dtsTicks / 90),
+      key,
+      cts: Math.floor(ctsTicks / 90),
+      data: framePayload('video', index),
+    };
   });
   const audioCount = Math.ceil((videoCount * 100) / 64) + 8;
   const audio = Array.from({ length: audioCount }, (_value, index) => ({
@@ -3839,7 +3862,7 @@ function syntheticLive({ videoCount, keyFrames, audioFirst = false, firstMsn = 4
     flvVideoTag(0, { key: true, packetType: 0, data: Uint8Array.of(1, 0x64, 0, 0x1f) }),
     flvAudioTag(0, { packetType: 0, data: Uint8Array.of(0x11, 0x90) }),
   ]);
-  const videoTime = (frame) => 90 * clockMs + 90 * (frame.ts - flvStart);
+  const videoTime = (frame) => 90 * clockMs + frame.dtsTicks;
   const audioTime = (frame) => 48 * clockMs + 1024 * frame.index;
   // 两轨换到同一单位比较：audio/48000 与 video/90000 秒。
   const audioBefore = (sound, picture) => {
@@ -3857,11 +3880,11 @@ function syntheticLive({ videoCount, keyFrames, audioFirst = false, firstMsn = 4
   let start = 0;
   for (;;) {
     let end = start + 1;
-    while (end < video.length && !video[end].key && video[end].ts - video[start].ts < 1000) end += 1;
+    while (end < video.length && !video[end].key && video[end].dtsTicks - video[start].dtsTicks < 90000) end += 1;
     if (end >= video.length) break;
     const fragmentStarts = [start];
     for (let index = start + 1; index < end; index += 1) {
-      if (video[index].ts - video[fragmentStarts.at(-1)].ts >= 250) fragmentStarts.push(index);
+      if (video[index].dtsTicks - video[fragmentStarts.at(-1)].dtsTicks >= 22500) fragmentStarts.push(index);
     }
     const bounds = [...fragmentStarts, end];
     const pieces = fragmentStarts.map((_fragmentStart, fragmentIndex) => {
@@ -3878,7 +3901,7 @@ function syntheticLive({ videoCount, keyFrames, audioFirst = false, firstMsn = 4
         samples: pictures.map((frame, index) => ({
           data: frame.data,
           duration: videoTime(pictures[index + 1] ?? next) - videoTime(frame),
-          cts: frame.cts * 90,
+          cts: frame.ctsTicks,
         })),
       };
       const audioTrack = {
@@ -3900,8 +3923,8 @@ function syntheticLive({ videoCount, keyFrames, audioFirst = false, firstMsn = 4
       aux: {
         name: `${msn}.m4s`,
         msn,
-        duration: Number(((video[end].ts - first.ts) / 1000).toFixed(3)),
-        ptsMs: clockMs + (first.ts - flvStart) + first.cts,
+        duration: Number(((video[end].dtsTicks - first.dtsTicks) / 90000).toFixed(3)),
+        ptsMs: clockMs + Math.floor((first.dtsTicks + first.ctsTicks) / 90),
         key: first.key,
         size: bytes.byteLength,
         crc: crc32(bytes),
@@ -4083,6 +4106,23 @@ test('the rebuilder calibrates on a real-shaped segment and rebuilds later segme
     const target = later[3].aux;
     assert.deepEqual(rebuilder.attempt({ ...target, crc: (target.crc ^ 1) >>> 0 }), { status: 'mismatch', bytes: target.size });
     assert.equal(rebuilder.attempt({ ...target, size: target.size + 1 }).status, 'mismatch');
+  }
+});
+
+test('the rebuilder keeps 3000-tick rooms exact through half-frame steps the calibration segment never showed', () => {
+  // 录制实测的 30 fps 转码档：校准分片的时长与 CTS 都是 3000 的倍数，之后出现 1500 的时长
+  // 与 CTS 10500 的关键帧；FLV 只给截断到毫秒的值（10500 记作 116 毫秒）。
+  const live = syntheticLive({ videoCount: 200, keyFrames: [0, 60, 125], halfFrameAt: 45 });
+  const [calibration, ...later] = live.segments;
+  const calibrationSamples = parseMediaSegment(calibration.bytes).flatMap((fragment) => fragment.trafs[0].samples);
+  assert.equal(calibrationSamples.every((sample) => sample.duration % 3000 === 0 && sample.cts % 3000 === 0), true);
+  const rebuilder = new FlvSegmentRebuilder({ windowMs: 30000 });
+  rebuilder.appendFrames(new FlvTagReader().push(live.flv));
+  assert.deepEqual(rebuilder.noteRealSegment(calibration.aux, calibration.bytes), { calibrated: true });
+  for (const segment of later) {
+    const result = rebuilder.attempt(segment.aux);
+    assert.equal(result.status, 'verified', segment.aux.name);
+    assert.equal(Buffer.compare(Buffer.from(result.bytes), Buffer.from(segment.bytes)), 0);
   }
 });
 

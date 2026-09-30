@@ -716,6 +716,7 @@
   var FRAGMENT_TICKS = 22500;
   var VIDEO_TICKS_PER_MS = 90;
   var AUDIO_TICKS_PER_MS = 48;
+  var HALF_FRAME_TICKS = 1500;
   var TFHD_BASE_DATA_OFFSET = 1;
   var TFHD_SAMPLE_DESCRIPTION_INDEX = 2;
   var TFHD_DEFAULT_DURATION = 8;
@@ -1112,7 +1113,7 @@
       frameCursor += traf.samples.length;
     }
     videoTemplate.keyFlags = keyFlags;
-    let grid = 0;
+    let grid = HALF_FRAME_TICKS;
     for (const sample of videoSamples) grid = gcd(gcd(grid, sample.duration), sample.cts);
     const anchor = frameWindow.video[videoStart];
     const timing = {
