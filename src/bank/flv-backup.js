@@ -140,8 +140,9 @@ export class LiveFlvBackup {
     } catch (error) {
       if (this.closed || this.connection !== connection) return;
       if (error instanceof FlvUnsupportedError) {
-        this.reportError('FLV 后备流格式不受支持', error);
-        this.emitState('unavailable', 'flv_codec_unsupported');
+        // 只有音频的 FLV 是地址本身的状况（同 no_flv_entry），不是扩展错误；编码不受支持才报错。
+        if (error.reason !== 'flv_no_video') this.reportError('FLV 后备流格式不受支持', error);
+        this.emitState('unavailable', error.reason);
         this.close();
         return;
       }

@@ -3980,6 +3980,10 @@ test('flv tag reader yields AVC/HEVC NALU frames and AAC raw frames across any c
   for (const tag of unsupported) {
     assert.throws(() => new FlvTagReader().push(concatBytes([FLV_FILE_HEADER, tag])), FlvUnsupportedError);
   }
+  // 流头标志只有音频（0x04）：没有可拼的视频帧。
+  const audioOnlyHeader = FLV_FILE_HEADER.slice();
+  audioOnlyHeader[4] = 0x04;
+  assert.throws(() => new FlvTagReader().push(audioOnlyHeader), { name: 'FlvUnsupportedError', reason: 'flv_no_video' });
 });
 
 test('bili playlist parsing keeps each segment EXTINF, key flag, size, and unpadded CRC32 by name', () => {
@@ -4371,6 +4375,23 @@ test('the FLV backup needs a same-name same-codec address and reports unavailabl
   assert.equal(harness.calls.includes(FLV_BACKUP_URL), false);
   assert.deepEqual(harness.events('bank.fetch.chunk').filter((data) => data.slot === 2), []);
   bank.destroy();
+
+  // 同名同编码的 FLV 地址只下发音频：连接读到流头即关闭，记 unavailable，不当扩展错误报。
+  const audioOnly = flvBackupHarness({ playlistText: syntheticPlaylist(live.segments) });
+  const response = hlsFetchThrough(audioOnly.bank, hlsSegmentUrls(live.segments[0].aux.name).player);
+  await settle();
+  const header = live.header.slice();
+  header[4] = 0x04;
+  audioOnly.flvFeed.push(header);
+  await settle();
+  audioOnly.deliver(live.segments[0]);
+  await (await response).arrayBuffer();
+  assert.deepEqual(audioOnly.events('live.flv.backup'), [
+    { state: 'unavailable', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST, reason: 'flv_no_video' },
+  ]);
+  assert.equal(audioOnly.flvFeed.cancelled, true);
+  assert.deepEqual(audioOnly.events('log.error'), []);
+  audioOnly.bank.destroy();
 });
 
 test('the FLV backup reconnects at most three times, then gives up with a full-rate error while segments keep the network legs', async () => {

@@ -8,6 +8,9 @@
 // held for --delay-ms before its request reaches the network, on every host, so both network legs
 // stall together and only the FLV rebuild leg can deliver it in time.
 //
+// Chrome runs with hardware video decode off, as the daily Chrome does; without hardware decode
+// Chrome cannot play HEVC, so the room's player picks its AVC stream, as it does there.
+//
 // The report covers: playback continuity from a 200 ms in-page sampler of the video element (every
 // stretch of 1 s or more where currentTime stops while the element is not paused), the winner of
 // every served segment and of the delayed ones, the rebuild leg's results, FLV backup states and
@@ -176,7 +179,12 @@ try {
     cdpPort,
     headless: !options.headed,
     ignoreDefaultArgs: ['--disable-extensions'],
-    args: ['--mute-audio', '--enable-unsafe-extension-debugging', '--autoplay-policy=no-user-gesture-required'],
+    args: [
+      '--mute-audio',
+      '--enable-unsafe-extension-debugging',
+      '--autoplay-policy=no-user-gesture-required',
+      '--disable-accelerated-video-decode',
+    ],
   });
   report.provenance.browserVersion = context.browser().version();
   log(`provenance ${JSON.stringify(report.provenance)}`);
@@ -235,8 +243,16 @@ try {
   await page.close();
 
   const stored = await readStoredEvents(context, extensionId);
-  const session = stored.events.find((event) => event.code === 'route.session_started'
-    && event.data?.pathname === `/${options.room}`);
+  // The page may carry the room's short id and host the player in a frame of its own
+  // (/blanc/<room>): take every session whose pathname names the room, and the one that served
+  // segments as the player's.
+  const roomIds = [String(roomInfo.data.room_id), String(roomInfo.data.short_id)];
+  const roomSessions = stored.events.filter((event) => event.code === 'route.session_started'
+    && typeof event.data?.pathname === 'string'
+    && event.data.pathname.split('/').some((part) => roomIds.includes(part)));
+  report.roomSessions = roomSessions.map((event) => ({ sessionId: event.sessionId, pathname: event.data.pathname }));
+  const session = roomSessions.find((candidate) => stored.events.some((event) => event.sessionId === candidate.sessionId
+    && event.code === 'bank.serve')) ?? roomSessions[0];
   const events = stored.events.filter((event) => event.sessionId === session?.sessionId);
   const serves = events.filter((event) => event.code === 'bank.serve' && event.data?.result === 'hit'
     && event.data?.reason?.startsWith('live_hls_segment'));
@@ -255,7 +271,10 @@ try {
   const stops = playbackStops(samples);
   const nearDelayed = stops.filter((stop) => injections.some((record) => record.at <= stop.to + 1000
     && stop.from <= record.at + options.delayMs + 1000));
-  if (session === undefined) throw new Error(`no extension session recorded for /${options.room}`);
+  if (session === undefined) {
+    const pathnames = stored.events.filter((event) => event.code === 'route.session_started').map((event) => event.data?.pathname);
+    throw new Error(`no extension session recorded for room ${options.room}; sessions: ${JSON.stringify(pathnames)}`);
+  }
   const sessionFacts = await readSessionFacts(context, extensionId, session.sessionId);
   report.session = { sessionId: session.sessionId, buildId: sessionFacts.session?.buildId ?? null };
   report.playback = {
@@ -266,6 +285,10 @@ try {
     stopsNearDelayedSegments: nearDelayed,
   };
   report.segments = {
+    streams: [...new Set(serves.map((event) => {
+      const pathname = new URL(event.data.source).pathname;
+      return pathname.slice(0, pathname.lastIndexOf('/') + 1);
+    }))],
     served: serves.length,
     winners: countBy(serves.map((event) => event.data.winner)),
     delayed: delayedNames.map((name) => ({ name, winner: winnerOf.get(name) ?? null })),
@@ -280,6 +303,7 @@ try {
     }).map((event) => segmentNameOf(event.data.source)),
   };
   report.flvBackup = {
+    timeline: backupStates.slice(0, 40),
     states: countBy(backupStates.map((state) => state.state)),
     reconnects: backupStates.filter((state) => state.state === 'reconnecting').length,
     reasons: countBy(backupStates.filter((state) => state.reason !== undefined).map((state) => `${state.state}:${state.reason}`)),

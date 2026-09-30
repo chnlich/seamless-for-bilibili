@@ -111,10 +111,13 @@ export function parseBiliPlaylist(text) {
 // FLV 标签增量解析：输入任意切分的字节块，输出完整的视频帧与音频帧。
 // 视频只收 AVC（7）与 HEVC（12）的 NALU 包，音频只收 AAC 原始帧；序列头、
 // 脚本标签与视频信息帧跳过。order 是标签在流里的次序，拼装时用来裁决同时刻的音视频。
+// 流头标志不含视频时（实测：超清档 HEVC 的 FLV 地址只下发音频）直接判不可用。
+// reason 取 flv_no_video 或 flv_codec_unsupported。
 export class FlvUnsupportedError extends Error {
-  constructor(message) {
+  constructor(message, reason = 'flv_codec_unsupported') {
     super(message);
     this.name = 'FlvUnsupportedError';
+    this.reason = reason;
   }
 }
 
@@ -137,6 +140,7 @@ export class FlvTagReader {
         return frames;
       }
       if (buffer[0] !== 0x46 || buffer[1] !== 0x4c || buffer[2] !== 0x56) throw new Error('FLV 头签名无效');
+      if ((buffer[4] & 0x01) === 0) throw new FlvUnsupportedError('FLV 流不含视频', 'flv_no_video');
       const headerSize = ((buffer[5] << 24) | (buffer[6] << 16) | (buffer[7] << 8) | buffer[8]) >>> 0;
       if (buffer.byteLength < headerSize + 4) {
         this.pending = buffer;

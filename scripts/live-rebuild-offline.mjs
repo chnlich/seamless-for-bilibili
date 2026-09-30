@@ -6,7 +6,7 @@
 // segment is rebuilt as well, from the template and mfhd sequence calibration read off it, and is
 // reported separately (calibrationSelfCheck) so the counts for later segments stay predictions.
 //
-//   node scripts/live-rebuild-offline.mjs record <roomId> <seconds> <dir> [avc|hevc]
+//   node scripts/live-rebuild-offline.mjs record <roomId> <seconds> <dir> [avc|hevc] [qn]
 //   node scripts/live-rebuild-offline.mjs check <dir> [<dir> ...]
 //
 // Recording layout (one room, one stream name, both routes pulled at the same time):
@@ -32,7 +32,7 @@ import { flvStreamNameOf, hlsStreamNameOf, hlsStreamPathOf, urlFromLiveUrlInfo }
 const REQUEST_HEADERS = { 'User-Agent': 'Mozilla/5.0', Referer: 'https://live.bilibili.com/' };
 
 function usage() {
-  throw new Error('usage: live-rebuild-offline.mjs record <roomId> <seconds> <dir> [avc|hevc] | check <dir> [<dir> ...]');
+  throw new Error('usage: live-rebuild-offline.mjs record <roomId> <seconds> <dir> [avc|hevc] [qn] | check <dir> [<dir> ...]');
 }
 
 async function readFlvFrames(file) {
@@ -131,9 +131,9 @@ function routesFor(info, codec) {
   return found;
 }
 
-async function record(roomId, seconds, directory, codec) {
+async function record(roomId, seconds, directory, codec, qn) {
   const infoUrl = 'https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo'
-    + `?room_id=${roomId}&protocol=0,1&format=0,1,2&codec=0,1&qn=10000&platform=web&ptype=8`;
+    + `?room_id=${roomId}&protocol=0,1&format=0,1,2&codec=0,1&qn=${qn}&platform=web&ptype=8`;
   const info = await (await fetch(infoUrl, { headers: REQUEST_HEADERS })).json();
   if (info.data?.playurl_info == null) throw new Error(`room ${roomId} is not live`);
   const routes = routesFor(info, codec);
@@ -180,13 +180,21 @@ async function record(roomId, seconds, directory, codec) {
   await Promise.all([flv.catch((error) => {
     if (error?.name !== 'AbortError') throw error;
   }), fmp4]);
-  console.log(JSON.stringify({ recorded: directory, roomId, seconds, codec, files: (await fs.readdir(directory)).length }));
+  console.log(JSON.stringify({
+    recorded: directory,
+    roomId,
+    seconds,
+    codec,
+    qn,
+    streams: { fmp4: new URL(routes.fmp4).pathname, flv: new URL(routes.flv).pathname },
+    files: (await fs.readdir(directory)).length,
+  }));
 }
 
 const [command, ...rest] = process.argv.slice(2);
 if (command === 'record') {
   if (rest.length < 3) usage();
-  await record(rest[0], Number(rest[1]), rest[2], rest[3] ?? 'avc');
+  await record(rest[0], Number(rest[1]), rest[2], rest[3] ?? 'avc', rest[4] ?? '10000');
 } else if (command === 'check') {
   if (rest.length === 0) usage();
   const summaries = [];

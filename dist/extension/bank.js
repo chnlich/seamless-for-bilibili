@@ -801,9 +801,10 @@
     return { mediaSequence, mapUri, entries };
   }
   var FlvUnsupportedError = class extends Error {
-    constructor(message) {
+    constructor(message, reason = "flv_codec_unsupported") {
       super(message);
       this.name = "FlvUnsupportedError";
+      this.reason = reason;
     }
   };
   var FlvTagReader = class {
@@ -824,6 +825,7 @@
           return frames;
         }
         if (buffer[0] !== 70 || buffer[1] !== 76 || buffer[2] !== 86) throw new Error("FLV 头签名无效");
+        if ((buffer[4] & 1) === 0) throw new FlvUnsupportedError("FLV 流不含视频", "flv_no_video");
         const headerSize = (buffer[5] << 24 | buffer[6] << 16 | buffer[7] << 8 | buffer[8]) >>> 0;
         if (buffer.byteLength < headerSize + 4) {
           this.pending = buffer;
@@ -2051,8 +2053,8 @@
       } catch (error) {
         if (this.closed || this.connection !== connection) return;
         if (error instanceof FlvUnsupportedError) {
-          this.reportError("FLV 后备流格式不受支持", error);
-          this.emitState("unavailable", "flv_codec_unsupported");
+          if (error.reason !== "flv_no_video") this.reportError("FLV 后备流格式不受支持", error);
+          this.emitState("unavailable", error.reason);
           this.close();
           return;
         }
