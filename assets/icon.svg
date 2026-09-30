@@ -1,12 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
   <!--
-    Original icon for Seamless for Bilibili (this repository).
-    Deliberately NOT derived from any Bilibili logo, mascot, or brand mark:
-    a violet-indigo badge, a white play triangle, and a mostly-full buffer bar.
-    Artwork occupies the central 96x96 box; 16px transparent padding per the
-    Chrome Web Store icon guidance (developer.chrome.com/docs/webstore/images).
-    scripts/generate-icons.mjs keeps that padding for the 128 store icon and
-    crops to the artwork box for the 16/32/48 toolbar and extensions-page icons.
+    Icon for Seamless for Bilibili (this repository): a forward-leaning white
+    letter B with three speed lines on its left, on the violet-indigo rounded
+    badge. The B is drawn from geometric strokes, not from any font glyph, and
+    the artwork is deliberately NOT derived from any Bilibili logo, mascot, or
+    brand mark; the badge colour also keeps its distance from Bilibili's pink
+    and blue brand colours. The speed lines state the effect the extension
+    delivers (smooth playback). Artwork occupies the central 96x96 box; 16px
+    transparent padding per the Chrome Web Store icon guidance
+    (developer.chrome.com/docs/webstore/images). scripts/generate-icons.mjs
+    keeps that padding for the 128 store icon and crops to the artwork box for
+    the 16/32/48 toolbar and extensions-page icons.
   -->
   <defs>
     <linearGradient id="bg" x1="24" y1="16" x2="104" y2="112" gradientUnits="userSpaceOnUse">
@@ -15,7 +19,12 @@
     </linearGradient>
   </defs>
   <rect x="16" y="16" width="96" height="96" rx="26" fill="url(#bg)"/>
-  <path d="M53 40 L53 74 L82 57 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="10" stroke-linejoin="round"/>
-  <rect x="42" y="84" width="48" height="10" rx="5" fill="#FFFFFF" opacity="0.45"/>
-  <rect x="42" y="84" width="34" height="10" rx="5" fill="#FFFFFF"/>
+  <g transform="translate(70 64) skewX(-9) translate(-70 -64)">
+    <path d="M60.4 86.5 V41.5 H72.4 A10.35 10.35 0 0 1 72.4 62.2 H60.4 M60.4 62.2 H73.4 A12.15 12.15 0 0 1 73.4 86.5 H60.4" fill="none" stroke="#FFFFFF" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <g stroke="#FFFFFF" stroke-linecap="round" stroke-width="6">
+    <path d="M29 52 H41" opacity="0.7"/>
+    <path d="M24 64 H40"/>
+    <path d="M29 76 H38" opacity="0.7"/>
+  </g>
 </svg>
