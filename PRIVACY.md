@@ -1,7 +1,7 @@
 # 隐私政策 / Privacy Policy
 
-适用于：Seamless for Bilibili（Chrome 扩展，版本 1.0.0）。
-Applies to: Seamless for Bilibili (Chrome extension, version 1.0.0).
+适用于：Seamless for Bilibili（Chrome 扩展，版本 1.1.0）。
+Applies to: Seamless for Bilibili (Chrome extension, version 1.1.0).
 
 ---
 
