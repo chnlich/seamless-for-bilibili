@@ -55,7 +55,7 @@ Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome �
 
 - **缓冲**：一条缓冲条和「已缓冲 N 秒 / 目标 120 秒」。数值是覆盖当前播放点的连续可播放前向秒数，不是整段视频的缓冲；条到头（120 秒）变绿。
 - **120 秒申请状态**：向播放器申请 120 秒缓存的结果，分为已生效 / 等待生效 / 播放器不支持 / 申请失败四种。视频增强开关关闭时（刷新页面后生效）没有申请，这一行只显示「视频增强开关：已关闭」，缓冲条不再标 120 秒目标，缓冲数字仍是播放器自己的实测缓冲。
-- **下载线路**：本次播放实际用到的每条 CDN 线路（通常两条），每条一个健康词（正常 / 有停滞 / 有错误 / 尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，分别是该线路首字节耗时的 P50 与 P90）。
+- **下载线路**：本次播放实际用到的每条 CDN 线路（通常两条），每条一个健康词（正常 / 有停滞 / 有错误 / 尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，分别是该线路首字节耗时的 P50 与 P90）。直播间里由 FLV 拼接腿补过分片的线路没有逐分片的首字节时间，这一行显示「FLV 拼接 · 已补上 N 个分片」，N 是本次播放里该线路的拼接腿补上的分片数；线路同时有网络首字节时间时，补片数接在连接时间后面同一行。
 - **直播页**同一风格：同样的下载线路卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现直播媒体流）/ 等待直播数据）；fMP4 直播间在这一行后面接 FLV 后备状态（FLV 后备校准中 / FLV 后备已接上 / FLV 后备重连中 / FLV 后备已断开 / 无 FLV 后备）；直播增强开关关闭时（刷新页面后生效）这一行显示「直播增强开关已关闭」；直播没有缓冲条。
 - 弹窗只报告它所在窗口的活动标签页，其他窗口的页面不会显示在这里。活动标签页没有内容脚本应答时（不是 Bilibili 页面、页面上没有在播放的内容、或页面早于扩展安装或更新打开：早于安装的页面里没有扩展脚本，更新前的页面里旧脚本已随更新作废），卡片收起，只留一句提示；这类页面刷新一次后，增强才会运行。
 
@@ -144,7 +144,7 @@ Chrome 对后台标签页停止视频解码（background video track optimizatio
 ## 面板与日志页可见行为
 
 - popup 面向普通观众，只讲三件事：缓冲、下载线路、连接时间。视频页显示一条缓冲条和「已缓冲 N 秒 / 目标 120 秒」，数值是覆盖当前播放点的连续可播放前向秒数（`src/extension/popup.js` 的 `renderVideoPanel`、`src/extension/popup-view.js`、`src/extension/readouts.js`）；下方一行报告向播放器申请 120 秒缓存的结果：已生效、等待生效、播放器不支持，或申请失败（`src/ui/panel.js`、`src/vod/controller.js` 的 `updateStatus`）。视频增强开关关闭时不存在缓存申请，申请措辞与 120 秒目标后缀收起，这一行只显示 视频增强开关：已关闭，缓冲数字仍照常显示播放器自己的实测缓冲（`src/extension/popup-view.js` 的 `SWITCH_OFF_TEXT`）。
-- popup 的「下载线路」卡片按镜像列出本次播放实际用到的每条 CDN 线路（通常两条），每条给一个健康状况词（正常、有停滞、有错误、尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，来自 `logs:cdn-summary` 的每镜像 TTFB P50/P90）（`src/extension/popup-view.js`、`src/diagnostics/cdn.js`、`src/diagnostics/worker.js`）。线路名是镜像主机名的可读短名。
+- popup 的「下载线路」卡片按镜像列出本次播放实际用到的每条 CDN 线路（通常两条），每条给一个健康状况词（正常、有停滞、有错误、尚无数据）和连接时间（「通常 X 毫秒 · 慢时 Y 毫秒」，来自 `logs:cdn-summary` 的每镜像 TTFB P50/P90）（`src/extension/popup-view.js`、`src/diagnostics/cdn.js`、`src/diagnostics/worker.js`）。线路名是镜像主机名的可读短名。FLV 拼接腿（`slot` 2）从已收到的帧拼出分片，不逐分片发请求、没有 TTFB，其 `fetched` 事件按镜像计为补片数：补过片的线路第二行显示「FLV 拼接 · 已补上 N 个分片」，不再落回「还没有连接记录」；同一线路也有网络 TTFB 时，补片数接在连接时间后面同一行。
 - 直播页（live.bilibili.com）同一风格：同样的「下载线路」卡片，加一行直播接管状态（正在按两条线路竞速下载 / 单路接管（无可用备用线路）/ 接管请求失败 / 未接管（未发现直播媒体流）/ 等待直播数据），由后台按 session 索引折叠 `bank.serve` 事件得出；fMP4 直播间的接管行后接 FLV 后备状态，取该 session 最近一条 `live.flv.backup` 的 `state`，播放器改拉 FLV 流的那一轮接管不带后备状态；直播增强开关关闭时让路规则不产生 `bank.serve`，这个 session 没有任何接管事实，接管行显示 直播增强开关已关闭 而不是空等数据；直播不设缓冲目标，popup 不显示缓冲条（`src/extension/popup-live.js`、`src/extension/popup-view.js`）。popup 的路由判定优先使用内容侧自报的 `routeKind`，因为 popup 没有 `tabs` 权限、读不到标签页地址（`src/diagnostics/client.js` 的 `getStatus`、`src/extension/readouts.js`）。
 - popup 面板只读，不影响播放、不上传；内容侧错误只在存在时以一句人话显示。面板只报告它所附着窗口的活动标签页（`chrome.windows.getCurrent()` 定位窗口，在该窗口内取活动标签页），不向其余标签页询问。活动标签页没有内容脚本可答时只显示一句提示：弹窗没有 `tabs` 权限、看不到标签页地址（按 url 过滤也恒为空），分不出「非 Bilibili 页面」与「扩展安装或更新前就已打开的 Bilibili 页面」，两种情况下这句话都成立并给出刷新路径。扩展更新作废的只是旧上下文与日志写库（写库失败继续按既有口径全量报到控制台）：旧页面的下载层跑在页面主世界、不受影响，实测更新后旧页面照常供流、播放不断：视频已入库分片零新增网络请求，直播两条镜像线路竞速不中断、拉流零退回原生通道（`scripts/popup-window-check.mjs` 的两个更新组覆盖）；此时弹窗同样联系不上旧脚本，同一句提示照旧成立，刷新一次后新版本的增强接入（`src/extension/popup.js`、`src/extension/popup-tabs.js`、`src/extension/popup-view.js`）。popup 底部保留「打开开发日志」入口。日志页开头写明保留期限：日志只保留最近 3 天（72 小时），更早的记录自动删除。
 - 所有 `media.*` 事件都附带同一帧周期聚合的 `frameTiming`，包括 presentedTotal、maxFrameGapMs、processingMs、displayLead、mediaStep 与 append 相关指标（`src/diagnostics/media.js`、`src/diagnostics/privacy.js` 的 `safeFrameTiming`）。这些细节只进开发日志；popup 不再展示 readyState、networkState、轨道 ranges、库存计数或持久化状态等开发读数。

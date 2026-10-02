@@ -149,6 +149,10 @@
     if (!Number.isFinite(ttfbP90)) return `通常 ${typical}`;
     return `通常 ${typical} · 慢时 ${Math.round(ttfbP90)} 毫秒`;
   }
+  function rebuildText(rebuiltSegments) {
+    if (!Number.isFinite(rebuiltSegments) || rebuiltSegments <= 0) return void 0;
+    return `FLV 拼接 · 已补上 ${rebuiltSegments} 个分片`;
+  }
   function targetStateText({ hasVideo, stateLabel, enhancementEnabled: enhancementEnabled2 }) {
     if (hasVideo !== true) return "";
     const mapped = TARGET_STATE_WORDS[stateLabel];
@@ -229,7 +233,7 @@
         head.append(name, healthWord);
         const connection = documentObject.createElement("div");
         connection.className = "cdn-conn";
-        connection.textContent = connectionText(row?.ttfbP50, row?.ttfbP90) || "还没有连接记录";
+        connection.textContent = [connectionText(row?.ttfbP50, row?.ttfbP90), rebuildText(row?.rebuiltSegments)].filter((part) => part !== void 0).join(" · ") || "还没有连接记录";
         line.append(head, connection);
         container.append(line);
       }

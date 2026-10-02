@@ -43,6 +43,7 @@ function mirrorStatsFor(mirrors, mirror) {
       stalled: 0,
       failures: 0,
       bytesDelivered: 0,
+      rebuiltSegments: 0,
     };
     mirrors.set(mirror, stats);
   }
@@ -69,6 +70,9 @@ export function aggregateCdnEvents(events) {
       stats.bytesDelivered += bytes;
       fetchedBytes += bytes;
     }
+    // 拼接腿（slot 2）从已收到的 FLV 帧拼出分片，不逐分片发请求，永远没有 ttfbMs；
+    // 它的成功交付按镜像计数，作为该线路在面板上的连接事实。
+    if (data.slot === 2 && data.result === 'fetched') stats.rebuiltSegments += 1;
     if (data.result === 'lost_race') wastedBytes += bytes;
     if (data.result === 'stalled') stats.stalled += 1;
     if (CDN_LINE_FAILURE_RESULTS.includes(data.result)) stats.failures += 1;
@@ -102,6 +106,7 @@ export function aggregateCdnEvents(events) {
       stalled: stats.stalled,
       failures: stats.failures,
       bytesDelivered: stats.bytesDelivered,
+      rebuiltSegments: stats.rebuiltSegments,
     }));
   const totalChunks = chunks.size;
   return {

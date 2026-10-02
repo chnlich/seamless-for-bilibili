@@ -176,6 +176,40 @@ test('cdn lines render every mirror with its health word and connection time', (
   assert.equal(container.textContent.includes('TTFB'), false);
 });
 
+test('cdn lines show the FLV rebuild count instead of a missing connection record', () => {
+  const document = popupDocument();
+  const container = document.querySelector('[data-cdn-lines]');
+  renderCdnLines(document, container, {
+    rows: [
+      // 拼接腿独占的线路：没有 ttfb，补片数就是这一行的连接事实。
+      { mirror: 'ov-gotcha07.ws.bilivideo.com', stalled: 0, failures: 0, bytesDelivered: 48000, rebuiltSegments: 134 },
+      // 同一主机也有网络首字节时间：连接时间与补片数同在一行。
+      { mirror: 'd1--ov-gotcha207.bilivideo.com', ttfbP50: 48.2, ttfbP90: 131.6, stalled: 0, failures: 0, bytesDelivered: 4096, rebuiltSegments: 3 },
+      // 没有补片的线路照旧。
+      { mirror: 'upos-hz-mirrorakam.akamaized.net', ttfbP50: 51, ttfbP90: 200, stalled: 0, failures: 0, bytesDelivered: 4096 },
+    ],
+  });
+  const lines = [...container.querySelectorAll('.cdn-line')];
+  assert.deepEqual(
+    lines.map((line) => line.querySelector('.cdn-name').textContent),
+    ['ov-gotcha07.ws', 'ov-gotcha207', 'hz-mirrorakam'],
+  );
+  assert.deepEqual(
+    lines.map((line) => line.querySelector('.cdn-conn').textContent),
+    [
+      'FLV 拼接 · 已补上 134 个分片',
+      '通常 48 毫秒 · 慢时 132 毫秒 · FLV 拼接 · 已补上 3 个分片',
+      '通常 51 毫秒 · 慢时 200 毫秒',
+    ],
+  );
+  assert.equal(container.textContent.includes('还没有连接记录'), false);
+  // 健康词逻辑不变：补过分片的线路按交付字节报正常。
+  assert.deepEqual(
+    lines.map((line) => line.querySelector('.cdn-health').textContent),
+    ['正常', '正常', '正常'],
+  );
+});
+
 test('cdn lines degrade to a plain message when there is no data or a read error', () => {
   const document = popupDocument();
   const container = document.querySelector('[data-cdn-lines]');

@@ -1288,6 +1288,66 @@ test('CDN summary counts line failures per mirror', async () => {
   }
 });
 
+test('CDN summary counts FLV rebuild deliveries per mirror, and rebuild failures deliver nothing', async () => {
+  const fixture = logsPageFixture();
+  try {
+    const logs = await fixture.importModule();
+    // 真实形状：网络两腿各占一台主机（slot 0/1，带 ttfbMs），拼接腿（slot 2）事件带
+    // FLV 主机、同一分片路径、无 ttfbMs；第三台主机的拼接腿只有 lost_race 与
+    // crc_mismatch（拼出但对不上，一个分片都没交付）。
+    const segment = 'https://mirror.example/live_xxx_4000/chunk1.m4s?aux=aa|K|12ab|34';
+    const event = (data) => ({ code: 'bank.fetch.chunk', data });
+    const events = [
+      event({
+        source: segment, mirror: 'cdn-a.example', slot: 0, chunkIndex: 0, start: 0,
+        result: 'fetched', bytes: 100, ttfbMs: 10,
+      }),
+      event({
+        source: segment, mirror: 'cdn-b.example', slot: 1, chunkIndex: 0, start: 0,
+        result: 'lost_race', bytes: 60, ttfbMs: 20,
+      }),
+      event({
+        source: segment, mirror: 'ov-gotcha07.example', slot: 2, chunkIndex: 0, start: 0,
+        end: 99, result: 'fetched', bytes: 100,
+      }),
+      event({
+        source: 'https://mirror.example/live_xxx_4000/chunk2.m4s?aux=ab|K|12ac|35',
+        mirror: 'cdn-a.example', slot: 0, chunkIndex: 0, start: 0,
+        result: 'lost_race', bytes: 80, ttfbMs: 30,
+      }),
+      event({
+        source: 'https://mirror.example/live_xxx_4000/chunk2.m4s?aux=ab|K|12ac|35',
+        mirror: 'ov-gotcha07.example', slot: 2, chunkIndex: 0, start: 0,
+        end: 79, result: 'fetched', bytes: 80,
+      }),
+      event({
+        source: 'https://mirror.example/live_xxx_4000/chunk3.m4s?aux=ac|K|12ad|36',
+        mirror: 'ov-gotcha09.example', slot: 2, chunkIndex: 0, start: 0,
+        result: 'lost_race', bytes: 70,
+      }),
+      event({
+        source: 'https://mirror.example/live_xxx_4000/chunk4.m4s?aux=ad|K|12ae|37',
+        mirror: 'ov-gotcha09.example', slot: 2, chunkIndex: 0, start: 0,
+        result: 'crc_mismatch', bytes: 70,
+      }),
+    ];
+    const summary = logs.aggregateCdnEvents(events);
+    const byMirror = Object.fromEntries(summary.rows.map((row) => [row.mirror, row]));
+    assert.equal(byMirror['ov-gotcha07.example'].rebuiltSegments, 2);
+    assert.equal(byMirror['ov-gotcha07.example'].ttfbP50, undefined);
+    assert.equal(byMirror['ov-gotcha07.example'].bytesDelivered, 180);
+    assert.equal(byMirror['cdn-a.example'].rebuiltSegments, 0);
+    assert.equal(byMirror['cdn-b.example'].rebuiltSegments, 0);
+    // 拼接失败的线路没有交付任何分片：补片数为 0，crc_mismatch 也不算线路故障。
+    assert.equal(byMirror['ov-gotcha09.example'].rebuiltSegments, 0);
+    assert.equal(byMirror['ov-gotcha09.example'].bytesDelivered, 0);
+    assert.equal(byMirror['ov-gotcha09.example'].failures, 0);
+    assert.equal(byMirror['ov-gotcha09.example'].ttfbP50, undefined);
+  } finally {
+    await fixture.close?.();
+  }
+});
+
 test('CDN panel aggregates paired legs by source pathname and renders no media URL', async () => {
   const fixture = logsPageFixture();
   try {
@@ -1404,6 +1464,7 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
         stalled: 1,
         failures: 0,
         bytesDelivered: 180,
+        rebuiltSegments: 0,
       },
       {
         mirror: 'cdn-b.example',
@@ -1415,6 +1476,7 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
         stalled: 0,
         failures: 0,
         bytesDelivered: 0,
+        rebuiltSegments: 0,
       },
       {
         mirror: 'cdn-c.example',
@@ -1426,6 +1488,7 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
         stalled: 0,
         failures: 0,
         bytesDelivered: 60,
+        rebuiltSegments: 0,
       },
       {
         mirror: 'cdn-single.example',
@@ -1437,6 +1500,7 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
         stalled: 0,
         failures: 0,
         bytesDelivered: 70,
+        rebuiltSegments: 0,
       },
     ]);
 

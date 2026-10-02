@@ -934,7 +934,8 @@
         ttfbValues: [],
         stalled: 0,
         failures: 0,
-        bytesDelivered: 0
+        bytesDelivered: 0,
+        rebuiltSegments: 0
       };
       mirrors.set(mirror, stats);
     }
@@ -959,6 +960,7 @@
         stats.bytesDelivered += bytes;
         fetchedBytes += bytes;
       }
+      if (data.slot === 2 && data.result === "fetched") stats.rebuiltSegments += 1;
       if (data.result === "lost_race") wastedBytes += bytes;
       if (data.result === "stalled") stats.stalled += 1;
       if (CDN_LINE_FAILURE_RESULTS.includes(data.result)) stats.failures += 1;
@@ -987,7 +989,8 @@
       ttfbP90: percentile(stats.ttfbValues, 0.9),
       stalled: stats.stalled,
       failures: stats.failures,
-      bytesDelivered: stats.bytesDelivered
+      bytesDelivered: stats.bytesDelivered,
+      rebuiltSegments: stats.rebuiltSegments
     }));
     const totalChunks = chunks.size;
     return {

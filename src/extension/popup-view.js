@@ -61,6 +61,13 @@ export function connectionText(ttfbP50, ttfbP90) {
   return `通常 ${typical} · 慢时 ${Math.round(ttfbP90)} 毫秒`;
 }
 
+// 拼接腿补过的分片数也是一条线路的连接事实：FLV 拼接腿不逐分片发请求，永远没有
+// 首字节时间，只数补片数；没有这一句，补过分片的线路会落回「还没有连接记录」。
+export function rebuildText(rebuiltSegments) {
+  if (!Number.isFinite(rebuiltSegments) || rebuiltSegments <= 0) return undefined;
+  return `FLV 拼接 · 已补上 ${rebuiltSegments} 个分片`;
+}
+
 // stateLabel 来自 status snapshot 的映射值（已应用/等待/不支持/失败/未提供）。
 export function targetStateText({ hasVideo, stateLabel, enhancementEnabled }) {
   if (hasVideo !== true) return '';
@@ -162,7 +169,10 @@ export function renderCdnLines(documentObject, container, { rows, message } = {}
       head.append(name, healthWord);
       const connection = documentObject.createElement('div');
       connection.className = 'cdn-conn';
-      connection.textContent = connectionText(row?.ttfbP50, row?.ttfbP90) || '还没有连接记录';
+      // 连接时间与补片数同属一行：同一线路既走网络腿又被拼接腿补片时，两件事实都在。
+      connection.textContent = [connectionText(row?.ttfbP50, row?.ttfbP90), rebuildText(row?.rebuiltSegments)]
+        .filter((part) => part !== undefined)
+        .join(' · ') || '还没有连接记录';
       line.append(head, connection);
       container.append(line);
     }
