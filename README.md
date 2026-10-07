@@ -4,7 +4,7 @@ Seamless for Bilibili 是一款缓解 Bilibili 视频与直播卡顿的 Chrome �
 
 **简体中文**（本文件） | **English**：[README.en.md](README.en.md)
 
-长期产品约束见 [GOAL.md](GOAL.md)，隐私政策见 [PRIVACY.md](PRIVACY.md)，上架材料在 [store/](store/README.md)。
+长期产品约束见 [GOAL.md](GOAL.md)，隐私政策见 [PRIVACY.md](PRIVACY.md)，更新日志见 [CHANGELOG.md](CHANGELOG.md)，上架材料在 [store/](store/README.md)。
 
 ## 这是什么、给谁用
 

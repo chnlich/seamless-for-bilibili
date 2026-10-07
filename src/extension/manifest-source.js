@@ -1,7 +1,7 @@
 import { EXTENSION_MANIFEST, VERSION } from '../constants.js';
 
 // Manifest description = store summary draft in store/listing.zh-CN.md (CWS limit 132 characters).
-const DESCRIPTION = '减少海外党看 Bilibili 视频与直播的卡顿：同一内容同时从 Bilibili 自带的两个镜像地址下载，先到先用；视频页另请播放器保持 120 秒缓冲。代价是多用流量（直播双路约 1.3 到 2 倍）。数据不离开本机，不改播放操作。';
+const DESCRIPTION = '海外党看 Bilibili 视频和直播总是卡？Seamless for Bilibili 就是来解决这个问题的，让播放更顺畅。';
 
 const ICONS = Object.freeze({
   16: 'icon16.png',

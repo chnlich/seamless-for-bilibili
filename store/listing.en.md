@@ -13,32 +13,25 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
 - **Item name**: Seamless for Bilibili (comes from the manifest `name`; the dashboard name stays
   identical to it, decision in README.md).
 - **Summary**: not a dashboard field; the dashboard takes the manifest `description`. The live summary
-  is the 118-character zh text. For a future `_locales/en` `description` (131 characters, counted as
+  is the 63-character zh text. For a future `_locales/en` `description` (131 characters, counted as
   Unicode characters, within the 132 limit):
-  Fewer stalls on Bilibili video/live: races two of Bilibili's own mirrors; 120 s buffer on video. Uses extra data. Nothing uploaded.
+  Watching Bilibili from overseas, video and live always stutter? Seamless for Bilibili is here to solve that, for smoother playback.
 - **Detailed description** (paste-ready):
 
   ```text
-  Video and live streams on Bilibili often stutter for viewers watching from outside mainland China, even when their own speed test looks fine: this extension is built for that situation and cuts playback stalling on Bilibili video and live pages. On video, playback stays smooth at 1080p with 2× playback speed. An independent third-party tool, not affiliated with or endorsed by Bilibili; Bilibili and related names are trademarks of their respective owner.
+  Your speed test looks fine, yet the picture often stalls with a spinner halfway through. The cause is usually not your own connection but one of Bilibili's servers slowing down for a while. This extension fixes that in two ways:
 
-  Assumptions and limits
-  The extension rests on three assumptions: stalling often comes from one slow or unstable Bilibili CDN host, not from your own connection; Bilibili's own playback info already lists several primary/backup mirror addresses for the same content; and your bandwidth has headroom above the video bitrate, enough to download two copies at once (at 2× playback the player consumes data twice as fast, so the headroom is counted against twice the bitrate). It rescues a slow host, not a slow link: if your home connection itself is too slow, it cannot help. Stalling caused by the browser's video decoder (the buffer is full and playback still stalls, e.g. hardware-decode underflow) is also outside what it can fix.
+  • 120-second video prebuffer: the player loads the next 120 seconds ahead of time. When a server slows down for a moment, the player still has the content it stored ahead and keeps playing.
+  • Two servers downloaded at once: Bilibili prepares more than one server for the same content. The extension downloads from two of them at the same time and uses whichever arrives first; when one slows down, the other takes over. Video and live both work this way, and a live room that supports it also gets one more backup line attached.
 
-  Video pages: how it works
-  Takes over the player's media segment downloads (both the fetch and XHR channels): every 1 MiB segment is requested from two mirror addresses Bilibili supplied, at once; the first complete response wins and the other is cancelled. It prefetches ahead (window up to 48 segments, concurrency 4). Segments stay in memory only (up to 512 MiB per tab), are released when the page is left, and are never written to disk. Once per video it asks Bilibili's native player to keep a 120-second buffer.
+  When your connection is fast enough, 1080p video plays smoothly even at 2× speed. Works as soon as it is installed, no setup needed.
 
-  Live pages: how it works
-  Takes over the player's live media downloads: the FLV live stream and HLS live segments (.m4s and .ts; .m3u8 playlists pass through). Addresses are paired only as the same-cluster primary/backup pair: for an FLV stream the beginnings of both legs are compared before both download at once and the first bytes to arrive go to the player; for HLS the first raced segment pair is compared in full, then every segment downloads from both at once and the first complete response goes to the player while the other is cancelled. With no pair or a mismatch it falls back to a single download from the player's own address. No prefetch and no buffer target on live. If the player streams outside these formats, or the page mounts the player inside an iframe the extension's page scripts never enter (some event rooms do), the takeover stays out and the popup says so honestly.
+  What to know
+  • It uses more data: a bit over 10% more on video; live runs at 1 to 2.3 times what you would use without the extension. To skip the extra live data, turn off "Live enhancement" on its own in the popup.
+  • It cannot help when your own connection is not fast enough.
+  • Data stays on your computer; nothing is uploaded. Source code is public: https://github.com/chnlich/seamless-for-bilibili
 
-  What it never does, on either page type
-  It uses no third-party addresses and never rewrites or substitutes Bilibili's addresses. It does not take over playback: play, pause, seeking, rate, quality, volume, and track choices stay with you and Bilibili's player.
-
-  The cost: please weigh against your data plan
-  Video: the bytes the losing leg already downloaded are discarded: about 12.6% steady-state waste in one real run (it varies per session; the CDN racing panel on the extension's log page shows the session's own wasted-byte ratio). The 120-second buffer and prefetch download ahead, so leaving a video early downloads more unwatched data than the native player would. Live: on an FLV stream both legs keep downloading at once, close to twice the stream's traffic; on HLS the racing is settled per segment, measured at about 28% waste in one real run (11 minutes, 668 segments), i.e. about 1.3 times the single-leg traffic. Memory: up to about 512 MiB of media cache per tab. Disk: the local diagnostic log keeps only the last 3 days (72 hours); older records are deleted automatically (measured on the developer's own browser: about 7 MB per hour a video page is open, so use is roughly bounded by the last 3 days); uninstalling deletes everything.
-  Switches: the popup carries two switches, both effective after a reload. "Video enhancement" applies to video pages only and "live enhancement" to live pages. To avoid the extra live traffic, turn off the live switch: the player then downloads natively, with no takeover and no racing on live pages, while video enhancement is unaffected.
-
-  Data
-  Media segments stay in memory. The development diagnostic log lives only in the extension's local IndexedDB: it records the path of each Bilibili page, video identifiers, media URLs without parameters, timings and results of media requests, player events (play, pause, seeking, and so on), and buffer state. It stores no cookies, account data, titles, page text, chat, signed parameters, or audio/video bytes. No upload, no telemetry; export happens only when you pick a file. Permissions are only storage (two switches: video enhancement and live enhancement) and unlimitedStorage (writing the local log inside its 3-day window); no host_permissions. Fully open source: https://github.com/chnlich/seamless-for-bilibili
+  This extension is an independent third-party tool, not affiliated with or in partnership with Bilibili.
   ```
 
 - **Category**: Entertainment. The old "Productivity" group was split up in an earlier category
@@ -64,16 +57,19 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
   | `storage` | Stores exactly two user switches (video enhancement and live enhancement, each on/off) in chrome.storage.local so the popup preferences survive restarts. Nothing else is stored. |
   | `unlimitedStorage` | The development diagnostic log lives in the extension's own origin IndexedDB and keeps only the last 3 days (72 hours); older records are deleted automatically, and within the window the log is append-only and not capped by count or size (see GOAL.md in the repository). Measured on the developer's own browser, an open video page adds about 7 MB per hour, so even a 3-day window can exceed the browser's default storage quota; unlimitedStorage removes that quota so writes inside the window do not start failing at it. The log stays on the device; the user can view or export it on the log page, and uninstalling deletes everything. |
   | Content script `https://www.bilibili.com/*` | Download takeover starts only on video routes (/video/* and /list/watchlater*): it intercepts the player's media segment requests, answers them from the in-memory cache or fetches them from the mirror addresses Bilibili supplied, and asks the player for a 120-second buffer. The match covers the whole site because the extension follows in-page route changes and must be in place at document_start; on other routes it intercepts nothing and only records the page path in the local diagnostic log. |
-  | Content script `https://live.bilibili.com/*` | On live pages, takes over the player's live media downloads: the FLV live stream and HLS live segments (.m4s and .ts; .m3u8 playlists pass through), and, after the pair check, races the same-cluster primary/backup addresses Bilibili supplied (no prefetch, no buffer target). |
+  | Content script `https://live.bilibili.com/*` | On live pages, takes over the player's live media downloads: the FLV live stream and HLS live segments (.m4s and .ts; .m3u8 playlists pass through), and, after the pair check, races the same-cluster primary/backup addresses Bilibili supplied (no prefetch, no buffer target). On fMP4 live rooms (.m4s segments) a third FLV backup leg joins: the extension reads the same room's same-stream, same-codec FLV address from Bilibili's own playback info, opens its own FLV connection, and rebuilds each segment byte for byte from the FLV frames; a rebuilt segment joins the race only when its byte count and CRC32 both equal the values the playlist published, mismatches are discarded and never handed to the player. |
   | MAIN world injection (`world: "MAIN"`) | Three scripts must run in the page's own JavaScript realm: bank.js wraps the page's fetch/XMLHttpRequest to catch the player's media requests; source-buffer-shim.js observes the page's MediaSource/SourceBuffer appends and removals for local diagnostics; main-bridge.js calls the Bilibili player object's own buffer setting (setStableBufferTime). The MAIN world exposes no chrome.* APIs; the ISOLATED-world controller.js reads the preference and writes the log. |
 
   If the dashboard shows a single combined "Host permission" field, paste:
   The extension requests no host_permissions; it has two content-script matches: www.bilibili.com
   (download takeover and a 120-second buffer request on video routes only; other routes only record
   the page path in the local diagnostic log) and live.bilibili.com (live-media takeover: FLV live streams and
-  HLS live segments, .m3u8 playlists passing through, racing Bilibili's own primary/backup addresses). Media fetches run in the page context and go only to the
+  HLS live segments, .m3u8 playlists passing through, racing Bilibili's own primary/backup addresses; on fMP4
+  live rooms a further FLV backup leg reads the same room's FLV address from Bilibili's playback info and
+  rebuilds each segment from the FLV frames, and only a rebuild whose byte count and CRC32 equal the values the
+  playlist published ever joins the race). Media fetches run in the page context and go only to the
   address the player requested and the mirror addresses Bilibili's playback info lists for the same
-  file.
+  file; the fMP4 backup's FLV address comes from that same playback info.
 - **Remote code**: select "No, I am not using remote code". All JavaScript is bundled from repository
   sources by esbuild at build time; nothing remote is loaded or executed at runtime (the sources
   contain no eval, new Function, remote script, or importScripts).

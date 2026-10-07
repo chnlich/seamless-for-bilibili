@@ -6,7 +6,7 @@ Seamless for Bilibili is a Chrome extension that reduces playback stutter on Bil
 
 The user-facing part of this file is complete in English. The authoritative technical specification (the download layer, panel behaviour, and background-tab behaviour) lives in Chinese in [README.md](README.md); this file gives an English overview and links to it, so every fact has one home.
 
-Long-term product constraints: [GOAL.md](GOAL.md). Privacy policy (bilingual): [PRIVACY.md](PRIVACY.md). Store listing materials: [store/README.md](store/README.md).
+Long-term product constraints: [GOAL.md](GOAL.md). Privacy policy (bilingual): [PRIVACY.md](PRIVACY.md). Changelog (bilingual): [CHANGELOG.md](CHANGELOG.md). Store listing materials: [store/README.md](store/README.md).
 
 ## What it is and who it is for
 
