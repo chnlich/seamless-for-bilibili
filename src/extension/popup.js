@@ -14,7 +14,7 @@ import { popupAttachedTab } from './popup-tabs.js';
 import {
   NO_PAGE_MESSAGES,
   applyPageAvailability,
-  cdnLinesView,
+  downloadLinesView,
   renderCdnLines,
   renderLiveTakeover,
   renderVideoPanel as renderVideoPanelView,
@@ -92,7 +92,15 @@ function renderVideoPanel() {
 }
 
 function renderRacePanel() {
-  renderCdnLines(document, cdnLinesElement, cdnLinesView(raceSummary, raceError, raceQueryInFlight));
+  renderCdnLines(document, cdnLinesElement, downloadLinesView({
+    response: raceSummary,
+    error: raceError,
+    inFlight: raceQueryInFlight,
+    live: popupRoute === POPUP_ROUTE.LIVE,
+    readouts: latestReadouts,
+    vodEnabled: enhancementEnabled,
+    liveEnabled,
+  }));
 }
 
 function renderLivePanel() {

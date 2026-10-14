@@ -10,14 +10,19 @@ function ranges(values) {
   };
 }
 
-function video({ currentTime = 10, buffered = [[0, 80]] } = {}) {
-  return {
+function video({ currentTime = 10, buffered = [[0, 80]], duration, paused, ended, readyState } = {}) {
+  const element = {
     currentTime,
     buffered: ranges(buffered),
     seekable: ranges([[0, 120]]),
     src: 'https://media.example/video-1.m3u8',
     currentSrc: 'https://media.example/video-1.m3u8',
   };
+  if (duration !== undefined) element.duration = duration;
+  if (paused !== undefined) element.paused = paused;
+  if (ended !== undefined) element.ended = ended;
+  if (readyState !== undefined) element.readyState = readyState;
+  return element;
 }
 
 test('readouts expose the continuous forward seconds against the current playhead', () => {
@@ -58,4 +63,38 @@ test('readouts carry the session id the popup needs for cdn summaries', () => {
   assert.equal(Object.hasOwn(readouts, 'bank'), false);
   assert.equal(Object.hasOwn(readouts, 'lastStall'), false);
   assert.equal(Object.hasOwn(readouts, 'media'), false);
+});
+
+test('readouts carry the play position, duration, and waiting state the download card needs', () => {
+  const playing = buildReadouts({
+    surfaceId: 'surface-test',
+    video: video({ currentTime: 91.3, duration: 1460, paused: false, ended: false, readyState: 2 }),
+    diagnostics: { sessionId: 'session-test', routeKind: 'video' },
+  });
+  assert.equal(playing.version, READOUTS_VERSION);
+  assert.equal(playing.currentTime, 91.3);
+  assert.equal(playing.duration, 1460);
+  assert.equal(playing.waiting, true);
+
+  const playingSmoothly = buildReadouts({
+    surfaceId: 'surface-test',
+    video: video({ paused: false, ended: false, readyState: 4 }),
+    diagnostics: { sessionId: 'session-test', routeKind: 'video' },
+  });
+  assert.equal(playingSmoothly.waiting, false);
+
+  const paused = buildReadouts({
+    surfaceId: 'surface-test',
+    video: video({ paused: true, ended: false, readyState: 1 }),
+    diagnostics: { sessionId: 'session-test', routeKind: 'video' },
+  });
+  assert.equal(paused.waiting, false);
+
+  const unreadable = buildReadouts({
+    surfaceId: 'surface-test',
+    video: video({}),
+    diagnostics: { sessionId: 'session-test', routeKind: 'video' },
+  });
+  assert.equal(unreadable.waiting, '未提供');
+  assert.equal(unreadable.duration, '未提供');
 });

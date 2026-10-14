@@ -9,7 +9,7 @@
     "icons": "node scripts/generate-icons.mjs",
     "package": "npm run build && npm run test:contract && node scripts/package.mjs",
     "release:branch": "node scripts/release-branch.mjs",
-    "test:unit": "node --test test/unit.test.mjs test/extension-unit.test.mjs test/idb-unit.test.mjs test/source-buffer-shim-unit.test.mjs test/bank-unit.test.mjs test/browser-harness-unit.test.mjs test/inventory-unit.test.mjs test/readouts-unit.test.mjs test/popup-unit.test.mjs test/release-branch-unit.test.mjs",
+    "test:unit": "node --test test/unit.test.mjs test/extension-unit.test.mjs test/idb-unit.test.mjs test/source-buffer-shim-unit.test.mjs test/bank-unit.test.mjs test/browser-harness-unit.test.mjs test/inventory-unit.test.mjs test/readouts-unit.test.mjs test/popup-unit.test.mjs test/download-status-unit.test.mjs test/release-branch-unit.test.mjs",
     "test:contract": "node test/build-contract.mjs",
     "capture:store-images": "node scripts/capture-store-images.mjs",
     "test:e2e": "node scripts/browser-e2e.mjs",

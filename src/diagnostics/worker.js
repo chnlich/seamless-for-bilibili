@@ -5,6 +5,7 @@ import { normalizeEventForStorage } from './privacy.js';
 import { sessionWithTabId, validateSession } from './session.js';
 import { serializeError } from '../extension/bridge-contract.js';
 import { aggregateCdnEvents } from './cdn.js';
+import { deriveDownloadStatus } from './download-status.js';
 import { emptyLiveFacts, foldLiveEvent } from '../extension/popup-live.js';
 
 const BATCH_TYPE = 'diagnostic:events';
@@ -389,19 +390,23 @@ async function readCdnSummary(message, indexedDbObject) {
       IDBKeyRange.bound([message.sessionId, 0], [message.sessionId, Number.MAX_SAFE_INTEGER]),
     );
     const events = [];
+    let latestInventory;
     let maxEventId = 0;
     request.onerror = () => reject(request.error || new Error('读取 CDN summary 事件失败'));
     request.onsuccess = () => {
       const cursor = request.result;
       if (cursor === null) {
         const summary = aggregateCdnEvents(events);
-        resolve({ maxEventId, sampleCount: events.length, summary });
+        // 弹窗的「下载线路」卡片读 downloadStatus，日志页 CDN 面板照旧只读 summary。
+        const downloadStatus = deriveDownloadStatus({ chunkEvents: events, latestInventory, nowMs: Date.now() });
+        resolve({ maxEventId, sampleCount: events.length, summary, downloadStatus });
         return;
       }
       const event = cursor.value;
       const eventId = cursor.primaryKey ?? event.eventId;
       if (Number.isInteger(eventId) && eventId > maxEventId) maxEventId = eventId;
       if (event.code === 'bank.fetch.chunk') events.push(event);
+      if (event.code === 'bank.inventory') latestInventory = event;
       cursor.continue();
     };
     transaction.oncomplete = () => database.close();

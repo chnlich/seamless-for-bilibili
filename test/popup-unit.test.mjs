@@ -15,19 +15,21 @@ import {
   savePreferenceChange,
   storedPreferences,
 } from '../src/extension/popup-live.js';
+import { deriveDownloadStatus } from '../src/diagnostics/download-status.js';
 import {
+  DOWNLOAD_CARD_TEXT,
   NO_PAGE_MESSAGES,
   SWITCH_OFF_TEXT,
   applyPageAvailability,
-  cdnLinesView,
-  connectionText,
-  lineHealth,
+  clockText,
+  downloadLinesView,
   liveTakeoverText,
   renderBuffer,
   renderCdnLines,
   renderLiveTakeover,
   renderVideoPanel,
   shortMirrorName,
+  speedText,
   surfaceErrorText,
   targetStateText,
 } from '../src/extension/popup-view.js';
@@ -136,96 +138,402 @@ test('mirror hosts shrink to readable line names that stay distinguishable', () 
   assert.equal(shortMirrorName(undefined), '未知线路');
 });
 
-test('connection text names a typical value and a slow case in milliseconds', () => {
-  assert.equal(connectionText(48.2, 131.6), '通常 48 毫秒 · 慢时 132 毫秒');
-  assert.equal(connectionText(48, undefined), '通常 48 毫秒');
-  assert.equal(connectionText(undefined, 131), undefined);
-});
+// ---- 下载线路卡片：此刻的下载状态 ----
+// 时间线复刻设计稿第二节折叠块里的那次卡顿（合成记录，不含真实日志）：
+// 全程两条线路竞速同一块，hz-mirrorakam（Akamai）几乎每块都赢；视频第 3 块
+// akam 反复只发回一部分（invalid_response）、sz-mirrorcosov 反复停滞，最后补到
+// 第 3 块、整个文件存好、在途与排队清零。三个时刻对应设计稿第三节的三张卡片。
+const MB = 1_048_576;
+const AKAM = 'upos-hz-mirrorakam.akamaized.net';
+const COS = 'upos-sz-mirrorcosov.bilivideo.com';
+const VIDEO_PATH = '/video/track.m4s';
+const AUDIO_PATH = '/audio/track.m4s';
+const VIDEO_TOTAL = 55_105_041;
+const AUDIO_TOTAL = 12_582_912;
+const DURATION = 1_460;
+const NOW_A = 1_000_000;
+const NOW_B = NOW_A + 75_000;
+const NOW_C = NOW_B + 101_000;
 
-test('line health words come from stalls, failures, and delivered bytes', () => {
-  assert.deepEqual(lineHealth({ stalled: 2, failures: 0, ttfbP50: 40, bytesDelivered: 10 }), { word: '有停滞', tone: 'warn' });
-  assert.deepEqual(lineHealth({ stalled: 0, failures: 1, ttfbP50: 40, bytesDelivered: 10 }), { word: '有错误', tone: 'bad' });
-  assert.deepEqual(lineHealth({ stalled: 0, failures: 0, ttfbP50: 40, bytesDelivered: 10 }), { word: '正常', tone: 'ok' });
-  assert.deepEqual(lineHealth({ stalled: 0, failures: 0, ttfbP50: undefined, bytesDelivered: 0 }), { word: '尚无数据', tone: 'idle' });
-});
+function fetchEvent({
+  at,
+  mirror,
+  path = VIDEO_PATH,
+  chunkIndex = 0,
+  bytes = MB,
+  durationMs = 500,
+  slot = 0,
+  result = 'fetched',
+}) {
+  const start = chunkIndex * MB;
+  return {
+    wallTime: new Date(at).toISOString(),
+    data: {
+      source: `https://${mirror}${path}`,
+      mirror,
+      chunkIndex,
+      start,
+      end: Math.min(start + MB - 1, VIDEO_TOTAL - 1),
+      bytes,
+      durationMs,
+      slot,
+      result,
+    },
+  };
+}
 
-test('cdn lines render every mirror with its health word and connection time', () => {
-  const document = popupDocument();
-  const container = document.querySelector('[data-cdn-lines]');
-  renderCdnLines(document, container, {
-    rows: [
-      { mirror: 'upos-sz-mirrorcosov.bilivideo.com', ttfbP50: 48.2, ttfbP90: 131.6, stalled: 0, failures: 0, bytesDelivered: 4096 },
-      { mirror: 'upos-hz-mirrorakam.akamaized.net', ttfbP50: 51, ttfbP90: 200, stalled: 3, failures: 0, bytesDelivered: 0 },
-    ],
+function incidentInventory({ inflight, queued, videoContiguousEnd, videoOutstanding = 0 }) {
+  return {
+    data: {
+      inflight,
+      queued,
+      resources: [
+        {
+          pathname: VIDEO_PATH,
+          kind: 'video',
+          active: true,
+          totalSize: VIDEO_TOTAL,
+          contiguousEnd: videoContiguousEnd,
+          outstanding: videoOutstanding,
+        },
+        {
+          pathname: AUDIO_PATH,
+          kind: 'audio',
+          active: true,
+          totalSize: AUDIO_TOTAL,
+          contiguousEnd: AUDIO_TOTAL,
+          outstanding: 0,
+        },
+      ],
+    },
+  };
+}
+
+// 块 0、1、2、4 到 29 的双腿竞速：akam 每块取到，cos 每块输掉且一个字节也没收到。
+function raceEvents() {
+  const events = [];
+  for (let i = 0; i < 29; i += 1) {
+    const chunkIndex = i < 3 ? i : i + 1;
+    const at = NOW_A - 4_300 + i * 150;
+    events.push(fetchEvent({ at, mirror: AKAM, chunkIndex, result: 'fetched', slot: 0 }));
+    events.push(fetchEvent({
+      at: at + 50,
+      mirror: COS,
+      chunkIndex,
+      bytes: 0,
+      result: 'lost_race',
+      slot: 1,
+    }));
+  }
+  return events;
+}
+
+// 视频第 3 块：akam 与 cos 各自连续失败 8 次，前几次已落在 15 秒活动窗口之外。
+function chunk3FailureEvents() {
+  const events = [];
+  for (let i = 0; i < 8; i += 1) {
+    events.push(fetchEvent({
+      at: NOW_B - 70_000 + i * 10_000,
+      mirror: AKAM,
+      chunkIndex: 3,
+      bytes: 818_559,
+      durationMs: 4_000,
+      result: 'invalid_response',
+    }));
+    events.push(fetchEvent({
+      at: NOW_B - 63_000 + i * 9_000,
+      mirror: COS,
+      chunkIndex: 3,
+      bytes: 0,
+      durationMs: 10_000,
+      result: 'stalled',
+    }));
+  }
+  return events;
+}
+
+function completionEvents() {
+  return [
+    fetchEvent({ at: NOW_C - 60_000, mirror: AKAM, chunkIndex: 3, result: 'fetched' }),
+    fetchEvent({
+      at: NOW_C - 60_000,
+      mirror: COS,
+      chunkIndex: 3,
+      bytes: 0,
+      result: 'lost_race',
+      slot: 1,
+    }),
+    fetchEvent({ at: NOW_C - 59_000, mirror: AKAM, chunkIndex: 51, result: 'fetched' }),
+    fetchEvent({ at: NOW_C - 59_000, mirror: AKAM, chunkIndex: 52, result: 'fetched' }),
+  ];
+}
+
+function downloadCard({ events, latestInventory, nowMs, live = false, readouts, vodEnabled = true, liveEnabled = true }) {
+  const status = deriveDownloadStatus({ chunkEvents: events, latestInventory, nowMs });
+  const response = { sampleCount: events.length, summary: { rows: [] }, downloadStatus: status };
+  const view = downloadLinesView({
+    response,
+    error: undefined,
+    inFlight: false,
+    live,
+    readouts,
+    vodEnabled,
+    liveEnabled,
   });
-  const lines = [...container.querySelectorAll('.cdn-line')];
-  assert.equal(lines.length, 2);
-  assert.deepEqual(
-    lines.map((line) => line.querySelector('.cdn-name').textContent),
-    ['sz-mirrorcosov', 'hz-mirrorakam'],
-  );
-  assert.deepEqual(
-    lines.map((line) => line.querySelector('.cdn-health').textContent),
-    ['正常', '有停滞'],
-  );
-  assert.deepEqual(
-    lines.map((line) => line.querySelector('.cdn-conn').textContent),
-    ['通常 48 毫秒 · 慢时 132 毫秒', '通常 51 毫秒 · 慢时 200 毫秒'],
-  );
-  assert.equal(container.textContent.includes('readyState'), false);
-  assert.equal(container.textContent.includes('TTFB'), false);
-});
-
-test('cdn lines show the FLV rebuild count instead of a missing connection record', () => {
   const document = popupDocument();
   const container = document.querySelector('[data-cdn-lines]');
-  renderCdnLines(document, container, {
-    rows: [
-      // 拼接腿独占的线路：没有 ttfb，补片数就是这一行的连接事实。
-      { mirror: 'ov-gotcha07.ws.bilivideo.com', stalled: 0, failures: 0, bytesDelivered: 48000, rebuiltSegments: 134 },
-      // 同一主机也有网络首字节时间：连接时间与补片数同在一行。
-      { mirror: 'd1--ov-gotcha207.bilivideo.com', ttfbP50: 48.2, ttfbP90: 131.6, stalled: 0, failures: 0, bytesDelivered: 4096, rebuiltSegments: 3 },
-      // 没有补片的线路照旧。
-      { mirror: 'upos-hz-mirrorakam.akamaized.net', ttfbP50: 51, ttfbP90: 200, stalled: 0, failures: 0, bytesDelivered: 4096 },
-    ],
+  renderCdnLines(document, container, view);
+  return {
+    headline: container.querySelector('.cdn-headline')?.textContent ?? null,
+    subline: container.querySelector('.cdn-subline')?.textContent ?? null,
+    message: container.querySelector('.cdn-empty')?.textContent ?? null,
+    rows: [...container.querySelectorAll('.cdn-line')].map((line) => ({
+      name: line.querySelector('.cdn-name').textContent,
+      text: line.querySelector('.cdn-status').textContent,
+      tone: line.dataset.tone,
+    })),
+  };
+}
+
+test('speeds and clock positions format the way the card promises', () => {
+  assert.equal(speedText(9_949_900), '9.9 Mbps');
+  assert.equal(speedText(10_000_000), '10 Mbps');
+  assert.equal(speedText(48_653_926.4), '49 Mbps');
+  assert.equal(speedText(500_000), '0.5 Mbps');
+  assert.equal(clockText(0), '0:00');
+  assert.equal(clockText(85), '1:25');
+  assert.equal(clockText(91.3), '1:31');
+  assert.equal(clockText(1460), '24:20');
+  assert.equal(clockText(3600), '60:00');
+});
+
+test('downloading moment: total and per-line speeds, how far ahead, and the leg that lost', () => {
+  const card = downloadCard({
+    events: raceEvents(),
+    latestInventory: incidentInventory({ inflight: 2, queued: 40, videoContiguousEnd: 3 * MB }),
+    nowMs: NOW_A,
+    readouts: { waiting: false, currentTime: 45, duration: DURATION, forwardSeconds: 40 },
   });
-  const lines = [...container.querySelectorAll('.cdn-line')];
-  assert.deepEqual(
-    lines.map((line) => line.querySelector('.cdn-name').textContent),
-    ['ov-gotcha07.ws', 'ov-gotcha207', 'hz-mirrorakam'],
-  );
-  assert.deepEqual(
-    lines.map((line) => line.querySelector('.cdn-conn').textContent),
-    [
-      'FLV 拼接 · 已补上 134 个分片',
-      '通常 48 毫秒 · 慢时 132 毫秒 · FLV 拼接 · 已补上 3 个分片',
-      '通常 51 毫秒 · 慢时 200 毫秒',
-    ],
-  );
-  assert.equal(container.textContent.includes('还没有连接记录'), false);
-  // 健康词逻辑不变：补过分片的线路按交付字节报正常。
-  assert.deepEqual(
-    lines.map((line) => line.querySelector('.cdn-health').textContent),
-    ['正常', '正常', '正常'],
-  );
+  assert.equal(card.headline, '正在下载 · 合计 49 Mbps');
+  assert.equal(card.subline, '已提前下载到约 1:25（全长 24:20）');
+  assert.deepEqual(card.rows, [
+    { name: 'hz-mirrorakam', text: '下载中 · 49 Mbps', tone: 'ok' },
+    { name: 'sz-mirrorcosov', text: '另一条线路更快', tone: 'idle' },
+  ]);
 });
 
-test('cdn lines degrade to a plain message when there is no data or a read error', () => {
+test('stalled moment: what the player waits for and how many retry rounds, no second line', () => {
+  const card = downloadCard({
+    events: [...raceEvents(), ...chunk3FailureEvents()],
+    latestInventory: incidentInventory({ inflight: 2, queued: 20, videoContiguousEnd: 3 * MB, videoOutstanding: 1 }),
+    nowMs: NOW_B,
+    readouts: { waiting: true, currentTime: 91.3, duration: DURATION, forwardSeconds: 0 },
+  });
+  assert.equal(card.headline, '正在等 1:31 处的数据，已重试 8 轮');
+  assert.equal(card.subline, null);
+  assert.deepEqual(card.rows, [
+    { name: 'hz-mirrorakam', text: '数据没给全就断开', tone: 'bad' },
+    { name: 'sz-mirrorcosov', text: '10 秒没有收到数据', tone: 'warn' },
+  ]);
+});
+
+test('caught-up moment: downloads paused by design, the whole video stored, lines idle', () => {
+  const card = downloadCard({
+    events: [...raceEvents(), ...chunk3FailureEvents(), ...completionEvents()],
+    latestInventory: incidentInventory({ inflight: 0, queued: 0, videoContiguousEnd: VIDEO_TOTAL }),
+    nowMs: NOW_C,
+    readouts: { waiting: false, currentTime: 91.5, duration: DURATION, forwardSeconds: 120 },
+  });
+  assert.equal(card.headline, '已下载够，暂停下载');
+  assert.equal(card.subline, '整个视频已下载（全长 24:20）');
+  assert.deepEqual(card.rows, [
+    { name: 'hz-mirrorakam', text: '空闲', tone: 'idle' },
+    { name: 'sz-mirrorcosov', text: '空闲', tone: 'idle' },
+  ]);
+});
+
+test('a line that failed earlier and then recovered shows only that it is downloading', () => {
+  const card = downloadCard({
+    events: [
+      fetchEvent({ at: NOW_A - 20_000, mirror: AKAM, chunkIndex: 3, bytes: 818_559, result: 'invalid_response' }),
+      fetchEvent({ at: NOW_A - 1_000, mirror: AKAM, chunkIndex: 3, durationMs: 250, result: 'fetched' }),
+    ],
+    latestInventory: incidentInventory({ inflight: 1, queued: 5, videoContiguousEnd: 4 * MB }),
+    nowMs: NOW_A,
+    readouts: { waiting: false, currentTime: 45, duration: DURATION, forwardSeconds: 40 },
+  });
+  assert.equal(card.headline, '正在下载 · 合计 1.7 Mbps');
+  assert.deepEqual(card.rows, [{ name: 'hz-mirrorakam', text: '下载中 · 1.7 Mbps', tone: 'ok' }]);
+});
+
+test('with no records the card says so, or names the switch that is off', () => {
+  const noRecords = { latestInventory: undefined, nowMs: NOW_A, readouts: undefined, events: [] };
+  assert.equal(downloadCard({ ...noRecords }).headline, '还没有下载数据');
+  assert.equal(downloadCard({ ...noRecords, vodEnabled: false }).headline, '视频增强开关已关闭');
+  assert.equal(downloadCard({ ...noRecords, live: true }).headline, '还没有下载数据');
+  assert.equal(downloadCard({ ...noRecords, live: true, liveEnabled: false }).headline, '直播增强开关已关闭');
+  const card = downloadCard({ ...noRecords });
+  assert.equal(card.rows.length, 0);
+  assert.equal(card.subline, null);
+});
+
+test('waiting with the data already in hand writes no retry rounds', () => {
+  const card = downloadCard({
+    events: [
+      fetchEvent({ at: NOW_A - 30_000, mirror: AKAM, chunkIndex: 0, result: 'fetched' }),
+      fetchEvent({ at: NOW_A - 10_000, mirror: AKAM, chunkIndex: 3, bytes: 818_559, result: 'invalid_response' }),
+      fetchEvent({ at: NOW_A - 9_000, mirror: COS, chunkIndex: 3, bytes: 0, durationMs: 10_000, result: 'stalled' }),
+    ],
+    latestInventory: incidentInventory({ inflight: 1, queued: 2, videoContiguousEnd: 3 * MB, videoOutstanding: 0 }),
+    nowMs: NOW_A,
+    readouts: { waiting: true, currentTime: 91.3, duration: DURATION, forwardSeconds: 0 },
+  });
+  // outstanding 是 0：播放器要的数据已在扩展手里，等待另有原因，不写重试轮数。
+  assert.equal(card.headline, '正在等 1:31 处的数据');
+});
+
+test('a new playback session starts the retry rounds at zero', () => {
+  const failures = chunk3FailureEvents();
+  const newestSession = deriveDownloadStatus({
+    chunkEvents: [
+      fetchEvent({ at: NOW_B - 1_000, mirror: AKAM, chunkIndex: 0, result: 'fetched' }),
+    ],
+    latestInventory: incidentInventory({ inflight: 2, queued: 20, videoContiguousEnd: 3 * MB, videoOutstanding: 1 }),
+    nowMs: NOW_B,
+  });
+  assert.equal(newestSession.inventory.resources[0].failedRounds, 0);
+  const oldSession = deriveDownloadStatus({
+    chunkEvents: failures,
+    latestInventory: incidentInventory({ inflight: 2, queued: 20, videoContiguousEnd: 3 * MB, videoOutstanding: 1 }),
+    nowMs: NOW_B,
+  });
+  assert.equal(oldSession.inventory.resources[0].failedRounds, 8);
+});
+
+test('the last chunk just fetched but the inventory already reads zero in flight: pause, lines idle', () => {
+  const card = downloadCard({
+    events: [fetchEvent({ at: NOW_A - 2_000, mirror: AKAM, chunkIndex: 52, bytes: 579_089, result: 'fetched' })],
+    latestInventory: incidentInventory({ inflight: 0, queued: 0, videoContiguousEnd: VIDEO_TOTAL }),
+    nowMs: NOW_A,
+    readouts: { waiting: false, currentTime: 91.5, duration: DURATION, forwardSeconds: 120 },
+  });
+  assert.equal(card.headline, '已下载够，暂停下载');
+  assert.equal(card.subline, '整个视频已下载（全长 24:20）');
+  assert.deepEqual(card.rows, [{ name: 'hz-mirrorakam', text: '空闲', tone: 'idle' }]);
+});
+
+test('paused downloads with failed rounds on the next missing chunk say the player will retry on demand', () => {
+  const card = downloadCard({
+    events: [0, 1, 2].map((i) => fetchEvent({
+      at: NOW_A - 60_000 + i * 10_000,
+      mirror: AKAM,
+      chunkIndex: 3,
+      bytes: 818_559,
+      result: 'invalid_response',
+    })),
+    latestInventory: incidentInventory({ inflight: 0, queued: 0, videoContiguousEnd: 3 * MB }),
+    nowMs: NOW_A,
+    readouts: { waiting: false, currentTime: 45, duration: DURATION, forwardSeconds: 40 },
+  });
+  assert.equal(card.headline, '暂停下载，播放器要时再取');
+  assert.equal(card.subline, '已提前下载到约 1:25（全长 24:20），之后的数据已重试 3 轮');
+});
+
+test('in flight or queued with nothing received in five seconds still reads as downloading', () => {
+  const card = downloadCard({
+    events: [fetchEvent({ at: NOW_A - 8_000, mirror: AKAM, chunkIndex: 0, result: 'fetched' })],
+    latestInventory: incidentInventory({ inflight: 3, queued: 2, videoContiguousEnd: 3 * MB }),
+    nowMs: NOW_A,
+    readouts: { waiting: false, currentTime: 45, duration: DURATION, forwardSeconds: 40 },
+  });
+  assert.equal(card.headline, '正在下载，最近 5 秒没有收到数据');
+  assert.deepEqual(card.rows, [{ name: 'hz-mirrorakam', text: '空闲', tone: 'idle' }]);
+});
+
+test('without an inventory snapshot the second line stays hidden', () => {
+  const card = downloadCard({
+    events: [fetchEvent({ at: NOW_A - 1_000, mirror: AKAM, chunkIndex: 0, result: 'fetched' })],
+    latestInventory: undefined,
+    nowMs: NOW_A,
+    readouts: { waiting: false, currentTime: 10, duration: DURATION, forwardSeconds: 30 },
+  });
+  assert.equal(card.headline, '正在下载 · 合计 1.7 Mbps');
+  assert.equal(card.subline, null);
+});
+
+test('live page with two lines: per-line speeds and the total, no second line', () => {
+  const leg = (mirror, at) => fetchEvent({
+    at,
+    mirror,
+    path: '/live/stream-1.m4s',
+    chunkIndex: 0,
+    bytes: 156_250,
+    durationMs: 400,
+    result: 'fetched',
+  });
+  const card = downloadCard({
+    events: [
+      leg('d1--ov-gotcha207.bilivideo.com', NOW_A - 1_000),
+      leg('d1--ov-gotcha207.bilivideo.com', NOW_A - 2_000),
+      leg('d1--ov-gotcha207b.bilivideo.com', NOW_A - 1_500),
+      leg('d1--ov-gotcha207b.bilivideo.com', NOW_A - 2_500),
+    ],
+    latestInventory: undefined,
+    nowMs: NOW_A,
+    live: true,
+  });
+  assert.equal(card.headline, '正在下载 · 合计 1.0 Mbps');
+  assert.equal(card.subline, null);
+  assert.deepEqual(card.rows, [
+    { name: 'ov-gotcha207', text: '下载中 · 0.5 Mbps', tone: 'ok' },
+    { name: 'ov-gotcha207b', text: '下载中 · 0.5 Mbps', tone: 'ok' },
+  ]);
+});
+
+test('live page with records outside every window: quiet headline and idle lines', () => {
+  const card = downloadCard({
+    events: [
+      fetchEvent({ at: NOW_A - 20_000, mirror: 'd1--ov-gotcha207.bilivideo.com', path: '/live/stream-1.m4s', result: 'fetched' }),
+      fetchEvent({ at: NOW_A - 20_000, mirror: 'd1--ov-gotcha207b.bilivideo.com', path: '/live/stream-1.m4s', bytes: 0, result: 'lost_race', slot: 1 }),
+    ],
+    latestInventory: undefined,
+    nowMs: NOW_A,
+    live: true,
+  });
+  assert.equal(card.headline, '最近 5 秒没有收到数据');
+  assert.deepEqual(card.rows, [
+    { name: 'ov-gotcha207', text: '空闲', tone: 'idle' },
+    { name: 'ov-gotcha207b', text: '空闲', tone: 'idle' },
+  ]);
+});
+
+test('live page when the last record on a line is a server error reports it in red', () => {
+  const card = downloadCard({
+    events: [
+      fetchEvent({ at: NOW_A - 3_000, mirror: 'd1--ov-gotcha207.bilivideo.com', path: '/live/stream-1.m4s', bytes: 0, result: 'http_error' }),
+      fetchEvent({ at: NOW_A - 2_800, mirror: 'd1--ov-gotcha207b.bilivideo.com', path: '/live/stream-1.m4s', bytes: 0, result: 'http_error' }),
+    ],
+    latestInventory: undefined,
+    nowMs: NOW_A,
+    live: true,
+  });
+  assert.equal(card.headline, '最近 5 秒没有收到数据');
+  assert.deepEqual(card.rows, [
+    { name: 'ov-gotcha207', text: '服务器返回错误', tone: 'bad' },
+    { name: 'ov-gotcha207b', text: '服务器返回错误', tone: 'bad' },
+  ]);
+});
+
+test('download card view covers loading, failure, and no-session messages', () => {
   const document = popupDocument();
   const container = document.querySelector('[data-cdn-lines]');
-  renderCdnLines(document, container, { message: '还没有线路数据' });
-  assert.equal(container.querySelector('.cdn-empty').textContent, '还没有线路数据');
-  renderCdnLines(document, container, {});
-  assert.equal(container.querySelector('.cdn-empty').textContent, '还没有线路数据');
-});
-
-test('cdn lines view picks rows, loading, empty, or failure wording', () => {
-  const summary = { sampleCount: 2, summary: { rows: [{ mirror: 'a.bilivideo.com' }] } };
-  assert.deepEqual(cdnLinesView(summary, undefined, false), { rows: [{ mirror: 'a.bilivideo.com' }] });
-  assert.deepEqual(cdnLinesView(undefined, undefined, true), { message: '正在读取线路状态…' });
-  assert.deepEqual(cdnLinesView(undefined, undefined, false), { message: '还没有线路数据' });
-  assert.deepEqual(cdnLinesView({ sampleCount: 0, summary: { rows: [] } }, undefined, false), { message: '还没有线路数据' });
-  assert.deepEqual(cdnLinesView(undefined, 'worker 挂了', false), { message: '线路状态读取失败' });
+  const args = { live: false, readouts: undefined, vodEnabled: true, liveEnabled: true };
+  renderCdnLines(document, container, downloadLinesView({ ...args, response: undefined, error: undefined, inFlight: true }));
+  assert.equal(container.querySelector('.cdn-empty').textContent, DOWNLOAD_CARD_TEXT.loading);
+  renderCdnLines(document, container, downloadLinesView({ ...args, response: undefined, error: undefined, inFlight: false }));
+  assert.equal(container.querySelector('.cdn-empty').textContent, DOWNLOAD_CARD_TEXT.noSession);
+  renderCdnLines(document, container, downloadLinesView({ ...args, response: undefined, error: 'worker 挂了', inFlight: false }));
+  assert.equal(container.querySelector('.cdn-empty').textContent, DOWNLOAD_CARD_TEXT.readFailed);
 });
 
 test('buffer renders seconds ahead against the 120-second target on a bar', () => {
@@ -580,6 +888,20 @@ function popupChromeMock({ currentWindowId, lastFocusedWindowId, windows, tabBeh
               wastedByteRatio: 0,
               byResult: { fetched: 1, lost_race: 0, stalled: 0, aborted: 0, superseded: 0, network_error: 0, http_error: 0, invalid_response: 0, gave_up: 0 },
               rows: [{ mirror: 'd1--ov-gotcha207.bilivideo.com', racesEntered: 1, wins: 1, winRate: 1, ttfbP50: 40, ttfbP90: 60, stalled: 0, failures: 0, bytesDelivered: 16 }],
+            },
+            downloadStatus: {
+              hasRecords: true,
+              anyLineBytesInWindow: true,
+              totalBitsPerSecond: 320_000,
+              lines: [{
+                mirror: 'd1--ov-gotcha207.bilivideo.com',
+                bitsPerSecond: 320_000,
+                receivedInWindow: true,
+                fetchedEndsInWindow: true,
+                seenInActivityWindow: true,
+                lastResultInWindow: 'fetched',
+              }],
+              inventory: undefined,
             },
           };
         }

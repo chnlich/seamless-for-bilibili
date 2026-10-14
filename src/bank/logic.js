@@ -34,6 +34,19 @@ export function cacheKey(bankKeyValue, index) {
   return `${bankKeyValue}#${index}`;
 }
 
+// 预取窗口的起点：播放器还在等的最靠前的请求所在的块；没在等请求时取播放器
+// 最近一次请求的起点所在块。库存快照的「连续存到哪里」（inventory.js 的
+// contiguousEndForResource）与预取窗口（main.js 的 scheduleResourceWindow）共用
+// 同一个起点，两处对外报的下载位置才一致。
+export function anchorChunkIndex(state, chunkBytes = BANK_CONFIG.chunkBytes) {
+  const outstanding = [...state.outstanding];
+  if (outstanding.length > 0) {
+    return Math.min(...outstanding.map((request) => chunkIndex(request.start, chunkBytes)));
+  }
+  if (!Number.isSafeInteger(state.lastForegroundStart)) return undefined;
+  return chunkIndex(state.lastForegroundStart, chunkBytes);
+}
+
 export function headerValue(headers, name) {
   if (headers !== null && typeof headers?.get === 'function') return headers.get(name);
   if (Array.isArray(headers)) {

@@ -13,6 +13,7 @@ import {
   BANK_MESSAGE_NAMESPACE,
 } from './contract.js';
 import {
+  anchorChunkIndex,
   bankKey,
   cacheKey,
   classifyRequest,
@@ -1709,12 +1710,7 @@ export class SegmentBank {
   }
 
   anchorChunkForState(state) {
-    const outstanding = [...state.outstanding];
-    if (outstanding.length > 0) {
-      return Math.min(...outstanding.map((request) => chunkIndex(request.start, this.config.chunkBytes)));
-    }
-    if (!Number.isSafeInteger(state.lastForegroundStart)) return undefined;
-    return chunkIndex(state.lastForegroundStart, this.config.chunkBytes);
+    return anchorChunkIndex(state, this.config.chunkBytes);
   }
 
   windowPlansForState(state, anchorChunk) {
@@ -2145,6 +2141,7 @@ export class SegmentBank {
   publishInventory(routeActive = this.lastRouteWasVideo) {
     const payload = deriveBankInventory({
       chunks: this.chunks,
+      chunkBytes: this.config.chunkBytes,
       resourceState: this.resourceState,
       addressBook: this.addressBook,
       recentResourceKeys: this.recentResourceKeys,

@@ -2,6 +2,10 @@
 
 ## 中文
 
+### 未发布
+
+- 弹窗「下载线路」卡片改报此刻的下载状态：合计速度与每条线路（镜像服务器）的速度、视频提前下载到哪里、播放器卡住时在等哪里的数据和已重试了几轮、按设计暂停下载时直说暂停。原来累计的「有错误」「有停滞」和连接时间从弹窗去掉，历史仍留在日志页的 CDN 竞速面板。
+
 ### 1.1.0 · [release/1.1.0](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.1.0)
 
 - fMP4 直播间（.m4s 分片）新增 FLV 后备：扩展从 Bilibili 自己的播放信息里读出同一直播间的同流名、同编码 FLV 地址，自己开一条 FLV 连接，把每个分片从 FLV 帧逐字节拼出，与两条网络线路一起竞速；字节数与 CRC32 都等于播放列表给出的值才参与竞速，对不上的丢弃、从不交给播放器。实测有这条后备时直播总流量为单路的 1.03 到 1.15 倍；拼接腿一直赶不上时约为单路的 2.3 倍。
@@ -12,6 +16,10 @@
 - 首次在 Chrome Web Store 发布。
 
 ## English
+
+### Unreleased
+
+- The popup's download-lines card now reports the current download state: the total speed and each mirror line's speed, how far ahead the video is downloaded, what the player is waiting for and how many retry rounds have failed while it stalls, and a plain statement when the extension pauses downloads by design. The cumulative 「有错误」/「有停滞」 words and the connection times leave the popup; the history stays on the logs page CDN panel.
 
 ### 1.1.0 · [release/1.1.0](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.1.0)
 

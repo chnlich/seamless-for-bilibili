@@ -154,7 +154,7 @@ function safeInventoryResources(value) {
     const label = typeof resource.label === 'string' ? resource.label : UNKNOWN_VALUE;
     const codecs = typeof resource.codecs === 'string' ? resource.codecs : UNKNOWN_VALUE;
     const active = resource.active === true || resource.active === false ? resource.active : UNKNOWN_VALUE;
-    return {
+    const safe = {
       pathname,
       kind,
       label,
@@ -169,6 +169,11 @@ function safeInventoryResources(value) {
       retrying: safeNonnegativeInteger(resource.retrying),
       active,
     };
+    // contiguousEnd 未知时下载层就不写这个字段，这里照样不写，不补「未提供」占位。
+    if (Object.prototype.hasOwnProperty.call(resource, 'contiguousEnd')) {
+      safe.contiguousEnd = safeNonnegativeInteger(resource.contiguousEnd);
+    }
+    return safe;
   });
 }
 

@@ -133,25 +133,112 @@
     const trimmed = body.replace(/^upos-/, "").replace(/^[a-z]+\d*--/, "");
     return trimmed.length >= 3 ? trimmed : mirror;
   }
-  function lineHealth(row) {
-    const stalled = row?.stalled;
-    const failures = row?.failures;
-    if (Number.isFinite(stalled) && stalled > 0) return { word: "有停滞", tone: "warn" };
-    if (Number.isFinite(failures) && failures > 0) return { word: "有错误", tone: "bad" };
-    if (Number.isFinite(row?.ttfbP50) || Number.isFinite(row?.bytesDelivered) && row.bytesDelivered > 0) {
-      return { word: "正常", tone: "ok" };
+  var LINE_FAILURE_TEXTS = Object.freeze({
+    invalid_response: "数据没给全就断开",
+    stalled: "10 秒没有收到数据",
+    network_error: "连接失败",
+    http_error: "服务器返回错误",
+    address_expired: "地址已过期"
+  });
+  var DOWNLOAD_CARD_TEXT = Object.freeze({
+    noRecords: "还没有下载数据",
+    noSession: "还没有线路数据",
+    loading: "正在读取线路状态…",
+    readFailed: "线路状态读取失败",
+    videoSwitchOff: "视频增强开关已关闭",
+    liveSwitchOff: SWITCH_OFF_TEXT.liveOff,
+    pause: "已下载够，暂停下载",
+    pauseWaitingForPlayer: "暂停下载，播放器要时再取",
+    quietVideo: "正在下载，最近 5 秒没有收到数据",
+    quietLive: "最近 5 秒没有收到数据",
+    lineIdle: "空闲",
+    lineLostRace: "另一条线路更快"
+  });
+  function speedText(bitsPerSecond) {
+    const mbps = bitsPerSecond / 1e6;
+    return `${mbps >= 10 ? String(Math.round(mbps)) : mbps.toFixed(1)} Mbps`;
+  }
+  function clockText(seconds) {
+    const whole = Math.max(0, Math.floor(seconds));
+    const minutes = Math.floor(whole / 60);
+    return `${minutes}:${String(whole % 60).padStart(2, "0")}`;
+  }
+  function playerResources(resources) {
+    return (resources ?? []).filter((resource) => resource?.active === true && (resource.kind === "video" || resource.kind === "audio") && Number.isSafeInteger(resource.contiguousEnd) && Number.isFinite(resource.totalSize) && resource.totalSize > 0);
+  }
+  function lagResource(resources) {
+    let picked;
+    for (const resource of playerResources(resources)) {
+      if (picked === void 0 || resource.contiguousEnd / resource.totalSize < picked.contiguousEnd / picked.totalSize) {
+        picked = resource;
+      }
     }
-    return { word: "尚无数据", tone: "idle" };
+    return picked;
   }
-  function connectionText(ttfbP50, ttfbP90) {
-    if (!Number.isFinite(ttfbP50)) return void 0;
-    const typical = `${Math.round(ttfbP50)} 毫秒`;
-    if (!Number.isFinite(ttfbP90)) return `通常 ${typical}`;
-    return `通常 ${typical} · 慢时 ${Math.round(ttfbP90)} 毫秒`;
+  function lineRowsOf(status, { live, inventoryQuiet }) {
+    return status.lines.map((line) => {
+      const idle = live ? !line.seenInActivityWindow : inventoryQuiet;
+      if (idle) return { mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineIdle, tone: "idle" };
+      if (line.fetchedEndsInWindow) {
+        return { mirror: line.mirror, text: `下载中 · ${speedText(line.bitsPerSecond)}`, tone: "ok" };
+      }
+      const failureText = LINE_FAILURE_TEXTS[line.lastResultInWindow];
+      if (failureText !== void 0) {
+        const tone = line.lastResultInWindow === "stalled" ? "warn" : "bad";
+        return { mirror: line.mirror, text: failureText, tone };
+      }
+      if (line.lastResultInWindow === "lost_race") {
+        return { mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineLostRace, tone: "idle" };
+      }
+      return { mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineIdle, tone: "idle" };
+    });
   }
-  function rebuildText(rebuiltSegments) {
-    if (!Number.isFinite(rebuiltSegments) || rebuiltSegments <= 0) return void 0;
-    return `FLV 拼接 · 已补上 ${rebuiltSegments} 个分片`;
+  function videoHeadline({ status, waitingNow, currentTime, lag }) {
+    if (waitingNow) {
+      const rounds = Number.isSafeInteger(lag?.outstanding) && lag.outstanding > 0 && Number.isSafeInteger(lag.failedRounds) && lag.failedRounds >= 1 ? lag.failedRounds : 0;
+      return `正在等 ${clockText(currentTime)} 处的数据` + (rounds >= 1 ? `，已重试 ${rounds} 轮` : "");
+    }
+    const inventory = status.inventory;
+    if (inventory?.inflight === 0 && inventory?.queued === 0) {
+      return Number.isSafeInteger(lag?.failedRounds) && lag.failedRounds >= 1 ? DOWNLOAD_CARD_TEXT.pauseWaitingForPlayer : DOWNLOAD_CARD_TEXT.pause;
+    }
+    if (status.anyLineBytesInWindow) return `正在下载 · 合计 ${speedText(status.totalBitsPerSecond)}`;
+    return DOWNLOAD_CARD_TEXT.quietVideo;
+  }
+  function videoSubline({ status, waitingNow, lag, readouts }) {
+    if (waitingNow) return void 0;
+    const candidates = playerResources(status.inventory?.resources);
+    const duration = readouts?.duration;
+    if (candidates.length === 0 || !Number.isFinite(duration)) return void 0;
+    if (candidates.every((resource) => resource.contiguousEnd === resource.totalSize)) {
+      return `整个视频已下载（全长 ${clockText(duration)}）`;
+    }
+    const estimated = Math.min(...candidates.map((resource) => resource.contiguousEnd / resource.totalSize * duration));
+    const bufferEnd = Number.isFinite(readouts?.currentTime) && Number.isFinite(readouts?.forwardSeconds) ? readouts.currentTime + readouts.forwardSeconds : 0;
+    const ahead = Math.max(estimated, bufferEnd);
+    const rounds = Number.isSafeInteger(lag?.failedRounds) && lag.failedRounds >= 1 ? lag.failedRounds : 0;
+    return `已提前下载到约 ${clockText(ahead)}（全长 ${clockText(duration)}）` + (rounds >= 1 ? `，之后的数据已重试 ${rounds} 轮` : "");
+  }
+  function downloadLinesView({ response, error, inFlight, live, readouts, vodEnabled, liveEnabled: liveEnabled2 }) {
+    if (error !== void 0) return { message: DOWNLOAD_CARD_TEXT.readFailed };
+    if (response === void 0) return { message: inFlight === true ? DOWNLOAD_CARD_TEXT.loading : DOWNLOAD_CARD_TEXT.noSession };
+    const status = response.downloadStatus;
+    if (!status.hasRecords) {
+      const switchOn = live === true ? liveEnabled2 !== false : vodEnabled !== false;
+      const headline = switchOn ? DOWNLOAD_CARD_TEXT.noRecords : live === true ? DOWNLOAD_CARD_TEXT.liveSwitchOff : DOWNLOAD_CARD_TEXT.videoSwitchOff;
+      return { headline, subline: void 0, lines: [] };
+    }
+    if (live === true) {
+      const headline = status.anyLineBytesInWindow ? `正在下载 · 合计 ${speedText(status.totalBitsPerSecond)}` : DOWNLOAD_CARD_TEXT.quietLive;
+      return { headline, subline: void 0, lines: lineRowsOf(status, { live: true, inventoryQuiet: false }) };
+    }
+    const waitingNow = readouts?.waiting === true && Number.isFinite(readouts?.currentTime);
+    const lag = lagResource(status.inventory?.resources);
+    return {
+      headline: videoHeadline({ status, waitingNow, currentTime: readouts?.currentTime, lag }),
+      subline: videoSubline({ status, waitingNow, lag, readouts }),
+      lines: lineRowsOf(status, { live: false, inventoryQuiet: status.inventory?.inflight === 0 && status.inventory?.queued === 0 })
+    };
   }
   function targetStateText({ hasVideo, stateLabel, enhancementEnabled: enhancementEnabled2 }) {
     if (hasVideo !== true) return "";
@@ -165,12 +252,6 @@
   function surfaceErrorText(snapshot) {
     const error = snapshot?.error;
     return typeof error === "string" && error.length > 0 && error !== "未提供" ? error : void 0;
-  }
-  function cdnLinesView(summary, error, inFlight) {
-    if (error !== void 0) return { message: "线路状态读取失败" };
-    if (summary === void 0) return { message: inFlight === true ? "正在读取线路状态…" : "还没有线路数据" };
-    if (summary.sampleCount === 0) return { message: "还没有线路数据" };
-    return { rows: summary.summary.rows };
   }
   function renderVideoPanel(documentObject, refs, { forwardSeconds, snapshot, enhancementEnabled: enhancementEnabled2, targetSeconds }) {
     const hasVideo = Number.isFinite(forwardSeconds);
@@ -214,35 +295,41 @@
     refs.targetValue.textContent = stateText;
     refs.stateLine.hidden = stateText === void 0 || stateText === "";
   }
-  function renderCdnLines(documentObject, container, { rows, message } = {}) {
+  function renderCdnLines(documentObject, container, view = {}) {
     container.replaceChildren();
-    if (Array.isArray(rows) && rows.length > 0) {
-      for (const row of rows) {
-        const health = lineHealth(row);
-        const line = documentObject.createElement("div");
-        line.className = "cdn-line";
-        line.dataset.tone = health.tone;
-        const head = documentObject.createElement("div");
-        head.className = "cdn-line-head";
-        const name = documentObject.createElement("span");
-        name.className = "cdn-name";
-        name.textContent = shortMirrorName(row?.mirror);
-        const healthWord = documentObject.createElement("span");
-        healthWord.className = "cdn-health";
-        healthWord.textContent = health.word;
-        head.append(name, healthWord);
-        const connection = documentObject.createElement("div");
-        connection.className = "cdn-conn";
-        connection.textContent = [connectionText(row?.ttfbP50, row?.ttfbP90), rebuildText(row?.rebuiltSegments)].filter((part) => part !== void 0).join(" · ") || "还没有连接记录";
-        line.append(head, connection);
-        container.append(line);
-      }
+    if (typeof view.message === "string" && view.message.length > 0) {
+      const empty = documentObject.createElement("p");
+      empty.className = "cdn-empty";
+      empty.textContent = view.message;
+      container.append(empty);
       return;
     }
-    const empty = documentObject.createElement("p");
-    empty.className = "cdn-empty";
-    empty.textContent = message === void 0 || message === "" ? "还没有线路数据" : message;
-    container.append(empty);
+    const headline = documentObject.createElement("p");
+    headline.className = "cdn-headline";
+    headline.textContent = view.headline;
+    container.append(headline);
+    if (typeof view.subline === "string" && view.subline.length > 0) {
+      const subline = documentObject.createElement("p");
+      subline.className = "cdn-subline";
+      subline.textContent = view.subline;
+      container.append(subline);
+    }
+    for (const row of view.lines ?? []) {
+      const line = documentObject.createElement("div");
+      line.className = "cdn-line";
+      line.dataset.tone = row.tone;
+      const head = documentObject.createElement("div");
+      head.className = "cdn-line-head";
+      const name = documentObject.createElement("span");
+      name.className = "cdn-name";
+      name.textContent = shortMirrorName(row?.mirror);
+      const status = documentObject.createElement("span");
+      status.className = "cdn-status";
+      status.textContent = row.text;
+      head.append(name, status);
+      line.append(head);
+      container.append(line);
+    }
   }
   var FLV_BACKUP_TEXT = Object.freeze({
     connected: "FLV 后备校准中",
@@ -329,7 +416,15 @@
     });
   }
   function renderRacePanel() {
-    renderCdnLines(document, cdnLinesElement, cdnLinesView(raceSummary, raceError, raceQueryInFlight));
+    renderCdnLines(document, cdnLinesElement, downloadLinesView({
+      response: raceSummary,
+      error: raceError,
+      inFlight: raceQueryInFlight,
+      live: popupRoute === POPUP_ROUTE.LIVE,
+      readouts: latestReadouts,
+      vodEnabled: enhancementEnabled,
+      liveEnabled
+    }));
   }
   function renderLivePanel() {
     renderLiveTakeover(liveRefs, { facts: liveFacts, error: liveError, liveEnabled });

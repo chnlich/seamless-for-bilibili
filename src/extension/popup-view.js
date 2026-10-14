@@ -43,29 +43,161 @@ export function shortMirrorName(mirror) {
   return trimmed.length >= 3 ? trimmed : mirror;
 }
 
-export function lineHealth(row) {
-  const stalled = row?.stalled;
-  const failures = row?.failures;
-  if (Number.isFinite(stalled) && stalled > 0) return { word: '有停滞', tone: 'warn' };
-  if (Number.isFinite(failures) && failures > 0) return { word: '有错误', tone: 'bad' };
-  if (Number.isFinite(row?.ttfbP50) || (Number.isFinite(row?.bytesDelivered) && row.bytesDelivered > 0)) {
-    return { word: '正常', tone: 'ok' };
+// 下载线路卡片的全部人话：第一行给此刻的结论，视频页第二行写提前下载到哪里，
+// 每条线路一行。输入是 worker 折算好的下载状态（src/diagnostics/download-status.js
+// 的文件头写了速度、15 秒活动窗口与重试轮数的口径）、页面读数（readouts v4）
+// 与开关状态；这里只拼文字，不算记录。
+// 线路自身失败的结果到人话的映射；superseded、aborted、gave_up 是扩展自己放弃的
+// 请求，不算线路的失败。
+export const LINE_FAILURE_TEXTS = Object.freeze({
+  invalid_response: '数据没给全就断开',
+  stalled: '10 秒没有收到数据',
+  network_error: '连接失败',
+  http_error: '服务器返回错误',
+  address_expired: '地址已过期',
+});
+
+export const DOWNLOAD_CARD_TEXT = Object.freeze({
+  noRecords: '还没有下载数据',
+  noSession: '还没有线路数据',
+  loading: '正在读取线路状态…',
+  readFailed: '线路状态读取失败',
+  videoSwitchOff: '视频增强开关已关闭',
+  liveSwitchOff: SWITCH_OFF_TEXT.liveOff,
+  pause: '已下载够，暂停下载',
+  pauseWaitingForPlayer: '暂停下载，播放器要时再取',
+  quietVideo: '正在下载，最近 5 秒没有收到数据',
+  quietLive: '最近 5 秒没有收到数据',
+  lineIdle: '空闲',
+  lineLostRace: '另一条线路更快',
+});
+
+// 大于等于 10 Mbps 取整数，以下留一位小数：低速时小数位说明「不是零」，
+// 高速时取整就够和测速结果对照。
+export function speedText(bitsPerSecond) {
+  const mbps = bitsPerSecond / 1e6;
+  return `${mbps >= 10 ? String(Math.round(mbps)) : mbps.toFixed(1)} Mbps`;
+}
+
+export function clockText(seconds) {
+  const whole = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(whole / 60);
+  return `${minutes}:${String(whole % 60).padStart(2, '0')}`;
+}
+
+// 播放器正在用的分轨：库存快照里 active 的视频与音频轨，且下载层给出了连续字节
+// 终点。起点未知（还没发过播放器请求）的轨没有 contiguousEnd，进不了比较。
+function playerResources(resources) {
+  return (resources ?? []).filter((resource) => resource?.active === true
+    && (resource.kind === 'video' || resource.kind === 'audio')
+    && Number.isSafeInteger(resource.contiguousEnd)
+    && Number.isFinite(resource.totalSize)
+    && resource.totalSize > 0);
+}
+
+// 提前下载得最少的那条轨：第一行的重试轮数与第二行的位置都按它说，
+// 卡住播放的一定是最缺的那条。
+function lagResource(resources) {
+  let picked;
+  for (const resource of playerResources(resources)) {
+    if (picked === undefined
+      || resource.contiguousEnd / resource.totalSize < picked.contiguousEnd / picked.totalSize) {
+      picked = resource;
+    }
   }
-  return { word: '尚无数据', tone: 'idle' };
+  return picked;
 }
 
-export function connectionText(ttfbP50, ttfbP90) {
-  if (!Number.isFinite(ttfbP50)) return undefined;
-  const typical = `${Math.round(ttfbP50)} 毫秒`;
-  if (!Number.isFinite(ttfbP90)) return `通常 ${typical}`;
-  return `通常 ${typical} · 慢时 ${Math.round(ttfbP90)} 毫秒`;
+function lineRowsOf(status, { live, inventoryQuiet }) {
+  return status.lines.map((line) => {
+    // 空闲优先：视频页看快照里在途与排队是否都已清零；直播页不看库存快照，
+    // 看这条线路最近 15 秒还有没有下载记录。
+    const idle = live ? !line.seenInActivityWindow : inventoryQuiet;
+    if (idle) return { mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineIdle, tone: 'idle' };
+    if (line.fetchedEndsInWindow) {
+      return { mirror: line.mirror, text: `下载中 · ${speedText(line.bitsPerSecond)}`, tone: 'ok' };
+    }
+    const failureText = LINE_FAILURE_TEXTS[line.lastResultInWindow];
+    if (failureText !== undefined) {
+      // 停滞是最轻的一档失败（黄色）；其余线路失败报红。
+      const tone = line.lastResultInWindow === 'stalled' ? 'warn' : 'bad';
+      return { mirror: line.mirror, text: failureText, tone };
+    }
+    if (line.lastResultInWindow === 'lost_race') {
+      return { mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineLostRace, tone: 'idle' };
+    }
+    return { mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineIdle, tone: 'idle' };
+  });
 }
 
-// 拼接腿补过的分片数也是一条线路的连接事实：FLV 拼接腿不逐分片发请求，永远没有
-// 首字节时间，只数补片数；没有这一句，补过分片的线路会落回「还没有连接记录」。
-export function rebuildText(rebuiltSegments) {
-  if (!Number.isFinite(rebuiltSegments) || rebuiltSegments <= 0) return undefined;
-  return `FLV 拼接 · 已补上 ${rebuiltSegments} 个分片`;
+// 第一行从上往下取第一条成立的：一个时刻只落在一行。等待行的轮数只在该轨还有
+// 播放器请求在等（outstanding > 0）且失败过至少一轮时出现：数据已在扩展手里、
+// 播放器因别的原因在等时，请求会立刻答完，不写轮数。
+function videoHeadline({ status, waitingNow, currentTime, lag }) {
+  if (waitingNow) {
+    const rounds = Number.isSafeInteger(lag?.outstanding) && lag.outstanding > 0
+      && Number.isSafeInteger(lag.failedRounds) && lag.failedRounds >= 1
+      ? lag.failedRounds
+      : 0;
+    return `正在等 ${clockText(currentTime)} 处的数据` + (rounds >= 1 ? `，已重试 ${rounds} 轮` : '');
+  }
+  const inventory = status.inventory;
+  if (inventory?.inflight === 0 && inventory?.queued === 0) {
+    return Number.isSafeInteger(lag?.failedRounds) && lag.failedRounds >= 1
+      ? DOWNLOAD_CARD_TEXT.pauseWaitingForPlayer
+      : DOWNLOAD_CARD_TEXT.pause;
+  }
+  if (status.anyLineBytesInWindow) return `正在下载 · 合计 ${speedText(status.totalBitsPerSecond)}`;
+  return DOWNLOAD_CARD_TEXT.quietVideo;
+}
+
+// 第二行：连续字节终点按平均码率折算成秒，取音视频中较小的那个，再与播放器
+// 自己的缓冲末端取较大者；两条轨都存到文件末尾时直说整个视频已下载。
+function videoSubline({ status, waitingNow, lag, readouts }) {
+  if (waitingNow) return undefined;
+  const candidates = playerResources(status.inventory?.resources);
+  const duration = readouts?.duration;
+  if (candidates.length === 0 || !Number.isFinite(duration)) return undefined;
+  if (candidates.every((resource) => resource.contiguousEnd === resource.totalSize)) {
+    return `整个视频已下载（全长 ${clockText(duration)}）`;
+  }
+  const estimated = Math.min(...candidates.map((resource) => (resource.contiguousEnd / resource.totalSize) * duration));
+  const bufferEnd = Number.isFinite(readouts?.currentTime) && Number.isFinite(readouts?.forwardSeconds)
+    ? readouts.currentTime + readouts.forwardSeconds
+    : 0;
+  const ahead = Math.max(estimated, bufferEnd);
+  const rounds = Number.isSafeInteger(lag?.failedRounds) && lag.failedRounds >= 1 ? lag.failedRounds : 0;
+  return `已提前下载到约 ${clockText(ahead)}（全长 ${clockText(duration)}）`
+    + (rounds >= 1 ? `，之后的数据已重试 ${rounds} 轮` : '');
+}
+
+// 组装一张卡片：{ message }（读取中、读取失败、没有 session）或
+// { headline, subline, lines }。直播页没有第二行，也没有等待行与暂停行：
+// 直播流没有固定的时间位置，下载也不按设计暂停。
+export function downloadLinesView({ response, error, inFlight, live, readouts, vodEnabled, liveEnabled }) {
+  if (error !== undefined) return { message: DOWNLOAD_CARD_TEXT.readFailed };
+  if (response === undefined) return { message: inFlight === true ? DOWNLOAD_CARD_TEXT.loading : DOWNLOAD_CARD_TEXT.noSession };
+  const status = response.downloadStatus;
+  if (!status.hasRecords) {
+    const switchOn = live === true ? liveEnabled !== false : vodEnabled !== false;
+    const headline = switchOn
+      ? DOWNLOAD_CARD_TEXT.noRecords
+      : live === true ? DOWNLOAD_CARD_TEXT.liveSwitchOff : DOWNLOAD_CARD_TEXT.videoSwitchOff;
+    return { headline, subline: undefined, lines: [] };
+  }
+  if (live === true) {
+    const headline = status.anyLineBytesInWindow
+      ? `正在下载 · 合计 ${speedText(status.totalBitsPerSecond)}`
+      : DOWNLOAD_CARD_TEXT.quietLive;
+    return { headline, subline: undefined, lines: lineRowsOf(status, { live: true, inventoryQuiet: false }) };
+  }
+  const waitingNow = readouts?.waiting === true && Number.isFinite(readouts?.currentTime);
+  const lag = lagResource(status.inventory?.resources);
+  return {
+    headline: videoHeadline({ status, waitingNow, currentTime: readouts?.currentTime, lag }),
+    subline: videoSubline({ status, waitingNow, lag, readouts }),
+    lines: lineRowsOf(status, { live: false, inventoryQuiet: status.inventory?.inflight === 0 && status.inventory?.queued === 0 }),
+  };
 }
 
 // stateLabel 来自 status snapshot 的映射值（已应用/等待/不支持/失败/未提供）。
@@ -84,13 +216,6 @@ export function applyPageAvailability(documentObject, available) {
 export function surfaceErrorText(snapshot) {
   const error = snapshot?.error;
   return typeof error === 'string' && error.length > 0 && error !== '未提供' ? error : undefined;
-}
-
-export function cdnLinesView(summary, error, inFlight) {
-  if (error !== undefined) return { message: '线路状态读取失败' };
-  if (summary === undefined) return { message: inFlight === true ? '正在读取线路状态…' : '还没有线路数据' };
-  if (summary.sampleCount === 0) return { message: '还没有线路数据' };
-  return { rows: summary.summary.rows };
 }
 
 export function renderVideoPanel(
@@ -150,38 +275,41 @@ export function renderBuffer(
   refs.stateLine.hidden = stateText === undefined || stateText === '';
 }
 
-export function renderCdnLines(documentObject, container, { rows, message } = {}) {
+export function renderCdnLines(documentObject, container, view = {}) {
   container.replaceChildren();
-  if (Array.isArray(rows) && rows.length > 0) {
-    for (const row of rows) {
-      const health = lineHealth(row);
-      const line = documentObject.createElement('div');
-      line.className = 'cdn-line';
-      line.dataset.tone = health.tone;
-      const head = documentObject.createElement('div');
-      head.className = 'cdn-line-head';
-      const name = documentObject.createElement('span');
-      name.className = 'cdn-name';
-      name.textContent = shortMirrorName(row?.mirror);
-      const healthWord = documentObject.createElement('span');
-      healthWord.className = 'cdn-health';
-      healthWord.textContent = health.word;
-      head.append(name, healthWord);
-      const connection = documentObject.createElement('div');
-      connection.className = 'cdn-conn';
-      // 连接时间与补片数同属一行：同一线路既走网络腿又被拼接腿补片时，两件事实都在。
-      connection.textContent = [connectionText(row?.ttfbP50, row?.ttfbP90), rebuildText(row?.rebuiltSegments)]
-        .filter((part) => part !== undefined)
-        .join(' · ') || '还没有连接记录';
-      line.append(head, connection);
-      container.append(line);
-    }
+  if (typeof view.message === 'string' && view.message.length > 0) {
+    const empty = documentObject.createElement('p');
+    empty.className = 'cdn-empty';
+    empty.textContent = view.message;
+    container.append(empty);
     return;
   }
-  const empty = documentObject.createElement('p');
-  empty.className = 'cdn-empty';
-  empty.textContent = message === undefined || message === '' ? '还没有线路数据' : message;
-  container.append(empty);
+  const headline = documentObject.createElement('p');
+  headline.className = 'cdn-headline';
+  headline.textContent = view.headline;
+  container.append(headline);
+  if (typeof view.subline === 'string' && view.subline.length > 0) {
+    const subline = documentObject.createElement('p');
+    subline.className = 'cdn-subline';
+    subline.textContent = view.subline;
+    container.append(subline);
+  }
+  for (const row of view.lines ?? []) {
+    const line = documentObject.createElement('div');
+    line.className = 'cdn-line';
+    line.dataset.tone = row.tone;
+    const head = documentObject.createElement('div');
+    head.className = 'cdn-line-head';
+    const name = documentObject.createElement('span');
+    name.className = 'cdn-name';
+    name.textContent = shortMirrorName(row?.mirror);
+    const status = documentObject.createElement('span');
+    status.className = 'cdn-status';
+    status.textContent = row.text;
+    head.append(name, status);
+    line.append(head);
+    container.append(line);
+  }
 }
 
 const FLV_BACKUP_TEXT = Object.freeze({

@@ -525,7 +525,7 @@
       const label = typeof resource.label === "string" ? resource.label : UNKNOWN_VALUE;
       const codecs = typeof resource.codecs === "string" ? resource.codecs : UNKNOWN_VALUE;
       const active = resource.active === true || resource.active === false ? resource.active : UNKNOWN_VALUE;
-      return {
+      const safe = {
         pathname,
         kind,
         label,
@@ -540,6 +540,10 @@
         retrying: safeNonnegativeInteger(resource.retrying),
         active
       };
+      if (Object.prototype.hasOwnProperty.call(resource, "contiguousEnd")) {
+        safe.contiguousEnd = safeNonnegativeInteger(resource.contiguousEnd);
+      }
+      return safe;
     });
   }
   function safeAppendErrors(value) {
@@ -1005,6 +1009,101 @@
     };
   }
 
+  // src/diagnostics/download-status.js
+  var SPEED_WINDOW_MS = 5e3;
+  var LINE_ACTIVITY_WINDOW_MS = 15e3;
+  var RETRY_FAILURE_RESULTS = /* @__PURE__ */ new Set(["stalled", "invalid_response", "network_error", "http_error"]);
+  function endMsOf(event) {
+    const endMs = Date.parse(event.wallTime);
+    if (!Number.isFinite(endMs)) throw new Error(`bank.fetch.chunk 记录缺少有效 wallTime: ${JSON.stringify(event.wallTime)}`);
+    return endMs;
+  }
+  function pathnameOf(source) {
+    return new URL(source).pathname;
+  }
+  function lineStatsFor(lines, mirror) {
+    let stats = lines.get(mirror);
+    if (stats === void 0) {
+      stats = {
+        mirror,
+        windowedBytes: 0,
+        fetchedEndsInWindow: false,
+        seenInActivityWindow: false,
+        lastEndInActivityWindow: -Infinity,
+        lastResultInWindow: void 0
+      };
+      lines.set(mirror, stats);
+    }
+    return stats;
+  }
+  function failedRoundsForResource(resource, chunkEvents) {
+    if (!Number.isSafeInteger(resource.contiguousEnd) || !Number.isSafeInteger(resource.totalSize)) return 0;
+    if (resource.contiguousEnd >= resource.totalSize) return 0;
+    const nextChunk = Math.floor(resource.contiguousEnd / BANK_CONFIG.chunkBytes);
+    const perMirror = /* @__PURE__ */ new Map();
+    for (const event of chunkEvents) {
+      const data = event.data;
+      if (data.chunkIndex !== nextChunk || pathnameOf(data.source) !== resource.pathname) continue;
+      if (data.result === "fetched") {
+        perMirror.clear();
+      } else if (RETRY_FAILURE_RESULTS.has(data.result)) {
+        perMirror.set(data.mirror, (perMirror.get(data.mirror) || 0) + 1);
+      }
+    }
+    return perMirror.size === 0 ? 0 : Math.max(...perMirror.values());
+  }
+  function deriveDownloadStatus({ chunkEvents, latestInventory, nowMs }) {
+    const lines = /* @__PURE__ */ new Map();
+    for (const event of chunkEvents) {
+      const data = event.data;
+      const endMs = endMsOf(event);
+      if (endMs > nowMs) continue;
+      const stats = lineStatsFor(lines, data.mirror);
+      if (endMs >= nowMs - SPEED_WINDOW_MS) {
+        const durationMs = Number.isFinite(data.durationMs) && data.durationMs > 0 ? data.durationMs : 0;
+        stats.windowedBytes += durationMs === 0 ? data.bytes : data.bytes * ((endMs - Math.max(endMs - durationMs, nowMs - SPEED_WINDOW_MS)) / durationMs);
+        if (data.result === "fetched") stats.fetchedEndsInWindow = true;
+      }
+      if (endMs >= nowMs - LINE_ACTIVITY_WINDOW_MS && endMs >= stats.lastEndInActivityWindow) {
+        stats.seenInActivityWindow = true;
+        stats.lastEndInActivityWindow = endMs;
+        stats.lastResultInWindow = data.result;
+      }
+    }
+    const lineRows = [...lines.values()].sort((left, right) => String(left.mirror).localeCompare(String(right.mirror))).map((stats) => ({
+      mirror: stats.mirror,
+      bitsPerSecond: stats.windowedBytes * 8 / (SPEED_WINDOW_MS / 1e3),
+      receivedInWindow: stats.windowedBytes > 0,
+      fetchedEndsInWindow: stats.fetchedEndsInWindow,
+      seenInActivityWindow: stats.seenInActivityWindow,
+      lastResultInWindow: stats.lastResultInWindow
+    }));
+    const inventoryData = latestInventory?.data;
+    const inventory = inventoryData === void 0 ? void 0 : {
+      inflight: inventoryData.inflight,
+      queued: inventoryData.queued,
+      resources: Array.isArray(inventoryData.resources) ? inventoryData.resources.map((resource) => {
+        const folded = {
+          pathname: resource.pathname,
+          kind: resource.kind,
+          active: resource.active,
+          totalSize: resource.totalSize,
+          outstanding: resource.outstanding,
+          failedRounds: failedRoundsForResource(resource, chunkEvents)
+        };
+        if (Number.isSafeInteger(resource.contiguousEnd)) folded.contiguousEnd = resource.contiguousEnd;
+        return folded;
+      }) : []
+    };
+    return {
+      hasRecords: chunkEvents.length > 0,
+      anyLineBytesInWindow: lineRows.some((line) => line.receivedInWindow),
+      totalBitsPerSecond: lineRows.reduce((total, line) => total + line.bitsPerSecond, 0),
+      lines: lineRows,
+      inventory
+    };
+  }
+
   // src/extension/popup-live.js
   var POPUP_ROUTE = Object.freeze({ VIDEO: "video", LIVE: "live" });
   function emptyLiveFacts() {
@@ -1400,19 +1499,22 @@
         IDBKeyRange.bound([message.sessionId, 0], [message.sessionId, Number.MAX_SAFE_INTEGER])
       );
       const events = [];
+      let latestInventory;
       let maxEventId = 0;
       request.onerror = () => reject(request.error || new Error("读取 CDN summary 事件失败"));
       request.onsuccess = () => {
         const cursor = request.result;
         if (cursor === null) {
           const summary = aggregateCdnEvents(events);
-          resolve({ maxEventId, sampleCount: events.length, summary });
+          const downloadStatus = deriveDownloadStatus({ chunkEvents: events, latestInventory, nowMs: Date.now() });
+          resolve({ maxEventId, sampleCount: events.length, summary, downloadStatus });
           return;
         }
         const event = cursor.value;
         const eventId = cursor.primaryKey ?? event.eventId;
         if (Number.isInteger(eventId) && eventId > maxEventId) maxEventId = eventId;
         if (event.code === "bank.fetch.chunk") events.push(event);
+        if (event.code === "bank.inventory") latestInventory = event;
         cursor.continue();
       };
       transaction.oncomplete = () => database.close();

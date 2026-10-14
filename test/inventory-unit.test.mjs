@@ -57,6 +57,7 @@ test('inventory derivation reports an empty bank and missing total size without 
   const fixture = bankFixture();
   const empty = deriveBankInventory({
     chunks: new Map(),
+    chunkBytes: 1_048_576,
     resourceState: new Map(),
     addressBook: new Map(),
     recentResourceKeys: [],
@@ -115,6 +116,7 @@ test('inventory excludes representations that exist only in the address book', (
   const addressBookOnly = '/video/address-book-only.m4s';
   const inventory = deriveBankInventory({
     chunks: new Map(),
+    chunkBytes: 1_048_576,
     resourceState: new Map(),
     addressBook: new Map([[addressBookOnly, {
       representation: { mimeType: 'video/mp4', height: 360 },
@@ -137,6 +139,7 @@ test('inventory excludes representations that exist only in the address book', (
 test('inventory keeps a requested representation with zero stored bytes', () => {
   const inventory = deriveBankInventory({
     chunks: new Map(),
+    chunkBytes: 1_048_576,
     resourceState: new Map([[RESOURCE, {
       totalSize: undefined,
       lastForegroundEnd: undefined,
@@ -202,6 +205,7 @@ test('inventory resources are sanitized to pathnames and never retain query or h
       storedBytes: 10,
       storedChunks: 1,
       totalSize: 100,
+      contiguousEnd: 64,
       lastForegroundEnd: 15,
       outstanding: 0,
       retrying: 0,
@@ -210,6 +214,83 @@ test('inventory resources are sanitized to pathnames and never retain query or h
     }],
   });
   assert.equal(sanitized.resources[0].pathname, '/video/track.m4s');
+  assert.equal(sanitized.resources[0].contiguousEnd, 64);
   assert.doesNotMatch(JSON.stringify(sanitized), /deadline=secret|fragment|secret/);
   assert.equal(Object.hasOwn(sanitized.resources[0], 'secret'), false);
+});
+
+function contiguousEndFixture(state, storedIndices, { chunkBytes = 1024 } = {}) {
+  const chunks = new Map(
+    [...storedIndices].map((index) => [`${RESOURCE}#${index}`, { bytes: new ArrayBuffer(1) }]),
+  );
+  return deriveBankInventory({
+    chunks,
+    chunkBytes,
+    resourceState: new Map([[RESOURCE, {
+      bankKey: RESOURCE,
+      outstanding: new Set(),
+      chunkAttempts: new Map(),
+      ...state,
+    }]]),
+    addressBook: new Map(),
+    recentResourceKeys: [RESOURCE],
+    maxBankBytes: 512,
+    maxPrefetchConcurrency: 4,
+    queueLength: 0,
+    inflightCount: 0,
+    disabled: false,
+    routeActive: true,
+    isPairedAddressAvailable: () => false,
+    sessionGeneration: 0,
+  }).resources[0];
+}
+
+test('contiguousEnd stops at the first missing chunk after the anchor', () => {
+  // 已存 0、1、4，第 2 块缺着：中间的空洞截断连续范围，后面存得再多也播不到。
+  const resource = contiguousEndFixture(
+    { totalSize: 5632, outstanding: new Set([{ start: 2048 }, { start: 512 }]) },
+    new Set([0, 1, 4]),
+  );
+  assert.equal(resource.contiguousEnd, 2048);
+  assert.equal(resource.storedChunks, 3);
+});
+
+test('contiguousEnd reaches totalSize when the run covers the whole file', () => {
+  const resource = contiguousEndFixture(
+    { totalSize: 5120, outstanding: new Set([{ start: 0 }]) },
+    new Set([0, 1, 2, 3, 4]),
+  );
+  assert.equal(resource.contiguousEnd, 5120);
+});
+
+test('contiguousEnd falls back to the last player request start when nothing is outstanding', () => {
+  const resource = contiguousEndFixture(
+    { totalSize: 5632, lastForegroundStart: 4096 },
+    new Set([4]),
+  );
+  assert.equal(resource.contiguousEnd, 5120);
+});
+
+test('contiguousEnd is omitted while the anchor or the total size is unknown', () => {
+  const unknownAnchor = contiguousEndFixture({ totalSize: 5632 }, new Set([0]));
+  assert.equal(Object.hasOwn(unknownAnchor, 'contiguousEnd'), false);
+  const unknownTotal = contiguousEndFixture({ outstanding: new Set([{ start: 0 }]) }, new Set([0]));
+  assert.equal(unknownTotal.totalSize, '未提供');
+  assert.equal(Object.hasOwn(unknownTotal, 'contiguousEnd'), false);
+});
+
+test('contiguousEnd from the bank goes through publishInventory with the configured chunk size', async () => {
+  const fixture = bankFixture();
+  const state = fixture.bank.stateFor(RESOURCE);
+  state.latestUrl = MEDIA_URL;
+  state.totalSize = 48;
+  state.lastForegroundStart = 16;
+  fixture.bank.chunks.set(`${RESOURCE}#1`, { bytes: new ArrayBuffer(16) });
+  fixture.bank.chunks.set(`${RESOURCE}#2`, { bytes: new ArrayBuffer(16) });
+  const published = fixture.bank.publishInventory(true);
+  assert.equal(published, true);
+  // 测试配置的 chunkBytes 是 16：播放器请求的起点在块 1，已存块 1、2 连续到文件末尾。
+  const resource = inventoryMessages(fixture).at(-1).data.resources[0];
+  assert.equal(resource.contiguousEnd, 48);
+  fixture.bank.destroy();
 });

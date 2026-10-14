@@ -379,7 +379,7 @@
       const label = typeof resource.label === "string" ? resource.label : UNKNOWN_VALUE;
       const codecs = typeof resource.codecs === "string" ? resource.codecs : UNKNOWN_VALUE;
       const active = resource.active === true || resource.active === false ? resource.active : UNKNOWN_VALUE;
-      return {
+      const safe = {
         pathname,
         kind,
         label,
@@ -394,6 +394,10 @@
         retrying: safeNonnegativeInteger(resource.retrying),
         active
       };
+      if (Object.prototype.hasOwnProperty.call(resource, "contiguousEnd")) {
+        safe.contiguousEnd = safeNonnegativeInteger(resource.contiguousEnd);
+      }
+      return safe;
     });
   }
   function safeAppendErrors(value) {
@@ -626,7 +630,7 @@
   }
 
   // src/build-id.js
-  var BUILT_BUILD_ID = true ? "src-64051b9a417714396dfed44e" : "source-build";
+  var BUILT_BUILD_ID = true ? "src-7a1b804d35319120358b6202" : "source-build";
   function readBuildId() {
     return BUILT_BUILD_ID;
   }
@@ -2434,22 +2438,33 @@
   }
 
   // src/extension/readouts.js
-  var READOUTS_VERSION = 3;
+  var READOUTS_VERSION = 4;
   function forwardSeconds(facts) {
     if (facts === UNKNOWN_VALUE) return UNKNOWN_VALUE;
     const { currentTime, bufferedRanges } = facts;
     if (!Number.isFinite(currentTime) || !Array.isArray(bufferedRanges)) return UNKNOWN_VALUE;
     return computeForwardInventory(currentTime, [bufferedRanges]);
   }
+  function waitingFrom(facts) {
+    if (facts === UNKNOWN_VALUE) return UNKNOWN_VALUE;
+    if (typeof facts.paused !== "boolean" || typeof facts.ended !== "boolean" || !Number.isFinite(facts.readyState)) {
+      return UNKNOWN_VALUE;
+    }
+    return facts.paused === false && facts.ended === false && facts.readyState < 3;
+  }
   function buildReadouts({
     surfaceId,
     video,
     diagnostics
   }) {
+    const facts = readMediaFacts(video, "readout");
     return {
       version: READOUTS_VERSION,
       surfaceId,
-      forwardSeconds: forwardSeconds(readMediaFacts(video, "readout")),
+      forwardSeconds: forwardSeconds(facts),
+      currentTime: facts === UNKNOWN_VALUE ? UNKNOWN_VALUE : facts.currentTime,
+      duration: facts === UNKNOWN_VALUE ? UNKNOWN_VALUE : facts.duration,
+      waiting: waitingFrom(facts),
       // 内容侧自报路由：popup 没有 tabs 权限，看不到标签页地址。
       routeKind: diagnostics?.routeKind || UNKNOWN_VALUE,
       diagnostics: {

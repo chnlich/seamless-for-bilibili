@@ -93,10 +93,9 @@ function popupReadout() {
   }));
   const lines = [...document.querySelectorAll('.cdn-line')].map((line) => ({
     name: line.querySelector('.cdn-name')?.textContent?.trim() ?? null,
-    health: line.querySelector('.cdn-health')?.textContent?.trim() ?? null,
+    status: line.querySelector('.cdn-status')?.textContent?.trim() ?? null,
     tone: line.dataset.tone ?? null,
-    connection: line.querySelector('.cdn-conn')?.textContent?.trim() ?? null,
-    healthColor: getComputedStyle(line.querySelector('.cdn-health')).color,
+    statusColor: getComputedStyle(line.querySelector('.cdn-status')).color,
   }));
   return {
     title: text('h1'),
@@ -113,6 +112,8 @@ function popupReadout() {
     errorLine: text('[data-status-field="error"]'),
     notice: text('[data-notice]'),
     bodyReady: document.body?.dataset?.ready ?? null,
+    downloadHeadline: text('.cdn-headline'),
+    downloadSubline: text('.cdn-subline'),
     lines,
   };
 }
@@ -374,9 +375,12 @@ function assertRealReadout(label, readout, { racing }) {
   if (readout.errorLine !== null && readout.errorLine !== '') {
     throw new Error(`${label}: popup shows an error line: ${readout.errorLine}`);
   }
-  const connections = readout.lines.map((line) => line.connection ?? '');
-  if (readout.lines.length < 2 || connections.some((connection) => connection === '' || connection === '还没有连接记录')) {
-    throw new Error(`${label}: line cards do not show two connections: ${JSON.stringify(readout.lines)}`);
+  const statuses = readout.lines.map((line) => line.status ?? '');
+  if (readout.lines.length < 2 || statuses.some((status) => status === '')) {
+    throw new Error(`${label}: line cards do not show two line statuses: ${JSON.stringify(readout.lines)}`);
+  }
+  if (readout.downloadHeadline === null || readout.downloadHeadline === '') {
+    throw new Error(`${label}: the download card shows no headline`);
   }
   const seconds = Number.parseInt(readout.bufferSeconds ?? '', 10);
   if (racing) {

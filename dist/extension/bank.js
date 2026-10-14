@@ -266,130 +266,6 @@
     return { routeKind: "other", part };
   }
 
-  // src/bank/inventory.js
-  var INVENTORY_HEARTBEAT_FLOOR_MS = 5e3;
-  function nonnegativeIntegerOrUnknown(value) {
-    return Number.isSafeInteger(value) && value >= 0 ? value : UNKNOWN_VALUE;
-  }
-  function stringOrUnknown(value) {
-    return typeof value === "string" && value.length > 0 ? value : UNKNOWN_VALUE;
-  }
-  function resourceKeyFromCacheKey(value) {
-    const separator = value.lastIndexOf("#");
-    if (separator <= 0) throw new Error(`库存 cacheKey 无效: ${value}`);
-    return value.slice(0, separator);
-  }
-  function representationFor(addressBook, resourceKey) {
-    const entry = addressBook.get(resourceKey);
-    if (entry === void 0) return {};
-    return entry.representation || {};
-  }
-  function labelFor(addressBook, resourceKey, representation) {
-    const entry = addressBook.get(resourceKey);
-    if (typeof entry?.label === "string" && entry.label.length > 0) return entry.label;
-    const parts = [];
-    if (Number.isSafeInteger(representation.height) && representation.height > 0) {
-      parts.push(`${representation.height}P`);
-    }
-    const frameRate = representation.frameRate ?? representation.frame_rate;
-    if (frameRate !== void 0 && frameRate !== null && String(frameRate).length > 0) {
-      parts.push(`${frameRate}fps`);
-    }
-    if (typeof representation.codecs === "string" && representation.codecs.length > 0) {
-      parts.push(representation.codecs);
-    }
-    if (parts.length === 0 && Number.isSafeInteger(representation.bandwidth) && representation.bandwidth > 0) {
-      parts.push(`${representation.bandwidth}bps`);
-    }
-    return parts.length === 0 ? UNKNOWN_VALUE : parts.join(" · ");
-  }
-  function resourceFrom({ resourceKey, stored, state, addressBook, recentResourceKeys }) {
-    const representation = representationFor(addressBook, resourceKey);
-    return {
-      pathname: resourceKey,
-      kind: typeof representation.mimeType === "string" && representation.mimeType.startsWith("video/") ? "video" : typeof representation.mimeType === "string" && representation.mimeType.startsWith("audio/") ? "audio" : UNKNOWN_VALUE,
-      label: labelFor(addressBook, resourceKey, representation),
-      height: nonnegativeIntegerOrUnknown(representation.height),
-      codecs: stringOrUnknown(representation.codecs),
-      bandwidth: nonnegativeIntegerOrUnknown(representation.bandwidth),
-      storedBytes: stored.bytes,
-      storedChunks: stored.chunks,
-      totalSize: state === void 0 ? UNKNOWN_VALUE : nonnegativeIntegerOrUnknown(state.totalSize),
-      lastForegroundEnd: state === void 0 ? UNKNOWN_VALUE : nonnegativeIntegerOrUnknown(state.lastForegroundEnd),
-      outstanding: state?.outstanding === void 0 ? 0 : state.outstanding.size,
-      retrying: state?.chunkAttempts === void 0 ? 0 : [...state.chunkAttempts.values()].filter((attempts) => attempts > 0).length,
-      active: recentResourceKeys.includes(resourceKey)
-    };
-  }
-  function storedByResource(chunks) {
-    const stored = /* @__PURE__ */ new Map();
-    for (const [cacheKey2, record] of chunks) {
-      if (!(record?.bytes instanceof ArrayBuffer)) {
-        throw new Error(`库存分片缺少 ArrayBuffer: ${cacheKey2}`);
-      }
-      const resourceKey = resourceKeyFromCacheKey(cacheKey2);
-      const current = stored.get(resourceKey) || { bytes: 0, chunks: 0 };
-      current.bytes += record.bytes.byteLength;
-      current.chunks += 1;
-      stored.set(resourceKey, current);
-    }
-    return stored;
-  }
-  function deriveBankInventory({
-    chunks,
-    resourceState,
-    addressBook,
-    recentResourceKeys,
-    maxBankBytes,
-    maxPrefetchConcurrency,
-    queueLength,
-    inflightCount,
-    disabled,
-    routeActive,
-    isPairedAddressAvailable,
-    sessionGeneration
-  }) {
-    const storedByKey = storedByResource(chunks);
-    const resourceKeys = /* @__PURE__ */ new Set([
-      ...resourceState.keys(),
-      ...storedByKey.keys()
-    ]);
-    const sortedResourceKeys = [...resourceKeys].sort((left, right) => left.localeCompare(right));
-    const resources = sortedResourceKeys.map((resourceKey) => resourceFrom({
-      resourceKey,
-      stored: storedByKey.get(resourceKey) || { bytes: 0, chunks: 0 },
-      state: resourceState.get(resourceKey),
-      addressBook,
-      recentResourceKeys
-    }));
-    const activeResourceKeys = recentResourceKeys.filter((resourceKey) => resourceKeys.has(resourceKey));
-    const pairedAddressAvailable = activeResourceKeys.some((resourceKey) => {
-      const state = resourceState.get(resourceKey);
-      return state?.latestUrl !== void 0 && isPairedAddressAvailable(state.latestUrl) === true;
-    });
-    return {
-      sessionGeneration: nonnegativeIntegerOrUnknown(sessionGeneration),
-      storedBytes: resources.reduce((total, resource) => total + resource.storedBytes, 0),
-      storedChunks: resources.reduce((total, resource) => total + resource.storedChunks, 0),
-      maxBankBytes: nonnegativeIntegerOrUnknown(maxBankBytes),
-      queued: nonnegativeIntegerOrUnknown(queueLength),
-      inflight: nonnegativeIntegerOrUnknown(inflightCount),
-      prefetchConcurrency: nonnegativeIntegerOrUnknown(maxPrefetchConcurrency),
-      disabled: disabled === true || disabled === false ? disabled : UNKNOWN_VALUE,
-      routeActive: routeActive === true || routeActive === false ? routeActive : UNKNOWN_VALUE,
-      pairedAddressAvailable,
-      resources
-    };
-  }
-  function sameInventoryPayload(left, right) {
-    return left !== void 0 && right !== void 0 && JSON.stringify(left) === JSON.stringify(right);
-  }
-
-  // src/bank/contract.js
-  var BANK_ENABLED_ATTRIBUTE = "data-bilibili-buffer-bank-enabled";
-  var BANK_MESSAGE_NAMESPACE = "bilibili-buffer:segment-bank-v1";
-  var BANK_DIAGNOSTIC_MESSAGE_TYPE = "diagnostic";
-
   // src/bank/logic.js
   function requireNonNegativeInteger(value, field) {
     if (!Number.isInteger(value) || value < 0) {
@@ -415,6 +291,14 @@
     }
     requireNonNegativeInteger(index, "分片索引");
     return `${bankKeyValue}#${index}`;
+  }
+  function anchorChunkIndex(state, chunkBytes = BANK_CONFIG.chunkBytes) {
+    const outstanding = [...state.outstanding];
+    if (outstanding.length > 0) {
+      return Math.min(...outstanding.map((request) => chunkIndex(request.start, chunkBytes)));
+    }
+    if (!Number.isSafeInteger(state.lastForegroundStart)) return void 0;
+    return chunkIndex(state.lastForegroundStart, chunkBytes);
   }
   function headerValue(headers, name) {
     if (headers !== null && typeof headers?.get === "function") return headers.get(name);
@@ -553,6 +437,145 @@
     }
     return { entries: selected, bytes: selected.reduce((sum, entry) => sum + entryBytes(entry), 0) };
   }
+
+  // src/bank/inventory.js
+  var INVENTORY_HEARTBEAT_FLOOR_MS = 5e3;
+  function nonnegativeIntegerOrUnknown(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : UNKNOWN_VALUE;
+  }
+  function stringOrUnknown(value) {
+    return typeof value === "string" && value.length > 0 ? value : UNKNOWN_VALUE;
+  }
+  function resourceKeyFromCacheKey(value) {
+    const separator = value.lastIndexOf("#");
+    if (separator <= 0) throw new Error(`库存 cacheKey 无效: ${value}`);
+    return value.slice(0, separator);
+  }
+  function contiguousEndForResource({ indices, state, chunkBytes }) {
+    const anchor = anchorChunkIndex(state, chunkBytes);
+    if (anchor === void 0 || !Number.isSafeInteger(state.totalSize)) return void 0;
+    let index = anchor;
+    while (indices.has(index)) index += 1;
+    const chunkCount = Math.ceil(state.totalSize / chunkBytes);
+    return index >= chunkCount ? state.totalSize : index * chunkBytes;
+  }
+  function representationFor(addressBook, resourceKey) {
+    const entry = addressBook.get(resourceKey);
+    if (entry === void 0) return {};
+    return entry.representation || {};
+  }
+  function labelFor(addressBook, resourceKey, representation) {
+    const entry = addressBook.get(resourceKey);
+    if (typeof entry?.label === "string" && entry.label.length > 0) return entry.label;
+    const parts = [];
+    if (Number.isSafeInteger(representation.height) && representation.height > 0) {
+      parts.push(`${representation.height}P`);
+    }
+    const frameRate = representation.frameRate ?? representation.frame_rate;
+    if (frameRate !== void 0 && frameRate !== null && String(frameRate).length > 0) {
+      parts.push(`${frameRate}fps`);
+    }
+    if (typeof representation.codecs === "string" && representation.codecs.length > 0) {
+      parts.push(representation.codecs);
+    }
+    if (parts.length === 0 && Number.isSafeInteger(representation.bandwidth) && representation.bandwidth > 0) {
+      parts.push(`${representation.bandwidth}bps`);
+    }
+    return parts.length === 0 ? UNKNOWN_VALUE : parts.join(" · ");
+  }
+  function resourceFrom({ resourceKey, stored, state, addressBook, recentResourceKeys, chunkBytes }) {
+    const representation = representationFor(addressBook, resourceKey);
+    const contiguousEnd = state === void 0 ? void 0 : contiguousEndForResource({ indices: stored.indices, state, chunkBytes });
+    const resource = {
+      pathname: resourceKey,
+      kind: typeof representation.mimeType === "string" && representation.mimeType.startsWith("video/") ? "video" : typeof representation.mimeType === "string" && representation.mimeType.startsWith("audio/") ? "audio" : UNKNOWN_VALUE,
+      label: labelFor(addressBook, resourceKey, representation),
+      height: nonnegativeIntegerOrUnknown(representation.height),
+      codecs: stringOrUnknown(representation.codecs),
+      bandwidth: nonnegativeIntegerOrUnknown(representation.bandwidth),
+      storedBytes: stored.bytes,
+      storedChunks: stored.chunks,
+      totalSize: state === void 0 ? UNKNOWN_VALUE : nonnegativeIntegerOrUnknown(state.totalSize),
+      lastForegroundEnd: state === void 0 ? UNKNOWN_VALUE : nonnegativeIntegerOrUnknown(state.lastForegroundEnd),
+      outstanding: state?.outstanding === void 0 ? 0 : state.outstanding.size,
+      retrying: state?.chunkAttempts === void 0 ? 0 : [...state.chunkAttempts.values()].filter((attempts) => attempts > 0).length,
+      active: recentResourceKeys.includes(resourceKey)
+    };
+    if (contiguousEnd !== void 0) resource.contiguousEnd = contiguousEnd;
+    return resource;
+  }
+  function storedByResource(chunks) {
+    const stored = /* @__PURE__ */ new Map();
+    for (const [cacheKey2, record] of chunks) {
+      if (!(record?.bytes instanceof ArrayBuffer)) {
+        throw new Error(`库存分片缺少 ArrayBuffer: ${cacheKey2}`);
+      }
+      const resourceKey = resourceKeyFromCacheKey(cacheKey2);
+      const current = stored.get(resourceKey) || { bytes: 0, chunks: 0, indices: /* @__PURE__ */ new Set() };
+      current.bytes += record.bytes.byteLength;
+      current.chunks += 1;
+      current.indices.add(Number(cacheKey2.slice(cacheKey2.lastIndexOf("#") + 1)));
+      stored.set(resourceKey, current);
+    }
+    return stored;
+  }
+  function deriveBankInventory({
+    chunks,
+    chunkBytes,
+    resourceState,
+    addressBook,
+    recentResourceKeys,
+    maxBankBytes,
+    maxPrefetchConcurrency,
+    queueLength,
+    inflightCount,
+    disabled,
+    routeActive,
+    isPairedAddressAvailable,
+    sessionGeneration
+  }) {
+    if (!Number.isSafeInteger(chunkBytes) || chunkBytes <= 0) throw new Error("库存推导缺少分片大小");
+    const storedByKey = storedByResource(chunks);
+    const resourceKeys = /* @__PURE__ */ new Set([
+      ...resourceState.keys(),
+      ...storedByKey.keys()
+    ]);
+    const sortedResourceKeys = [...resourceKeys].sort((left, right) => left.localeCompare(right));
+    const resources = sortedResourceKeys.map((resourceKey) => resourceFrom({
+      resourceKey,
+      stored: storedByKey.get(resourceKey) || { bytes: 0, chunks: 0, indices: /* @__PURE__ */ new Set() },
+      state: resourceState.get(resourceKey),
+      addressBook,
+      recentResourceKeys,
+      chunkBytes
+    }));
+    const activeResourceKeys = recentResourceKeys.filter((resourceKey) => resourceKeys.has(resourceKey));
+    const pairedAddressAvailable = activeResourceKeys.some((resourceKey) => {
+      const state = resourceState.get(resourceKey);
+      return state?.latestUrl !== void 0 && isPairedAddressAvailable(state.latestUrl) === true;
+    });
+    return {
+      sessionGeneration: nonnegativeIntegerOrUnknown(sessionGeneration),
+      storedBytes: resources.reduce((total, resource) => total + resource.storedBytes, 0),
+      storedChunks: resources.reduce((total, resource) => total + resource.storedChunks, 0),
+      maxBankBytes: nonnegativeIntegerOrUnknown(maxBankBytes),
+      queued: nonnegativeIntegerOrUnknown(queueLength),
+      inflight: nonnegativeIntegerOrUnknown(inflightCount),
+      prefetchConcurrency: nonnegativeIntegerOrUnknown(maxPrefetchConcurrency),
+      disabled: disabled === true || disabled === false ? disabled : UNKNOWN_VALUE,
+      routeActive: routeActive === true || routeActive === false ? routeActive : UNKNOWN_VALUE,
+      pairedAddressAvailable,
+      resources
+    };
+  }
+  function sameInventoryPayload(left, right) {
+    return left !== void 0 && right !== void 0 && JSON.stringify(left) === JSON.stringify(right);
+  }
+
+  // src/bank/contract.js
+  var BANK_ENABLED_ATTRIBUTE = "data-bilibili-buffer-bank-enabled";
+  var BANK_MESSAGE_NAMESPACE = "bilibili-buffer:segment-bank-v1";
+  var BANK_DIAGNOSTIC_MESSAGE_TYPE = "diagnostic";
 
   // src/bank/storage.js
   function requireArrayBuffer(value) {
@@ -4344,12 +4367,7 @@
       }
     }
     anchorChunkForState(state) {
-      const outstanding = [...state.outstanding];
-      if (outstanding.length > 0) {
-        return Math.min(...outstanding.map((request) => chunkIndex(request.start, this.config.chunkBytes)));
-      }
-      if (!Number.isSafeInteger(state.lastForegroundStart)) return void 0;
-      return chunkIndex(state.lastForegroundStart, this.config.chunkBytes);
+      return anchorChunkIndex(state, this.config.chunkBytes);
     }
     windowPlansForState(state, anchorChunk) {
       const start = anchorChunk * this.config.chunkBytes;
@@ -4748,6 +4766,7 @@
     publishInventory(routeActive = this.lastRouteWasVideo) {
       const payload = deriveBankInventory({
         chunks: this.chunks,
+        chunkBytes: this.config.chunkBytes,
         resourceState: this.resourceState,
         addressBook: this.addressBook,
         recentResourceKeys: this.recentResourceKeys,

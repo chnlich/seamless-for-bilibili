@@ -145,7 +145,7 @@ async function verifyPopupReadouts(context, extensionId, videoPage) {
       }));
       const lines = [...document.querySelectorAll('.cdn-line')].map((line) => ({
         name: line.querySelector('.cdn-name')?.textContent?.trim() ?? null,
-        health: line.querySelector('.cdn-health')?.textContent?.trim() ?? null,
+        status: line.querySelector('.cdn-status')?.textContent?.trim() ?? null,
       }));
       const stateLine = document.querySelector('[data-status-field="state"]');
       return {

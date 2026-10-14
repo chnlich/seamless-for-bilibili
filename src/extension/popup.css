@@ -175,7 +175,20 @@ main.no-page .error-line {
   text-align: right;
 }
 
-.cdn-line + .cdn-line {
+.cdn-headline {
+  margin: 0;
+  font-weight: 600;
+}
+
+.cdn-subline {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cdn-line + .cdn-line,
+.cdn-headline + .cdn-line,
+.cdn-subline + .cdn-line {
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--line);
@@ -193,21 +206,15 @@ main.no-page .error-line {
   overflow-wrap: anywhere;
 }
 
-.cdn-health {
+.cdn-status {
   font-size: 12px;
   flex: none;
 }
 
-.cdn-line[data-tone="ok"] .cdn-health { color: var(--ok); }
-.cdn-line[data-tone="warn"] .cdn-health { color: var(--warn); }
-.cdn-line[data-tone="bad"] .cdn-health { color: var(--bad); }
-.cdn-line[data-tone="idle"] .cdn-health { color: var(--idle); }
-
-.cdn-conn {
-  margin-top: 2px;
-  color: var(--muted);
-  font-size: 12px;
-}
+.cdn-line[data-tone="ok"] .cdn-status { color: var(--ok); }
+.cdn-line[data-tone="warn"] .cdn-status { color: var(--warn); }
+.cdn-line[data-tone="bad"] .cdn-status { color: var(--bad); }
+.cdn-line[data-tone="idle"] .cdn-status { color: var(--idle); }
 
 .cdn-empty {
   margin: 0;

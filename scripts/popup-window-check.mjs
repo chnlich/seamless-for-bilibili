@@ -40,7 +40,7 @@
 // fMP4 分片接管的接管行后接 FLV 后备状态：各房间的地址簿都没有同流名的 FLV 条目，
 // 后备按设计记 unavailable，原因（no_flv_entry 或 no_hls_entry）从该标签页 session
 // 的 live.flv.backup 事件读出核对，面板显示无后备后缀。
-// 断言的期望值一律从 src 的既有导出（liveTakeoverText、cdnLinesView、
+// 断言的期望值一律从 src 的既有导出（liveTakeoverText、DOWNLOAD_CARD_TEXT、
 // shortMirrorName）推导，失败场景页面控制台的如实报错充当阳性对照。
 // 第十组是第四组的直播对照组：商店自动更新落在正在拉流的直播页上。直播有自己
 // 的接管机器（播放列表放行、整段身份门、配对地址簿），更新后能否继续双路竞速
@@ -66,7 +66,7 @@ import { fileURLToPath } from 'node:url';
 import { connectToChrome } from './console-capture.mjs';
 import { readProvenance } from './provenance.mjs';
 import {
-  NO_PAGE_MESSAGES, SWITCH_OFF_TEXT, cdnLinesView, liveTakeoverText, shortMirrorName,
+  DOWNLOAD_CARD_TEXT, NO_PAGE_MESSAGES, SWITCH_OFF_TEXT, liveTakeoverText, shortMirrorName,
 } from '../src/extension/popup-view.js';
 import { emptyLiveFacts } from '../src/extension/popup-live.js';
 import { CDN_RANGE_MESSAGES } from '../src/diagnostics/logs-view.js';
@@ -1232,7 +1232,7 @@ async function runLiveUpdateMidStreamPack() {
 }
 
 // 第五组：无媒体 Bilibili 页面与随导航变化的面板（见文件头说明）。
-// 期望值一律从 src 的既有导出推导（cdnLinesView 的空态、liveTakeoverText 的事实折叠、
+// 期望值一律从 src 的既有导出推导（DOWNLOAD_CARD_TEXT 的空态、liveTakeoverText 的事实折叠、
 // NO_PAGE_MESSAGES 的合并提示）：本组检查的是浏览器里装配出来的面板，不是文案字面。
 async function runNoMediaPagePack() {
   const { driver, cleanup } = await setupBrowser('popup-window-check-d-');
@@ -1279,7 +1279,7 @@ async function runNoMediaPagePack() {
       consoleErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
     });
 
-    const cdnEmptyMessage = cdnLinesView(undefined, undefined, false).message;
+    const cdnEmptyMessage = DOWNLOAD_CARD_TEXT.noRecords;
     const liveWaitingText = liveTakeoverText(emptyLiveFacts(), { liveEnabled: true });
 
     // 主页类（无媒体）页面：缓冲如实报没有播放中的视频，申请状态行整体收起，
@@ -1871,7 +1871,7 @@ async function runPartNavigationPack() {
       consoleErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
     });
 
-    const cdnEmptyMessage = cdnLinesView(undefined, undefined, false).message;
+    const cdnEmptyMessage = DOWNLOAD_CARD_TEXT.noRecords;
     const honestVideoLayout = (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
       && state.livePanelHidden === true
       && state.bufferCardHidden === false
@@ -2203,7 +2203,7 @@ async function runLiveTakeoverStatesPack() {
       popupErrors.push({ kind: 'exception', text: details.exception?.description ?? details.text ?? '' });
     });
 
-    // 期望值全部从 src 的既有导出推导：liveTakeoverText 的事实折叠、cdnLinesView
+    // 期望值全部从 src 的既有导出推导：liveTakeoverText 的事实折叠、DOWNLOAD_CARD_TEXT
     // 的空态、shortMirrorName 的线路短名。本组检查装配出来的面板，不是文案字面。
     // FLV 后备状态按各房间的地址簿推出（src/bank/main.js 的 flvBackupUrlsFor）：竞速与
     // 失败房间的内嵌 playinfo 只有本流目录的 .m3u8 条目、没有同流名的 .flv 条目，首个
@@ -2229,14 +2229,14 @@ async function runLiveTakeoverStatesPack() {
       { serveCount: 1, engagement: 'failed', pairedAddressAvailable: false, pairRejected: false, flvBackup: 'unavailable' },
       liveEnabledOn,
     );
-    const emptyLinesMessage = cdnLinesView({ sampleCount: 0, summary: { rows: [] } }, undefined, false).message;
+    const emptyLinesMessage = DOWNLOAD_CARD_TEXT.noRecords;
     const nameA = shortMirrorName('e2e-live.bilivideo.com');
     const nameB = shortMirrorName('e2e-live-b.bilivideo.com');
     const countMatches = (text, pattern) => (text.match(pattern) ?? []).length;
 
     // 竞速：内嵌 playinfo 给出双镜像地址簿，首段身份门比过（字节确定性一致）后放开
-    // 竞速。接管行如实报双镜像竞速与无 FLV 后备；线路卡两行镜像如实报正常与连接时间，
-    // 不出现 NaN。
+    // 竞速。接管行如实报双镜像竞速与无 FLV 后备；线路卡第一行如实报合计速度，各行
+    // 如实报下载状态，不出现 NaN。
     const raceTabId = await activateLiveTab(LIVE_RACE_URL);
     await waitForState(
       readState,
@@ -2244,15 +2244,15 @@ async function runLiveTakeoverStatesPack() {
         && state.livePanelHidden === false && state.bufferCardHidden === true
         && state.takeover === raceText
         && state.cdnCard.includes(nameA) && state.cdnCard.includes(nameB)
-        && countMatches(state.cdnCard, /正常/g) === 2
-        && countMatches(state.cdnCard, /通常 \d+ 毫秒/g) === 2
+        && countMatches(state.cdnCard, /正在下载 · 合计 [\d.]+ Mbps/g) === 1
+        && countMatches(state.cdnCard, /下载中 · [\d.]+ Mbps/g) >= 1
         && !state.cdnCard.includes('NaN')
         ? true
         : `expected the racing takeover state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
       { timeoutMs: 30000, what: 'popup showing live racing takeover' },
     );
     assert.deepEqual(await flvBackupEvents(raceTabId), noFlvEntry, '竞速房间的 FLV 后备事件与地址簿不符');
-    markScenario('直播接管竞速中：弹窗接管行如实报双镜像竞速与无 FLV 后备（no_flv_entry），线路卡两行镜像如实报健康状况与连接时间');
+    markScenario('直播接管竞速中：弹窗接管行如实报双镜像竞速与无 FLV 后备（no_flv_entry），线路卡如实报合计速度与各行下载状态');
 
     // 单路：无地址簿，只有播放器所名地址，接管行如实报无可用备用线路与无 FLV 后备，
     // 线路卡只有一行。
@@ -2263,7 +2263,8 @@ async function runLiveTakeoverStatesPack() {
         && state.livePanelHidden === false && state.bufferCardHidden === true
         && state.takeover === singleText
         && state.cdnCard.includes(nameA) && !state.cdnCard.includes(nameB)
-        && countMatches(state.cdnCard, /正常/g) === 1
+        && countMatches(state.cdnCard, /正在下载 · 合计 [\d.]+ Mbps/g) === 1
+        && countMatches(state.cdnCard, /下载中 · [\d.]+ Mbps/g) === 1
         && !state.cdnCard.includes('NaN')
         ? true
         : `expected the single-leg takeover state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
@@ -2287,7 +2288,7 @@ async function runLiveTakeoverStatesPack() {
     assert.deepEqual(await flvBackupEvents(playlistTabId), [], '只拉播放列表的房间不该打开 FLV 后备');
     markScenario('直播页面只拉播放列表：弹窗接管行如实报未接管，线路卡如实报还没有数据，FLV 后备从未打开');
 
-    // 镜像全灭：两条腿的 502 如实落到面板（接管请求失败、线路卡有错误），页面控制台
+    // 镜像全灭：两条腿的 502 如实落到面板（接管请求失败、线路卡两行报服务器错误），页面控制台
     // 按既有口径全量如实报错，这份报错同时充当了本组捕获通道的阳性对照。
     const failTabId = await activateLiveTab(LIVE_FAIL_URL);
     const failTarget = await driver.findPageByUrl(LIVE_FAIL_URL);
@@ -2310,15 +2311,15 @@ async function runLiveTakeoverStatesPack() {
       (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
         && state.livePanelHidden === false && state.bufferCardHidden === true
         && state.takeover === failedText
-        && countMatches(state.cdnCard, /有错误/g) === 2
-        && state.cdnCard.includes('还没有连接记录')
+        && countMatches(state.cdnCard, /服务器返回错误/g) === 2
+        && state.cdnCard.includes(DOWNLOAD_CARD_TEXT.quietLive)
         && !state.cdnCard.includes('NaN')
         ? true
         : `expected the failed takeover state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
       { timeoutMs: 30000, what: 'popup showing failed live takeover' },
     );
     assert.deepEqual(await flvBackupEvents(failTabId), noFlvEntry, '失败房间的 FLV 后备事件与地址簿不符');
-    markScenario('直播镜像全灭接管失败：弹窗接管行如实报接管请求失败，线路卡两行如实报有错误');
+    markScenario('直播镜像全灭接管失败：弹窗接管行如实报接管请求失败，线路卡两行如实报服务器返回错误');
     await waitForState(
       () => Promise.resolve(livePageErrors),
       (errors) => errors.some((entry) => entry.text.includes('媒体分片前台取数失败') || entry.text.includes('BankNetworkError'))

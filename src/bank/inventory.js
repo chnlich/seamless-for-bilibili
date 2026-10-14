@@ -1,4 +1,5 @@
 import { UNKNOWN_VALUE } from '../diagnostics/privacy.js';
+import { anchorChunkIndex } from './logic.js';
 
 // Five seconds is long enough to survive a delayed diagnostic batch and short enough to
 // make a stopped download layer visible in the popup.
@@ -16,6 +17,19 @@ function resourceKeyFromCacheKey(value) {
   const separator = value.lastIndexOf('#');
   if (separator <= 0) throw new Error(`库存 cacheKey 无效: ${value}`);
   return value.slice(0, separator);
+}
+
+// 连续存好的字节终点（不含）：从预取窗口的起点块（anchorChunkIndex，见 logic.js）
+// 往后数没有空洞的已存块，第一个缺块的开头就是终点；一路数到文件末尾时等于
+// totalSize，这样「整个视频已下载」可以从这个值直接判出。起点或总长未知时
+// 返回 undefined，调用方不写这个字段，不拿缺块硬凑一个数。
+function contiguousEndForResource({ indices, state, chunkBytes }) {
+  const anchor = anchorChunkIndex(state, chunkBytes);
+  if (anchor === undefined || !Number.isSafeInteger(state.totalSize)) return undefined;
+  let index = anchor;
+  while (indices.has(index)) index += 1;
+  const chunkCount = Math.ceil(state.totalSize / chunkBytes);
+  return index >= chunkCount ? state.totalSize : index * chunkBytes;
 }
 
 function representationFor(addressBook, resourceKey) {
@@ -44,9 +58,12 @@ function labelFor(addressBook, resourceKey, representation) {
   return parts.length === 0 ? UNKNOWN_VALUE : parts.join(' · ');
 }
 
-function resourceFrom({ resourceKey, stored, state, addressBook, recentResourceKeys }) {
+function resourceFrom({ resourceKey, stored, state, addressBook, recentResourceKeys, chunkBytes }) {
   const representation = representationFor(addressBook, resourceKey);
-  return {
+  const contiguousEnd = state === undefined
+    ? undefined
+    : contiguousEndForResource({ indices: stored.indices, state, chunkBytes });
+  const resource = {
     pathname: resourceKey,
     kind: typeof representation.mimeType === 'string' && representation.mimeType.startsWith('video/')
       ? 'video'
@@ -69,6 +86,8 @@ function resourceFrom({ resourceKey, stored, state, addressBook, recentResourceK
       : [...state.chunkAttempts.values()].filter((attempts) => attempts > 0).length,
     active: recentResourceKeys.includes(resourceKey),
   };
+  if (contiguousEnd !== undefined) resource.contiguousEnd = contiguousEnd;
+  return resource;
 }
 
 function storedByResource(chunks) {
@@ -78,9 +97,10 @@ function storedByResource(chunks) {
       throw new Error(`库存分片缺少 ArrayBuffer: ${cacheKey}`);
     }
     const resourceKey = resourceKeyFromCacheKey(cacheKey);
-    const current = stored.get(resourceKey) || { bytes: 0, chunks: 0 };
+    const current = stored.get(resourceKey) || { bytes: 0, chunks: 0, indices: new Set() };
     current.bytes += record.bytes.byteLength;
     current.chunks += 1;
+    current.indices.add(Number(cacheKey.slice(cacheKey.lastIndexOf('#') + 1)));
     stored.set(resourceKey, current);
   }
   return stored;
@@ -88,6 +108,7 @@ function storedByResource(chunks) {
 
 export function deriveBankInventory({
   chunks,
+  chunkBytes,
   resourceState,
   addressBook,
   recentResourceKeys,
@@ -100,6 +121,7 @@ export function deriveBankInventory({
   isPairedAddressAvailable,
   sessionGeneration,
 }) {
+  if (!Number.isSafeInteger(chunkBytes) || chunkBytes <= 0) throw new Error('库存推导缺少分片大小');
   const storedByKey = storedByResource(chunks);
   const resourceKeys = new Set([
     ...resourceState.keys(),
@@ -108,10 +130,11 @@ export function deriveBankInventory({
   const sortedResourceKeys = [...resourceKeys].sort((left, right) => left.localeCompare(right));
   const resources = sortedResourceKeys.map((resourceKey) => resourceFrom({
     resourceKey,
-    stored: storedByKey.get(resourceKey) || { bytes: 0, chunks: 0 },
+    stored: storedByKey.get(resourceKey) || { bytes: 0, chunks: 0, indices: new Set() },
     state: resourceState.get(resourceKey),
     addressBook,
     recentResourceKeys,
+    chunkBytes,
   }));
   const activeResourceKeys = recentResourceKeys.filter((resourceKey) => resourceKeys.has(resourceKey));
   const pairedAddressAvailable = activeResourceKeys.some((resourceKey) => {
