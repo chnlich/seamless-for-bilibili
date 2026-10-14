@@ -2,9 +2,9 @@
 
 ## 中文
 
-### 未发布
+### 1.2.0 · [release/1.2.0](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.0)
 
-- 弹窗「下载线路」卡片改报此刻的下载状态：合计速度与每条线路（镜像服务器）的速度、视频提前下载到哪里、播放器卡住时在等哪里的数据和已重试了几轮、按设计暂停下载时直说暂停。原来累计的「有错误」「有停滞」和连接时间从弹窗去掉，历史仍留在日志页的 CDN 竞速面板。
+- 弹窗「下载线路」卡片改报此刻的下载状态：合计速度与每条线路（镜像服务器）的速度、视频提前下载到哪里、播放器卡住时在等哪里的数据和已重试了几轮、按设计暂停下载时直说暂停。原来累计的「有错误」「有停滞」和连接时间从弹窗去掉，「FLV 拼接 · 已补上 N 个分片」一行也一起去掉（FLV 后备本身照常参与竞速），历史仍留在日志页的 CDN 竞速面板。
 
 ### 1.1.0 · [release/1.1.0](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.1.0)
 
@@ -17,9 +17,9 @@
 
 ## English
 
-### Unreleased
+### 1.2.0 · [release/1.2.0](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.0)
 
-- The popup's download-lines card now reports the current download state: the total speed and each mirror line's speed, how far ahead the video is downloaded, what the player is waiting for and how many retry rounds have failed while it stalls, and a plain statement when the extension pauses downloads by design. The cumulative 「有错误」/「有停滞」 words and the connection times leave the popup; the history stays on the logs page CDN panel.
+- The popup's download-lines card now reports the current download state: the total speed and each mirror line's speed, how far ahead the video is downloaded, what the player is waiting for and how many retry rounds have failed while it stalls, and a plain statement when the extension pauses downloads by design. The cumulative 「有错误」/「有停滞」 words, the connection times, and the 「FLV 拼接 · 已补上 N 个分片」 row (FLV rebuild, N segments backfilled) leave the popup; the FLV backup itself keeps racing under the same rules, and the history stays on the logs page CDN panel.
 
 ### 1.1.0 · [release/1.1.0](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.1.0)
 
