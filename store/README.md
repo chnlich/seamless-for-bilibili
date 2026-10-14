@@ -21,6 +21,11 @@ Chrome Web Store 提交所需要的、不依赖新 popup 的内容都在这里�
 6. Privacy practices 标签页：单一用途、逐项权限用途说明、远程代码选“否”、数据使用勾选与认证、隐私政策 URL。
 7. Test instructions 标签页留空；Distribution 标签页：公开、全部地区。
 8. Submit for review。若审查要求补充源码，提供仓库 zip；发布 bundle 未压缩且带 source map。
+9. 提交审核后运行 `npm run release:branch`：把打包时记下的提交推送为 GitHub 分支 release/<版本号>（规则见下节）。
+
+## 版本分支
+
+每个上架版本有一个分支 release/<版本号>，指向打出该版本安装包的提交。npm run package 打包时把当前提交记在安装包旁边。提交审核后运行 npm run release:branch，它把记下的提交推送为这个分支，版本号取自安装包里的 manifest。推送前它核对三件事：记下的提交已经在 GitHub 上，安装包的构建编号等于这个提交的构建编号，同名分支不存在或已经指向这个提交。推送只新建分支，已有的分支保持原样。任何一项不符，它说明原因并退出。修复已上架的版本时，从它的分支切出工作分支 patch/<补丁版本号>，修复推送到这个工作分支，在上面打包、上架、运行 npm run release:branch，再把工作分支合回 main 并删除。
 
 ## unlimitedStorage 说明（诚实口径，按 3 天保留窗口写）
 

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,3 +32,10 @@ const zipPath = path.join(outputDirectory, `seamless-for-bilibili-${manifest.ver
 await zip.writeZipPromise(zipPath);
 const { size } = await fs.stat(zipPath);
 console.log(`wrote ${path.relative(root, zipPath)} (${size} bytes)`);
+
+// npm run release:branch turns this record into the branch release/<version>,
+// so it must hold the commit at package time, not the state of the work tree.
+const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+const commitPath = path.join(outputDirectory, `seamless-for-bilibili-${manifest.version}.commit`);
+await fs.writeFile(commitPath, `${commit}\n`);
+console.log(`wrote ${path.relative(root, commitPath)}`);
