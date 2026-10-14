@@ -18,7 +18,8 @@
 //   - Hard ceilings on opened tabs and popup opens; the run fails loudly when one is exceeded.
 //   - The player is never touched through its skin: playback is started on the media element
 //     itself (video.play()), quality menus are never opened, and no whole-run auto-retry exists.
-//   - A required readout that never appears fails the run; the popup is never captured empty.
+//   - A required readout that never appears fails the run; the popup is never captured
+//     empty or in a degraded moment (failure tone, player waiting, no recent data).
 import { spawn, execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -30,6 +31,7 @@ import { readStoredEvents } from './extension-log-pull.mjs';
 import { installUnpackedExtension } from './install-unpacked-extension.mjs';
 import { assertInkPainted, decodePngFile } from './png-pixels.mjs';
 import { readProvenance } from './provenance.mjs';
+import { DOWNLOAD_CARD_TEXT } from '../src/extension/popup-view.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -55,7 +57,14 @@ const MAX_TAB_OPENS = 8;
 // Popup opens per scenario: the poll loop opens the popup about once per 15 s of waiting.
 const MAX_POPUP_OPENS_PER_SCENARIO = 30;
 
+// fMP4 rooms append the FLV backup state to the takeover line
+// (「正在按两条线路竞速下载，FLV 后备已接上」, popup-view.js liveTakeoverText);
+// the assertions compare the racing prefix.
 const RACING_STATUS_TEXT = '正在按两条线路竞速下载';
+
+// The video waiting headline is built in videoHeadline (src/extension/popup-view.js) as
+// `正在等 <m:ss> 处的数据`; the prefix rejects every one of its forms.
+const WAITING_HEADLINE_PREFIX = '正在等';
 
 // Headless Chrome's virtual screen defaults to 800x600 device px, which
 // --force-device-scale-factor=2 turns into 400x300 CSS px: measured on Chrome 154, the popup
@@ -370,6 +379,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ---- scenarios ------------------------------------------------------------
 
+// A store shot must show the card in a healthy moment: beyond the basic "real data"
+// checks (ready body, two line rows with text, a headline, live takeover racing, video
+// buffer at target), reject a readout with a warn/bad line tone, a player waiting for
+// data, no download records yet, no bytes in the last 5 seconds, or (video) an empty
+// second line. Each rejected state is a true readout of a degraded moment, so the poll
+// loop keeps waiting for a healthy one instead of capturing it.
 function assertRealReadout(label, readout, { racing }) {
   if (readout.bodyReady !== 'true') throw new Error(`${label}: popup body never became ready`);
   if (readout.errorLine !== null && readout.errorLine !== '') {
@@ -379,18 +394,35 @@ function assertRealReadout(label, readout, { racing }) {
   if (readout.lines.length < 2 || statuses.some((status) => status === '')) {
     throw new Error(`${label}: line cards do not show two line statuses: ${JSON.stringify(readout.lines)}`);
   }
-  if (readout.downloadHeadline === null || readout.downloadHeadline === '') {
+  if (readout.lines.some((line) => line.tone === 'warn' || line.tone === 'bad')) {
+    throw new Error(`${label}: a line row shows a failure tone: ${JSON.stringify(readout.lines)}`);
+  }
+  const headline = readout.downloadHeadline ?? '';
+  if (headline === '') {
     throw new Error(`${label}: the download card shows no headline`);
+  }
+  if (headline.startsWith(WAITING_HEADLINE_PREFIX)) {
+    throw new Error(`${label}: the player is waiting for data: ${JSON.stringify(headline)}`);
+  }
+  if (headline === DOWNLOAD_CARD_TEXT.noRecords) {
+    throw new Error(`${label}: the download card has no records yet: ${JSON.stringify(headline)}`);
+  }
+  // quietVideo carries quietLive as its suffix, so one endsWith covers both pages.
+  if (headline.endsWith(DOWNLOAD_CARD_TEXT.quietLive)) {
+    throw new Error(`${label}: no bytes received in the last 5 seconds: ${JSON.stringify(headline)}`);
   }
   const seconds = Number.parseInt(readout.bufferSeconds ?? '', 10);
   if (racing) {
-    if (readout.liveTakeover !== RACING_STATUS_TEXT) {
-      throw new Error(`${label}: live takeover status is ${JSON.stringify(readout.liveTakeover)}, expected ${RACING_STATUS_TEXT}`);
+    if (!(readout.liveTakeover ?? '').startsWith(RACING_STATUS_TEXT)) {
+      throw new Error(`${label}: live takeover status is ${JSON.stringify(readout.liveTakeover)}, expected it to start with ${RACING_STATUS_TEXT}`);
     }
     return;
   }
   if (!Number.isFinite(seconds) || seconds < BUFFER_TARGET_SECONDS) {
     throw new Error(`${label}: buffer readout is ${JSON.stringify(readout.bufferSeconds)}, expected at least ${BUFFER_TARGET_SECONDS} seconds`);
+  }
+  if (readout.downloadSubline === null || readout.downloadSubline === '') {
+    throw new Error(`${label}: the video download card shows no second line`);
   }
 }
 

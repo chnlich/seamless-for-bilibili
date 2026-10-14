@@ -199,7 +199,9 @@ async function assertFonts(page, htmlName) {
 // are the popup's live status texts (popup-view.js liveTakeoverText); an unknown status
 // stops the render instead of silently captioning the wrong state.
 function liveCaptionNote(report) {
-  const state = report.scenarios.live.readout.liveTakeover;
+  // fMP4 rooms carry the FLV backup state after a fullwidth comma, e.g.
+  // 「正在按两条线路竞速下载，FLV 后备已接上」; the caption keys on the base status.
+  const state = report.scenarios.live.readout.liveTakeover.split('，')[0];
   switch (state) {
     case '正在按两条线路竞速下载':
       return '配对后两条线路同时下载，';
