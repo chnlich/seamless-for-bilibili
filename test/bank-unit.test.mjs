@@ -4157,8 +4157,19 @@ test('a frame drop in the FLV stream re-anchors the rebuilder by the dropped spa
   rebuilder.appendFrames(new FlvTagReader().push(live.flv));
   const [calibration, ...later] = live.segments;
   assert.deepEqual(rebuilder.noteRealSegment(calibration.aux, calibration.bytes), { calibrated: true });
+  // 记下每次拼接的状态：掉帧之前的分片 verified；掉帧后的分片拼不上，直到换锚点。
+  const statuses = [];
+  const attempt = rebuilder.attempt.bind(rebuilder);
+  rebuilder.attempt = (aux) => {
+    const result = attempt(aux);
+    statuses.push(result.status);
+    return result;
+  };
   const outcomes = later.map((segment) => rebuilder.noteRealSegment(segment.aux, segment.bytes));
   const index = outcomes.findIndex((outcome) => outcome.reanchored);
+  assert.notEqual(index, -1);
+  assert.deepEqual(statuses.slice(0, 2), ['verified', 'verified']);
+  assert.equal(statuses.slice(2, index).every((status) => status !== 'verified'), true);
   assert.deepEqual(outcomes.filter((outcome) => outcome.reanchored), [{ calibrated: false, reanchored: true, offsetChangeMs: 700 }]);
   for (const segment of later.slice(index + 1)) {
     const result = rebuilder.attempt(segment.aux);
@@ -4569,6 +4580,34 @@ test('the FLV backup reports a re-anchor as one calibrated record carrying the o
     { state: 'connected', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
     { state: 'calibrated', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
     { state: 'calibrated', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST, reason: 'reanchored', offsetChangeMs: 700 },
+  ]);
+  assert.equal(harness.flvFeed.cancelled, false);
+  bank.destroy();
+});
+
+test('the FLV backup reports no re-anchor for a stream without a drop, while network segments arrive ahead of the FLV', async () => {
+  // FLV 只推到校准分片之后的 1500 毫秒：之后的分片由网络腿先到，拼接腿等帧，网络分片走 noteNetworkSegment。
+  const live = syntheticLive({ videoCount: 290, keyFrames: [0, 125, 250] });
+  const harness = flvBackupHarness({ playlistText: syntheticPlaylist(live.segments) });
+  const { bank } = harness;
+  await (await liveFetchThrough(bank, HLS_MAIN_PLAYLIST)).text();
+  const first = hlsFetchThrough(bank, hlsSegmentUrls(live.segments[0].aux.name).player);
+  await settle();
+  harness.flvFeed.push(live.flvBetween(0, 1500));
+  await settle();
+  harness.deliver(live.segments[0]);
+  await (await first).arrayBuffer();
+  await settle();
+  for (const segment of live.segments.slice(1)) {
+    const response = hlsFetchThrough(bank, hlsSegmentUrls(segment.aux.name).player);
+    await settle();
+    harness.deliver(segment);
+    await (await response).arrayBuffer();
+    await settle();
+  }
+  assert.deepEqual(harness.events('live.flv.backup'), [
+    { state: 'connected', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
+    { state: 'calibrated', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
   ]);
   assert.equal(harness.flvFeed.cancelled, false);
   bank.destroy();
