@@ -257,6 +257,17 @@ export class ExtensionCoordinator {
     this.routeKey = href;
     if (mode === undefined) {
       this.diagnostics?.log('route.unsupported', { reason: 'no_video_enhancement_route' });
+      if (isLiveLocation(this.windowObject.location)) {
+        this.active = {
+          mode: 'live',
+          href,
+          video: findLargestVideo(this.documentObject),
+          controller: undefined,
+          controllerStarted: false,
+          passiveObserver: undefined,
+        };
+        this.startPassiveRoute('live');
+      }
       this.finishRoute(routeAbort);
       return;
     }
@@ -273,14 +284,7 @@ export class ExtensionCoordinator {
         controllerStarted: false,
         passiveObserver: undefined,
       };
-      try {
-        this.startPassiveObserver();
-      } catch (error) {
-        this.active.passiveObserver?.destroy();
-        this.active.passiveObserver = undefined;
-        this.logger.error('被动媒体诊断启动失败', error);
-        this.diagnostics?.log('extension.boot_error', { action: `${mode}_passive` }, error);
-      }
+      this.startPassiveRoute(mode);
       this.finishRoute(routeAbort);
       return;
     }
@@ -359,6 +363,17 @@ export class ExtensionCoordinator {
     if (this.routeAbort === routeAbort) {
       this.routeAbort = undefined;
       this.pendingRouteHref = '';
+    }
+  }
+
+  startPassiveRoute(mode) {
+    try {
+      this.startPassiveObserver();
+    } catch (error) {
+      this.active.passiveObserver?.destroy();
+      this.active.passiveObserver = undefined;
+      this.logger.error('被动媒体诊断启动失败', error);
+      this.diagnostics?.log('extension.boot_error', { action: `${mode}_passive` }, error);
     }
   }
 

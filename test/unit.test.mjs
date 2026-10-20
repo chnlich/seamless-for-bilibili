@@ -665,6 +665,119 @@ test('disabled video route passively records media without media or bridge owner
   assert.equal(diagnostics.events.length, eventCount);
 });
 
+function liveRouteLocation() {
+  return {
+    href: 'https://live.bilibili.com/21452505',
+    origin: 'https://live.bilibili.com',
+    hostname: 'live.bilibili.com',
+    pathname: '/21452505',
+  };
+}
+
+function diagnosticsWithTimers(location) {
+  const sent = [];
+  const timers = [];
+  const client = new DiagnosticsClient({
+    documentObject: { defaultView: { addEventListener() {} } },
+    windowObject: {
+      location,
+      setTimeout(callback, milliseconds) {
+        const timer = { callback, milliseconds };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimeout(timer) { timer.cleared = true; },
+    },
+    runtimeObject: {
+      sendMessage(message, callback) {
+        sent.push(message);
+        callback({ ok: true, status: 'PERSISTED', eventCount: message.events.length });
+      },
+    },
+    locationObject: location,
+    loggerObject: { log() {}, warn() {}, error() {} },
+  });
+  return { client, sent, timers };
+}
+
+async function sentEventCodes(client, sent) {
+  await client.flush();
+  return sent.flatMap((message) => message.events.map((event) => event.code));
+}
+
+test('live route with a video starts a passive observer and no panel or controller', async () => {
+  const location = liveRouteLocation();
+  const { client, sent, timers } = diagnosticsWithTimers(location);
+  const fixture = coordinatorFixture({ diagnostics: client, location });
+
+  await fixture.coordinator.start();
+  assert.equal(fixture.coordinator.active.mode, 'live');
+  assert.equal(fixture.coordinator.active.panel, undefined);
+  assert.equal(fixture.coordinator.active.controller, undefined);
+  assert.notEqual(fixture.coordinator.active.passiveObserver, undefined);
+  const codes = await sentEventCodes(client, sent);
+  assert.ok(codes.includes('video.attached'));
+  assert.ok(codes.includes('media.sample'));
+  assert.equal(codes.includes('route.no_video'), false);
+  assert.equal(timers.find((timer) => timer.milliseconds === 30000).cleared, true);
+  await fixture.coordinator.destroy();
+});
+
+test('live route without a video logs route.no_video after 30 seconds', async () => {
+  const location = liveRouteLocation();
+  const { client, sent, timers } = diagnosticsWithTimers(location);
+  const fixture = coordinatorFixture({ diagnostics: client, location });
+  fixture.documentObject.querySelectorAll = () => [];
+
+  await fixture.coordinator.start();
+  assert.notEqual(fixture.coordinator.active.passiveObserver, undefined);
+  const noVideoTimer = timers.find((timer) => timer.milliseconds === 30000);
+  assert.equal(noVideoTimer.cleared, undefined);
+  noVideoTimer.callback();
+  assert.ok((await sentEventCodes(client, sent)).includes('route.no_video'));
+  await fixture.coordinator.destroy();
+});
+
+test('leaving the live route destroys its passive observer', async () => {
+  const diagnostics = diagnosticsRecorder();
+  diagnostics.startSession = () => {};
+  const fixture = coordinatorFixture({ diagnostics, location: liveRouteLocation() });
+
+  await fixture.coordinator.start();
+  const sampler = fixture.callbacks.at(-1);
+  assert.equal(diagnostics.events.filter((event) => event.code === 'media.sample').length, 1);
+  fixture.windowObject.location = {
+    href: 'https://www.bilibili.com/',
+    origin: 'https://www.bilibili.com',
+    hostname: 'www.bilibili.com',
+    pathname: '/',
+  };
+  await fixture.coordinator.syncRoute();
+  assert.equal(fixture.coordinator.active, undefined);
+  assert.ok(diagnostics.events.some((event) => event.code === 'video.destroyed'));
+  sampler();
+  assert.equal(diagnostics.events.filter((event) => event.code === 'media.sample').length, 1);
+});
+
+test('a non-live page without a mode starts no passive observer', async () => {
+  const diagnostics = diagnosticsRecorder();
+  const fixture = coordinatorFixture({
+    diagnostics,
+    location: {
+      href: 'https://www.bilibili.com/',
+      origin: 'https://www.bilibili.com',
+      hostname: 'www.bilibili.com',
+      pathname: '/',
+    },
+  });
+
+  await fixture.coordinator.start();
+  assert.equal(fixture.coordinator.active, undefined);
+  assert.ok(diagnostics.events.some((event) => event.code === 'route.unsupported'));
+  assert.equal(diagnostics.events.some((event) => event.code === 'media.sample'), false);
+  await fixture.coordinator.destroy();
+});
+
 test('each switch gates its own page type and the other switch never leaks into the bank control', async () => {
   const offVideo = coordinatorFixture({ enabled: false, liveEnabled: true });
   await offVideo.coordinator.start();

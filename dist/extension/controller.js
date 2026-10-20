@@ -631,7 +631,7 @@
   }
 
   // src/build-id.js
-  var BUILT_BUILD_ID = true ? "src-df24aafe22cd0ff57c740449" : "source-build";
+  var BUILT_BUILD_ID = true ? "src-e3a76b7dfd525774778d5640" : "source-build";
   function readBuildId() {
     return BUILT_BUILD_ID;
   }
@@ -2710,6 +2710,17 @@
       this.routeKey = href;
       if (mode === void 0) {
         this.diagnostics?.log("route.unsupported", { reason: "no_video_enhancement_route" });
+        if (isLiveLocation(this.windowObject.location)) {
+          this.active = {
+            mode: "live",
+            href,
+            video: findLargestVideo(this.documentObject),
+            controller: void 0,
+            controllerStarted: false,
+            passiveObserver: void 0
+          };
+          this.startPassiveRoute("live");
+        }
         this.finishRoute(routeAbort);
         return;
       }
@@ -2726,14 +2737,7 @@
           controllerStarted: false,
           passiveObserver: void 0
         };
-        try {
-          this.startPassiveObserver();
-        } catch (error) {
-          this.active.passiveObserver?.destroy();
-          this.active.passiveObserver = void 0;
-          this.logger.error("被动媒体诊断启动失败", error);
-          this.diagnostics?.log("extension.boot_error", { action: `${mode}_passive` }, error);
-        }
+        this.startPassiveRoute(mode);
         this.finishRoute(routeAbort);
         return;
       }
@@ -2802,6 +2806,16 @@
       if (this.routeAbort === routeAbort) {
         this.routeAbort = void 0;
         this.pendingRouteHref = "";
+      }
+    }
+    startPassiveRoute(mode) {
+      try {
+        this.startPassiveObserver();
+      } catch (error) {
+        this.active.passiveObserver?.destroy();
+        this.active.passiveObserver = void 0;
+        this.logger.error("被动媒体诊断启动失败", error);
+        this.diagnostics?.log("extension.boot_error", { action: `${mode}_passive` }, error);
       }
     }
     startPassiveObserver() {
