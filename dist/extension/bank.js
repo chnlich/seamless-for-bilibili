@@ -211,7 +211,8 @@
       "errorName",
       "state",
       "mirror",
-      "reason"
+      "reason",
+      "offsetChangeMs"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),
@@ -1047,6 +1048,9 @@
     }
     return -1;
   }
+  function anchorOffsetMs(timing) {
+    return timing.video.base / VIDEO_TICKS_PER_MS - timing.video.flvTs;
+  }
   function gcd(left, right) {
     let a = Math.abs(left);
     let b = Math.abs(right);
@@ -1426,7 +1430,9 @@
         if (known < msn - 128) this.chain.delete(known);
       }
     }
-    // 网络送达的真分片：未校准时拿它校准，已校准时记入分片链。
+    // 网络送达的真分片：未校准时拿它校准。已校准时先用现校准拼一次：拼对（verified）或等帧
+    // （waiting）保留校准；明确失败（mismatch、frames_missing）时拿它自己的字节重新校准，成功则
+    // 换锚点并返回变化量，失败则保留旧校准。已校准的两种路径都记入分片链。
     noteRealSegment(aux, bytes) {
       if (this.calibration === void 0) {
         const result = calibrateFromSegment(bytes, this.frameWindow);
@@ -1435,6 +1441,18 @@
         this.recordSegment(aux.msn, result.segment);
         return { calibrated: true };
       }
+      const { status } = this.attempt(aux);
+      if (status === "verified") return { calibrated: false, reanchored: false };
+      if (status === "mismatch" || status === "frames_missing") {
+        const result = calibrateFromSegment(bytes, this.frameWindow);
+        if (result.ok) {
+          const offsetBefore = anchorOffsetMs(this.calibration.timing);
+          this.calibration = result.calibration;
+          this.recordSegment(aux.msn, result.segment);
+          const offsetChangeMs = Math.round(anchorOffsetMs(this.calibration.timing) - offsetBefore);
+          return { calibrated: false, reanchored: true, offsetChangeMs };
+        }
+      }
       const fragments = parseMediaSegment(bytes);
       const startIndex = locateSegmentStart(this.video, this.calibration.timing, aux);
       this.recordSegment(aux.msn, {
@@ -1442,7 +1460,7 @@
         fragmentCount: fragments.length,
         startTs: startIndex === -1 ? void 0 : this.video[startIndex].ts
       });
-      return { calibrated: false };
+      return { calibrated: false, reanchored: false };
     }
     seqFor(msn) {
       const previous = this.chain.get(msn - 1);
@@ -2005,11 +2023,11 @@
     get ready() {
       return !this.closed && this.rebuilder.calibrated;
     }
-    emitState(state, reason) {
+    emitState(state, reason, extra = {}) {
       const payload = { state, streamPath: this.streamPath };
       if (this.mirror !== void 0) payload.mirror = this.mirror;
       if (reason !== void 0) payload.reason = reason;
-      this.emitStateCallback(payload);
+      this.emitStateCallback({ ...payload, ...extra });
     }
     // 每次连接现取地址簿（签名可能已更新），跳过已过期的地址，在 Bilibili 给出的地址间轮换。
     pickUrl() {
@@ -2148,7 +2166,8 @@
       this.rebuilder.resetCalibration();
       this.failPending("frames_missing");
     }
-    // 网络送达的真分片：记下响应头（拼接腿胜出时沿用），未校准时拿它校准，已校准时续分片链。
+    // 网络送达的真分片：记下响应头（拼接腿胜出时沿用），未校准时拿它校准。已校准时由 rebuilder
+    // 判断是否重新校准（换锚点时记 reanchored，并让等待中的拼接请求改用新锚点）。
     // 连接供帧满一个窗口后仍连续 maxCalibrationAttempts 个分片校准不上，或分片结构不受支持，
     // 判这条流 unavailable 并关闭连接。
     noteNetworkSegment({ aux, bytes, headers }) {
@@ -2162,7 +2181,12 @@
         this.reportError("FLV 后备读取网络分片失败", error);
         return;
       }
-      if (wasCalibrated) return;
+      if (wasCalibrated) {
+        if (!outcome.reanchored) return;
+        this.emitState("calibrated", "reanchored", { offsetChangeMs: outcome.offsetChangeMs });
+        for (const request of [...this.pending]) this.progressRequest(request);
+        return;
+      }
       if (outcome.calibrated) {
         this.calibrationFailures = 0;
         this.emitState("calibrated");

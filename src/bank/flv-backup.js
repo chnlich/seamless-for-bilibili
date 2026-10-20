@@ -65,11 +65,11 @@ export class LiveFlvBackup {
     return !this.closed && this.rebuilder.calibrated;
   }
 
-  emitState(state, reason) {
+  emitState(state, reason, extra = {}) {
     const payload = { state, streamPath: this.streamPath };
     if (this.mirror !== undefined) payload.mirror = this.mirror;
     if (reason !== undefined) payload.reason = reason;
-    this.emitStateCallback(payload);
+    this.emitStateCallback({ ...payload, ...extra });
   }
 
   // 每次连接现取地址簿（签名可能已更新），跳过已过期的地址，在 Bilibili 给出的地址间轮换。
@@ -217,7 +217,8 @@ export class LiveFlvBackup {
     this.failPending('frames_missing');
   }
 
-  // 网络送达的真分片：记下响应头（拼接腿胜出时沿用），未校准时拿它校准，已校准时续分片链。
+  // 网络送达的真分片：记下响应头（拼接腿胜出时沿用），未校准时拿它校准。已校准时由 rebuilder
+  // 判断是否重新校准（换锚点时记 reanchored，并让等待中的拼接请求改用新锚点）。
   // 连接供帧满一个窗口后仍连续 maxCalibrationAttempts 个分片校准不上，或分片结构不受支持，
   // 判这条流 unavailable 并关闭连接。
   noteNetworkSegment({ aux, bytes, headers }) {
@@ -231,7 +232,12 @@ export class LiveFlvBackup {
       this.reportError('FLV 后备读取网络分片失败', error);
       return;
     }
-    if (wasCalibrated) return;
+    if (wasCalibrated) {
+      if (!outcome.reanchored) return;
+      this.emitState('calibrated', 'reanchored', { offsetChangeMs: outcome.offsetChangeMs });
+      for (const request of [...this.pending]) this.progressRequest(request);
+      return;
+    }
     if (outcome.calibrated) {
       this.calibrationFailures = 0;
       this.emitState('calibrated');

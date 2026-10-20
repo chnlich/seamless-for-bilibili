@@ -2,9 +2,11 @@
 // makes them. The check runs the extension's own FlvSegmentRebuilder (src/bank/flv-rebuild.js):
 // the first segment it can place calibrates, every later segment is rebuilt from FLV frames and the
 // playlist's EXT-BILI-AUX values alone, and a rebuilt segment counts only when its length and CRC32
-// match the playlist; it is then also compared byte for byte with the recorded file. The calibration
-// segment is rebuilt as well, from the template and mfhd sequence calibration read off it, and is
-// reported separately (calibrationSelfCheck) so the counts for later segments stay predictions.
+// match the playlist; it is then also compared byte for byte with the recorded file. A segment that
+// does not verify goes to the runtime's noteRealSegment, which re-anchors the calibration from that
+// segment's own bytes when the current one fails on it (FLV frame drops). The calibration segment is
+// rebuilt as well, from the template and mfhd sequence calibration read off it, and is reported
+// separately (calibrationSelfCheck) so the counts for later segments stay predictions.
 //
 //   node scripts/live-rebuild-offline.mjs record <roomId> <seconds> <dir> [avc|hevc] [qn]
 //   node scripts/live-rebuild-offline.mjs check <dir> [<dir> ...]
@@ -68,6 +70,7 @@ async function checkRecording(directory) {
   const counts = { verified: 0, mismatch: 0, frames_missing: 0, waiting: 0, byteDiffers: 0 };
   let calibratedOn;
   let calibrationSelfCheck = null;
+  let reanchored = 0;
   const compare = (result, real) => {
     if (result.status !== 'verified') return result.status === 'mismatch' ? `built ${result.bytes} bytes` : '';
     const same = Buffer.from(result.bytes).equals(Buffer.from(real));
@@ -100,8 +103,13 @@ async function checkRecording(directory) {
     counts[result.status] += 1;
     let note = compare(result, real);
     if (result.status !== 'verified') {
-      // The network would have delivered this one; it re-anchors the segment chain.
-      rebuilder.noteRealSegment(entry, real);
+      // The runtime hands a network-delivered segment to noteRealSegment; it re-anchors the calibration
+      // when this segment's own bytes say the current one is wrong.
+      const outcome = rebuilder.noteRealSegment(entry, real);
+      if (outcome.reanchored) {
+        reanchored += 1;
+        note = `${note} reanchored offsetChangeMs=${outcome.offsetChangeMs}`.trimStart();
+      }
       if (result.status === 'mismatch') note = `${note}, playlist says ${entry.size}`;
     }
     console.log(`${name} dur=${entry.duration} ${entry.key ? 'K' : 'N'} ${result.status} ${note}`.trimEnd());
@@ -117,6 +125,7 @@ async function checkRecording(directory) {
     mismatch: counts.mismatch,
     framesMissing: counts.frames_missing,
     waiting: counts.waiting,
+    reanchored,
     verifiedButBytesDiffer: counts.byteDiffers,
   };
   console.log(JSON.stringify(summary));

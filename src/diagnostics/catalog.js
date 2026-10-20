@@ -192,6 +192,7 @@ export const DATA_ALLOWLIST = Object.freeze({
     'state',
     'mirror',
     'reason',
+    'offsetChangeMs',
   ]),
   extension: Object.freeze(['action', 'reason', 'status']),
   persist: Object.freeze(['status', 'batchSize', 'eventCount', 'message', 'code']),

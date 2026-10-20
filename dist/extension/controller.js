@@ -223,7 +223,8 @@
       "errorName",
       "state",
       "mirror",
-      "reason"
+      "reason",
+      "offsetChangeMs"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),
@@ -630,7 +631,7 @@
   }
 
   // src/build-id.js
-  var BUILT_BUILD_ID = true ? "src-66aaea6d859900d32f7a642a" : "source-build";
+  var BUILT_BUILD_ID = true ? "src-df24aafe22cd0ff57c740449" : "source-build";
   function readBuildId() {
     return BUILT_BUILD_ID;
   }

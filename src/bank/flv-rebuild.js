@@ -328,6 +328,11 @@ export function matchFrameRun(frames, samples) {
   return -1;
 }
 
+// 锚点：同一帧的 HLS 时间减 FLV 时间戳，毫秒。FLV 丢帧后整体增大。
+function anchorOffsetMs(timing) {
+  return timing.video.base / VIDEO_TICKS_PER_MS - timing.video.flvTs;
+}
+
 function gcd(left, right) {
   let a = Math.abs(left);
   let b = Math.abs(right);
@@ -754,7 +759,9 @@ export class FlvSegmentRebuilder {
     }
   }
 
-  // 网络送达的真分片：未校准时拿它校准，已校准时记入分片链。
+  // 网络送达的真分片：未校准时拿它校准。已校准时先用现校准拼一次：拼对（verified）或等帧
+  // （waiting）保留校准；明确失败（mismatch、frames_missing）时拿它自己的字节重新校准，成功则
+  // 换锚点并返回变化量，失败则保留旧校准。已校准的两种路径都记入分片链。
   noteRealSegment(aux, bytes) {
     if (this.calibration === undefined) {
       const result = calibrateFromSegment(bytes, this.frameWindow);
@@ -763,6 +770,18 @@ export class FlvSegmentRebuilder {
       this.recordSegment(aux.msn, result.segment);
       return { calibrated: true };
     }
+    const { status } = this.attempt(aux);
+    if (status === 'verified') return { calibrated: false, reanchored: false };
+    if (status === 'mismatch' || status === 'frames_missing') {
+      const result = calibrateFromSegment(bytes, this.frameWindow);
+      if (result.ok) {
+        const offsetBefore = anchorOffsetMs(this.calibration.timing);
+        this.calibration = result.calibration;
+        this.recordSegment(aux.msn, result.segment);
+        const offsetChangeMs = Math.round(anchorOffsetMs(this.calibration.timing) - offsetBefore);
+        return { calibrated: false, reanchored: true, offsetChangeMs };
+      }
+    }
     const fragments = parseMediaSegment(bytes);
     const startIndex = locateSegmentStart(this.video, this.calibration.timing, aux);
     this.recordSegment(aux.msn, {
@@ -770,7 +789,7 @@ export class FlvSegmentRebuilder {
       fragmentCount: fragments.length,
       startTs: startIndex === -1 ? undefined : this.video[startIndex].ts,
     });
-    return { calibrated: false };
+    return { calibrated: false, reanchored: false };
   }
 
   seqFor(msn) {

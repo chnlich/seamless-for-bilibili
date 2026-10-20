@@ -400,6 +400,7 @@ assert.deepEqual([...DATA_ALLOWLIST.live].sort(), [
   'state',
   'mirror',
   'reason',
+  'offsetChangeMs',
 ].sort());
 assert.deepEqual([...DATA_ALLOWLIST.log].sort(), [
   'errorName',

@@ -3811,11 +3811,14 @@ const REAL_AUDIO_SHAPE = Object.freeze({
 // 小片段，同时刻按标签顺序归前一个。audioFirst 模拟原画档的 traf 次序（音频轨 1 在前）。
 // 默认按毫秒走时（非关键帧 CTS 33 毫秒）；halfFrameAt 给出时改按 3000 格走时（录制实测的
 // 转码档）：该帧时长 1500，其后的关键帧 CTS 为 10500，FLV 的毫秒时间戳与 CTS 为原值截断。
+// dropFrames 给出 { fromMs, spanMs } 时模拟 CDN 中途丢帧：FLV 里 [fromMs, fromMs + spanMs)
+// 的标签丢失，之后的标签时间戳前移 spanMs；分片字节不变。
 function syntheticLive({
   videoCount,
   keyFrames,
   audioFirst = false,
   halfFrameAt,
+  dropFrames,
   firstMsn = 423384050,
   firstSeq = 700,
 }) {
@@ -3856,6 +3859,16 @@ function syntheticLive({
     })),
   ].sort((left, right) => left.ts - right.ts || left.rank - right.rank);
   tags.forEach((tag, order) => { tag.frame.order = order; });
+  const flvTags = dropFrames === undefined ? tags : tags.flatMap((tag) => {
+    const at = tag.ts - flvStart;
+    if (at >= dropFrames.fromMs && at < dropFrames.fromMs + dropFrames.spanMs) return [];
+    if (at < dropFrames.fromMs) return [tag];
+    const ts = tag.ts - dropFrames.spanMs;
+    const bytes = tag.rank === 0
+      ? flvAudioTag(ts, { data: tag.frame.data })
+      : flvVideoTag(ts, { key: tag.frame.key, cts: tag.frame.cts, data: tag.frame.data });
+    return [{ ...tag, ts, bytes }];
+  });
   const header = concatBytes([
     FLV_FILE_HEADER,
     flvTag(18, 0, encoded('onMetaData')),
@@ -3934,12 +3947,12 @@ function syntheticLive({
   }
   return {
     header,
-    tags,
+    tags: flvTags,
     segments,
-    flv: concatBytes([header, ...tags.map((tag) => tag.bytes)]),
+    flv: concatBytes([header, ...flvTags.map((tag) => tag.bytes)]),
     // FLV 字节按时间切段：[fromMs, toMs) 相对首帧，from 为 0 时带文件头。
     flvBetween(fromMs, toMs) {
-      const parts = tags.filter((tag) => tag.ts - flvStart >= fromMs && tag.ts - flvStart < toMs).map((tag) => tag.bytes);
+      const parts = flvTags.filter((tag) => tag.ts - flvStart >= fromMs && tag.ts - flvStart < toMs).map((tag) => tag.bytes);
       return concatBytes(fromMs === 0 ? [header, ...parts] : parts);
     },
   };
@@ -4124,6 +4137,70 @@ test('the rebuilder keeps 3000-tick rooms exact through half-frame steps the cal
     assert.equal(result.status, 'verified', segment.aux.name);
     assert.equal(Buffer.compare(Buffer.from(result.bytes), Buffer.from(segment.bytes)), 0);
   }
+});
+
+test('an undropped stream never re-anchors the rebuilder', () => {
+  const live = syntheticLive({ videoCount: 290, keyFrames: [0, 125, 250] });
+  const rebuilder = new FlvSegmentRebuilder({ windowMs: 30000 });
+  rebuilder.appendFrames(new FlvTagReader().push(live.flv));
+  const [calibration, ...later] = live.segments;
+  assert.deepEqual(rebuilder.noteRealSegment(calibration.aux, calibration.bytes), { calibrated: true });
+  for (const segment of later) {
+    assert.deepEqual(rebuilder.noteRealSegment(segment.aux, segment.bytes), { calibrated: false, reanchored: false });
+  }
+});
+
+test('a frame drop in the FLV stream re-anchors the rebuilder by the dropped span, and later segments rebuild again', () => {
+  // 3000 至 3700 毫秒的 FLV 标签丢失，之后的时间戳前移 700 毫秒：旧锚点拼不对，网络分片校准后换锚点。
+  const live = syntheticLive({ videoCount: 290, keyFrames: [0, 125, 250], dropFrames: { fromMs: 3000, spanMs: 700 } });
+  const rebuilder = new FlvSegmentRebuilder({ windowMs: 30000 });
+  rebuilder.appendFrames(new FlvTagReader().push(live.flv));
+  const [calibration, ...later] = live.segments;
+  assert.deepEqual(rebuilder.noteRealSegment(calibration.aux, calibration.bytes), { calibrated: true });
+  const outcomes = later.map((segment) => rebuilder.noteRealSegment(segment.aux, segment.bytes));
+  const index = outcomes.findIndex((outcome) => outcome.reanchored);
+  assert.deepEqual(outcomes.filter((outcome) => outcome.reanchored), [{ calibrated: false, reanchored: true, offsetChangeMs: 700 }]);
+  for (const segment of later.slice(index + 1)) {
+    const result = rebuilder.attempt(segment.aux);
+    assert.equal(result.status, 'verified', segment.aux.name);
+    assert.equal(Buffer.compare(Buffer.from(result.bytes), Buffer.from(segment.bytes)), 0);
+  }
+});
+
+test('a network segment whose FLV frames were all dropped leaves the calibration object in place', () => {
+  // 1000 至 2000 毫秒的帧全部丢失：第二个分片拼不出也校准不上，校准对象保持原样。
+  const live = syntheticLive({ videoCount: 290, keyFrames: [0, 125, 250], dropFrames: { fromMs: 1000, spanMs: 1000 } });
+  const rebuilder = new FlvSegmentRebuilder({ windowMs: 30000 });
+  rebuilder.appendFrames(new FlvTagReader().push(live.flv));
+  const [calibration, dropped] = live.segments;
+  assert.deepEqual(rebuilder.noteRealSegment(calibration.aux, calibration.bytes), { calibrated: true });
+  const before = rebuilder.calibration;
+  assert.deepEqual(rebuilder.noteRealSegment(dropped.aux, dropped.bytes), { calibrated: false, reanchored: false });
+  assert.equal(rebuilder.calibration, before);
+});
+
+test('a verified network segment keeps the calibration without parsing its bytes', () => {
+  const live = syntheticLive({ videoCount: 290, keyFrames: [0, 125, 250] });
+  const rebuilder = new FlvSegmentRebuilder({ windowMs: 30000 });
+  rebuilder.appendFrames(new FlvTagReader().push(live.flv));
+  const [calibration, next] = live.segments;
+  assert.deepEqual(rebuilder.noteRealSegment(calibration.aux, calibration.bytes), { calibrated: true });
+  const before = rebuilder.calibration;
+  // 拼接与播放列表一致时直接判 verified，不解析网络字节：这里的字节不是合法的 fMP4。
+  assert.deepEqual(rebuilder.noteRealSegment(next.aux, Uint8Array.of(1, 2, 3)), { calibrated: false, reanchored: false });
+  assert.equal(rebuilder.calibration, before);
+});
+
+test('a network segment the FLV window has not reached yet is waiting and keeps the calibration', () => {
+  const live = syntheticLive({ videoCount: 290, keyFrames: [0, 125, 250] });
+  const rebuilder = new FlvSegmentRebuilder({ windowMs: 30000 });
+  rebuilder.appendFrames(new FlvTagReader().push(live.flvBetween(0, 1500)));
+  const [calibration, next] = live.segments;
+  assert.deepEqual(rebuilder.noteRealSegment(calibration.aux, calibration.bytes), { calibrated: true });
+  const before = rebuilder.calibration;
+  assert.deepEqual(rebuilder.noteRealSegment(next.aux, next.bytes), { calibrated: false, reanchored: false });
+  assert.equal(rebuilder.attempt(next.aux).status, 'waiting');
+  assert.equal(rebuilder.calibration, before);
 });
 
 // FLV 后备的页面夹具：地址簿含同流名、同编码的 fMP4 与 FLV 条目；FLV 连接与各网络腿
@@ -4464,6 +4541,34 @@ test('an audio-only network segment leaves the FLV backup open, and the next seg
   assert.deepEqual(harness.events('live.flv.backup'), [
     { state: 'connected', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
     { state: 'calibrated', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
+  ]);
+  assert.equal(harness.flvFeed.cancelled, false);
+  bank.destroy();
+});
+
+test('the FLV backup reports a re-anchor as one calibrated record carrying the offset change', async () => {
+  const live = syntheticLive({ videoCount: 290, keyFrames: [0, 125, 250], dropFrames: { fromMs: 3000, spanMs: 700 } });
+  const harness = flvBackupHarness({ playlistText: syntheticPlaylist(live.segments) });
+  const { bank } = harness;
+  await (await liveFetchThrough(bank, HLS_MAIN_PLAYLIST)).text();
+  const first = hlsFetchThrough(bank, hlsSegmentUrls(live.segments[0].aux.name).player);
+  await settle();
+  harness.flvFeed.push(live.flv);
+  await settle();
+  harness.deliver(live.segments[0]);
+  await (await first).arrayBuffer();
+  await settle();
+  for (const segment of live.segments.slice(1)) {
+    const response = hlsFetchThrough(bank, hlsSegmentUrls(segment.aux.name).player);
+    await settle();
+    harness.deliver(segment);
+    await (await response).arrayBuffer();
+    await settle();
+  }
+  assert.deepEqual(harness.events('live.flv.backup'), [
+    { state: 'connected', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
+    { state: 'calibrated', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST },
+    { state: 'calibrated', streamPath: FLV_BACKUP_PATH, mirror: FLV_BACKUP_HOST, reason: 'reanchored', offsetChangeMs: 700 },
   ]);
   assert.equal(harness.flvFeed.cancelled, false);
   bank.destroy();

@@ -222,7 +222,8 @@
       "errorName",
       "state",
       "mirror",
-      "reason"
+      "reason",
+      "offsetChangeMs"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),
