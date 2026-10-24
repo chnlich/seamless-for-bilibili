@@ -307,6 +307,26 @@ test('closed single Range and video media hosts are the only intercepted shape',
   }).intercepted, false);
 });
 
+test('download layer intercepts a closed Range media request on a language-prefixed video page', async () => {
+  const { bank, calls } = createBank({
+    config: configFor(),
+    location: new URL('https://www.bilibili.com/zh-Hans/video/BVa/'),
+  });
+  let originalFetchCalls = 0;
+
+  const response = await fetchThrough(bank, MEDIA_URL, {
+    headers: { Range: 'bytes=4-11' },
+  }, async () => {
+    originalFetchCalls += 1;
+    return responseFor(4, 11, 100, bytesFor(4, 11));
+  });
+
+  assert.equal(originalFetchCalls, 0);
+  assert.deepEqual(calls[0].range, { start: 0, end: 15 });
+  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [...bytesFor(4, 11)]);
+  bank.destroy();
+});
+
 test('response headers, content-range parser, and fetch plans are exact', () => {
   assert.deepEqual(partialResponseHeaders(4, 9, 100), {
     'Accept-Ranges': 'bytes',
@@ -1077,14 +1097,14 @@ test('leaving the video route releases chunks', async () => {
   assert.equal(bank.chunks.size, 0);
 });
 
-test('changing bvid releases chunks', async () => {
+test('changing bvid on a language-prefixed video route releases chunks', async () => {
   const config = configFor();
   const { bank, windowObject } = createBank({
     config,
-    location: new URL('https://www.bilibili.com/video/BVbank/'),
+    location: new URL('https://www.bilibili.com/zh-Hans/video/BVa/'),
   });
   putChunk(bank, 0, config);
-  windowObject.location = new URL('https://www.bilibili.com/video/BVother/');
+  windowObject.location = new URL('https://www.bilibili.com/zh-Hans/video/BVb/');
 
   await bank.prefetch();
 

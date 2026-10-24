@@ -7,6 +7,7 @@ import { findAvailablePort, parseHeadedFlag, resolveChromeExecutablePath } from 
 import { startConsoleCapture, triggerExtensionPositiveControl } from './console-capture.mjs';
 import { installUnpackedExtension } from './install-unpacked-extension.mjs';
 import { readMaxEventId, readStoredEvents } from './extension-log-pull.mjs';
+import { siteRoutePath } from '../src/route.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extensionDirectory = path.join(root, 'dist', 'extension');
@@ -108,11 +109,11 @@ async function waitForVideoHint(context, extensionId, pathname, startAfterEventI
     const stored = await readStoredEvents(context, extensionId, startAfterEventId);
     // 站点会把 /video/<BV> 重定向到带尾斜杠的规范地址，session 存的是后者；
     // 归一化尾斜杠后再比对，不然永远匹配不到 session。
-    const normalizedPathname = pathname.replace(/\/+$/, '');
+    const normalizedPathname = siteRoutePath(pathname).replace(/\/+$/, '');
     const sessionIds = new Set(stored.events
       .filter((event) => event.code === 'route.session_started'
         && typeof event.data?.pathname === 'string'
-        && event.data.pathname.replace(/\/+$/, '') === normalizedPathname)
+        && siteRoutePath(event.data.pathname).replace(/\/+$/, '') === normalizedPathname)
       .map((event) => event.sessionId));
     const hint = stored.events
       .filter((event) => sessionIds.has(event.sessionId) && [

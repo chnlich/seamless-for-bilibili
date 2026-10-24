@@ -33,6 +33,7 @@ test('provenance keeps verification running when git is unavailable', async () =
   const provenance = await readProvenance({
     rootDirectory: 'test-root',
     extensionDirectory: 'test-dist',
+    environment: {},
     executeGit: async () => {
       throw new Error('spawn git ENOENT');
     },
@@ -50,12 +51,43 @@ test('provenance still rejects bundles with different buildIds', async () => {
     readProvenance({
       rootDirectory: 'test-root',
       extensionDirectory: 'test-dist',
+    environment: {},
       executeGit: async () => ({ stdout: `${'c'.repeat(40)}\n` }),
       readFile: async (filePath) => filePath.endsWith('controller.js')
         ? `const buildId = '${controllerBuildId}';`
         : `const buildId = '${workerBuildId}';`,
     }),
     /dist bundles do not contain exactly one shared buildId/,
+  );
+});
+
+test('provenance uses an explicit commit SHA without invoking git', async () => {
+  const buildId = `src-${'a'.repeat(24)}`;
+  const commitSha = 'b'.repeat(40);
+  let gitCalled = false;
+  const provenance = await readProvenance({
+    rootDirectory: 'test-root',
+    extensionDirectory: 'test-dist',
+    environment: { BILIBILI_E2E_COMMIT_SHA: commitSha },
+    executeGit: async () => {
+      gitCalled = true;
+      throw new Error('git must not be called');
+    },
+    readFile: async () => `const buildId = '${buildId}';`,
+  });
+  assert.equal(gitCalled, false);
+  assert.equal(provenance.commitSha, commitSha);
+  assert.equal(provenance.commitShaReason, undefined);
+  assert.equal(provenance.buildId, buildId);
+});
+
+test('provenance rejects an invalid explicit commit SHA', async () => {
+  await assert.rejects(
+    readProvenance({
+      environment: { BILIBILI_E2E_COMMIT_SHA: 'not-a-sha' },
+      readFile: async () => `const buildId = 'src-${'a'.repeat(24)}';`,
+    }),
+    /BILIBILI_E2E_COMMIT_SHA must be a 40-character lowercase commit SHA/,
   );
 });
 

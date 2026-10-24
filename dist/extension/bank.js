@@ -252,13 +252,17 @@
   };
 
   // src/route.js
+  var LANGUAGE_SEGMENT = /^\/[a-z]{2,3}(?:-[a-z]{4})?(?=\/)/i;
+  function siteRoutePath(pathname) {
+    return pathname.replace(LANGUAGE_SEGMENT, "");
+  }
   function routeIdentity(locationObject) {
-    const pathname = locationObject.pathname || "/";
+    const pathname = siteRoutePath(locationObject.pathname || "/");
     const part = new URLSearchParams(locationObject.search || "").get("p") || void 0;
     if (locationObject.hostname === "www.bilibili.com" && pathname.startsWith("/video/")) {
       return { routeKind: "video", bvid: pathname.split("/")[2] || void 0, part };
     }
-    if (locationObject.hostname === "www.bilibili.com" && pathname.startsWith("/list/watchlater")) {
+    if (locationObject.hostname === "www.bilibili.com" && (pathname === "/list/watchlater" || pathname.startsWith("/list/watchlater/"))) {
       return { routeKind: "video", watchLaterItem: pathname.split("/")[3] || void 0, part };
     }
     if (locationObject.hostname === "live.bilibili.com") {
@@ -275,7 +279,7 @@
     return value;
   }
   function isVideoLocation(locationObject) {
-    return locationObject.hostname === "www.bilibili.com" && (locationObject.pathname.startsWith("/video/") || locationObject.pathname === "/list/watchlater" || locationObject.pathname.startsWith("/list/watchlater/"));
+    return routeIdentity(locationObject).routeKind === "video";
   }
   function bankKey(url) {
     return new URL(url).pathname;

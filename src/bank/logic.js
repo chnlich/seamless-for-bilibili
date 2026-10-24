@@ -1,4 +1,5 @@
 import { BANK_CONFIG } from '../constants.js';
+import { routeIdentity } from '../route.js';
 
 function requireNonNegativeInteger(value, field) {
   if (!Number.isInteger(value) || value < 0) {
@@ -8,11 +9,7 @@ function requireNonNegativeInteger(value, field) {
 }
 
 export function isVideoLocation(locationObject) {
-  return locationObject.hostname === 'www.bilibili.com' && (
-    locationObject.pathname.startsWith('/video/')
-    || locationObject.pathname === '/list/watchlater'
-    || locationObject.pathname.startsWith('/list/watchlater/')
-  );
+  return routeIdentity(locationObject).routeKind === 'video';
 }
 
 export function bankKey(url) {

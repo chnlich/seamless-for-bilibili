@@ -17,19 +17,28 @@ export async function readProvenance({
   extensionDirectory: extensionDirectoryOverride = extensionDirectory,
   executeGit = execFileAsync,
   readFile = fs.readFile,
+  environment = process.env,
 } = {}) {
   let commitSha = null;
   let commitShaReason;
-  try {
-    const { stdout } = await executeGit('git', ['rev-parse', 'HEAD'], { cwd: rootDirectory });
-    const candidate = stdout.trim();
-    if (/^[0-9a-f]{40}$/.test(candidate)) {
-      commitSha = candidate;
-    } else {
-      commitShaReason = `git rev-parse HEAD returned invalid output: ${JSON.stringify(candidate)}`;
+  if (environment.BILIBILI_E2E_COMMIT_SHA !== undefined) {
+    const candidate = environment.BILIBILI_E2E_COMMIT_SHA.trim();
+    if (!/^[0-9a-f]{40}$/.test(candidate)) {
+      throw new Error('BILIBILI_E2E_COMMIT_SHA must be a 40-character lowercase commit SHA');
     }
-  } catch (error) {
-    commitShaReason = `git rev-parse HEAD failed: ${errorMessage(error)}`;
+    commitSha = candidate;
+  } else {
+    try {
+      const { stdout } = await executeGit('git', ['rev-parse', 'HEAD'], { cwd: rootDirectory });
+      const candidate = stdout.trim();
+      if (/^[0-9a-f]{40}$/.test(candidate)) {
+        commitSha = candidate;
+      } else {
+        commitShaReason = `git rev-parse HEAD returned invalid output: ${JSON.stringify(candidate)}`;
+      }
+    } catch (error) {
+      commitShaReason = `git rev-parse HEAD failed: ${errorMessage(error)}`;
+    }
   }
 
   const bundles = await Promise.all([

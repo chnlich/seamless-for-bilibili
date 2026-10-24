@@ -511,7 +511,10 @@ for (const document of userVisibleDocuments) {
   assert.doesNotMatch(document.content, /点播|稍后再看/, `${document.path} 含有已拒绝的产品术语`);
 }
 assert.match(readme, /GOAL\.md/);
-assert.match(readme, /\/list\/watchlater\*/);
+assert.match(readme, /`\/list\/watchlater`/);
+assert.match(readme, /`\/list\/watchlater\/\*`/);
+assert.match(readme, /`\/<language>\/video\/\*`/);
+assert.match(readme, /`\/<language>\/list\/watchlater`/);
 assert.match(source, /\/list\/watchlater/);
 assert.match(goal, /视频[\s\S]*120 秒/);
 assert.match(goal, /视频与直播尽量少卡/);

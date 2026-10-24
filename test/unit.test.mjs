@@ -6,6 +6,7 @@ import { ExtensionCoordinator } from '../src/extension/controller.js';
 import { computeForwardInventory } from '../src/vod/buffer.js';
 import { VodBufferController } from '../src/vod/controller.js';
 import { DiagnosticsClient, createRouteIdentity } from '../src/diagnostics/client.js';
+import { siteRoutePath } from '../src/route.js';
 import { MediaEventRecorder, readMediaFacts } from '../src/diagnostics/media.js';
 import { MEDIA_EVENT_NAMES, EVENT_CODES } from '../src/diagnostics/catalog.js';
 import {
@@ -1866,6 +1867,53 @@ test('watch-later route identity preserves the real item and omits an absent ite
   }), { routeKind: 'video', watchLaterItem: undefined, part: undefined });
 });
 
+test('language-prefixed video routes share the unprefixed identity rules', () => {
+  assert.deepEqual(createRouteIdentity({
+    hostname: 'www.bilibili.com',
+    pathname: '/zh-Hans/video/BVzhHans',
+    search: '',
+  }), { routeKind: 'video', bvid: 'BVzhHans', part: undefined });
+  assert.deepEqual(createRouteIdentity({
+    hostname: 'www.bilibili.com',
+    pathname: '/en/video/BVen',
+    search: '?p=2',
+  }), { routeKind: 'video', bvid: 'BVen', part: '2' });
+  assert.deepEqual(createRouteIdentity({
+    hostname: 'www.bilibili.com',
+    pathname: '/zh-hans/video/BVlower',
+    search: '',
+  }), { routeKind: 'video', bvid: 'BVlower', part: undefined });
+  assert.deepEqual(createRouteIdentity({
+    hostname: 'www.bilibili.com',
+    pathname: '/zh-Hant/list/watchlater/item-1',
+    search: '',
+  }), { routeKind: 'video', watchLaterItem: 'item-1', part: undefined });
+  assert.deepEqual(createRouteIdentity({
+    hostname: 'www.bilibili.com',
+    pathname: '/zh-Hans',
+    search: '',
+  }), { routeKind: 'other', part: undefined });
+  assert.deepEqual(createRouteIdentity({
+    hostname: 'www.bilibili.com',
+    pathname: '/en/search',
+    search: '?keyword=x',
+  }), { routeKind: 'other', part: undefined });
+  assert.deepEqual(createRouteIdentity({
+    hostname: 'www.bilibili.com',
+    pathname: '/list/watchlater-extra',
+    search: '',
+  }), { routeKind: 'other', part: undefined });
+});
+
+test('site route path removes at most one complete leading language segment', () => {
+  assert.equal(siteRoutePath('/zh-Hans/video/BVa'), '/video/BVa');
+  assert.equal(siteRoutePath('/ZH-hANS/video/BVa'), '/video/BVa');
+  assert.equal(siteRoutePath('/en-ABCD/video/BVa'), '/video/BVa');
+  assert.equal(siteRoutePath('/zh-Hans'), '/zh-Hans');
+  assert.equal(siteRoutePath('/en/zh-Hans/video/BVa'), '/zh-Hans/video/BVa');
+  assert.equal(siteRoutePath('/abcd/video/BVa'), '/abcd/video/BVa');
+});
+
 test('live route identity marks live.bilibili.com without exposing the room path', () => {
   assert.deepEqual(createRouteIdentity({
     hostname: 'live.bilibili.com',
@@ -2027,7 +2075,7 @@ test('diagnostics immediately sends a new session identity before scheduled flus
   const locationObject = {
     origin: 'https://www.bilibili.com',
     hostname: 'www.bilibili.com',
-    pathname: '/video/BVinitial',
+    pathname: '/zh-Hans/video/BVinitial',
   };
   class SilentPerformanceObserver {
     observe() {}
@@ -2057,7 +2105,9 @@ test('diagnostics immediately sends a new session identity before scheduled flus
   });
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].events.map((event) => event.code), ['route.session_started']);
-  assert.equal(sent[0].session.pathname, '/video/BVinitial');
+  assert.equal(sent[0].session.routeKind, 'video');
+  assert.equal(sent[0].session.bvid, 'BVinitial');
+  assert.equal(sent[0].session.pathname, '/zh-Hans/video/BVinitial');
   assert.ok(timers.some((timer) => timer.milliseconds === 0));
   client.destroy();
 });
