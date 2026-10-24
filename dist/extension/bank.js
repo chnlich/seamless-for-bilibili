@@ -330,13 +330,15 @@
   function isMediaHost(hostname) {
     return hostname.endsWith(".bilivideo.com") || hostname.endsWith(".akamaized.net");
   }
-  function classifyRequest({ url, headers, enabled = true, locationObject }) {
+  function classifyRequest({ url, headers, enabled = true, locationObject, isListedMedia }) {
     if (enabled !== true) return { intercepted: false };
     if (locationObject !== void 0 && !isVideoLocation(locationObject)) {
       return { intercepted: false, reason: "not_video_route" };
     }
     const parsed = new URL(url, locationObject?.href);
-    if (!isMediaHost(parsed.hostname)) return { intercepted: false, reason: "non_media_host" };
+    if (!isMediaHost(parsed.hostname) && !isListedMedia(parsed)) {
+      return { intercepted: false, reason: "non_media_host" };
+    }
     const rawRange = headerValue(headers, "Range");
     const range = parseRangeHeader(rawRange);
     if (range === void 0) {
@@ -2502,12 +2504,7 @@
         this._playurlObservationGeneration = generation;
         this._playurlObservationUrl = typeof bank.isPlayurlUrl === "function" && bank.isPlayurlUrl(url) ? url : void 0;
         const enabled = bankEnabled(bank);
-        const classification = classifyRequest({
-          url,
-          headers: this._headers,
-          enabled,
-          locationObject: windowObject.location
-        });
+        const classification = bank.requestClassification(url, this._headers);
         this._range = classification.range;
         if (!asyncFlag) {
           if (enabled) {
@@ -3060,13 +3057,22 @@
         }
       }
     }
+    // 视频页的媒体识别：主机是已知 B 站 CDN 后缀，或地址路径列在播放信息的地址簿里。
+    // 两者都不成立且请求带闭合 Range 时，补读一次页面内联 __playinfo__ 再判——播放器的
+    // 首个分片常常先于 playurl 响应发出。没有闭合 Range 的请求（API 调用等）不触发补读。
     requestClassification(url, headers) {
-      return classifyRequest({
+      const classify = () => classifyRequest({
         url,
         headers,
         enabled: this.isEnabled(),
-        locationObject: this.windowObject.location
+        locationObject: this.windowObject.location,
+        isListedMedia: (parsed) => this.addressBook.has(parsed.pathname)
       });
+      const classification = classify();
+      if (classification.reason !== "non_media_host") return classification;
+      if (parseRangeHeader(headerValue(headers, "Range")) === void 0) return classification;
+      this.readInlinePlayinfo();
+      return classify();
     }
     isPlayurlUrl(url) {
       return new URL(url).pathname.endsWith("/playurl");
@@ -3276,20 +3282,36 @@
       visitPlayurlRepresentations(data, ({ urls, representation }) => {
         try {
           const parsedUrls = urls.map((url) => new URL(url));
-          const pathname = parsedUrls[0].pathname;
-          this.addressBook.set(pathname, {
+          const entry = {
             urls,
             observedAt,
             representation,
             supportFormats,
             label: representationLabel(representation, supportFormats)
-          });
+          };
+          for (const parsed of parsedUrls) this.addressBook.set(parsed.pathname, entry);
         } catch (error) {
           console.error("[BilibiliBuffer] playurl 地址簿 URL 无效", error);
         }
       });
     }
+    // 视频页的配对：按播放器请求的路径查条目，在条目里选主机不同的地址作第二路，
+    // 已知 B 站 CDN 后缀的主机优先。两路路径可以不同；每个地址带自己的签名原样请求。
     pairDecisionFor(url) {
+      const playerUrl = new URL(url);
+      const entry = this.addressBook.get(playerUrl.pathname);
+      if (entry === void 0) return { pairUrl: void 0, miss: "no_book_entry" };
+      if (this.now() - entry.observedAt > this.config.pairFreshnessMs) return { pairUrl: void 0, miss: "stale" };
+      const candidates = entry.urls.map((entryUrl) => ({ entryUrl, hostname: new URL(entryUrl).hostname })).filter((candidate) => candidate.hostname !== playerUrl.hostname);
+      const pair = candidates.find((candidate) => isMediaHost(candidate.hostname)) ?? candidates[0];
+      if (pair === void 0) return { pairUrl: void 0, miss: "no_alt_host" };
+      return { pairUrl: pair.entryUrl };
+    }
+    pairUrlFor(url) {
+      return this.pairDecisionFor(url).pairUrl;
+    }
+    // 直播页的配对沿用主备同路径规则：条目内地址路径一致，取第一个主机不同的地址。
+    livePairDecisionFor(url) {
       const playerUrl = new URL(url);
       const entry = this.addressBook.get(playerUrl.pathname);
       if (entry === void 0) return { pairUrl: void 0, miss: "no_book_entry" };
@@ -3302,11 +3324,8 @@
       }
       return { pairUrl: void 0, miss: "no_alt_host" };
     }
-    pairUrlFor(url) {
-      return this.pairDecisionFor(url).pairUrl;
-    }
     evaluateLivePair(url) {
-      return this.pairDecisionFor(url);
+      return this.livePairDecisionFor(url);
     }
     // HLS 分片配对：地址簿里同流目录的 .m3u8 条目（同 cluster 主备由 Bilibili 自带，
     // 与 FLV 路径同一规则），配对 URL 由该条目的主机与它自己的签名 query 组成，
@@ -4253,8 +4272,8 @@
     readStoredRange(bankKeyValue, start, end) {
       return readMemoryRange(this.chunks, bankKeyValue, start, end, this.config.chunkBytes);
     }
-    recordTotalSize(url, totalSize) {
-      this.stateFor(bankKey(url)).totalSize = totalSize;
+    recordTotalSize(bankKeyValue, totalSize) {
+      this.stateFor(bankKeyValue).totalSize = totalSize;
     }
     createResponse(bytes, start, end, totalSize, url) {
       const ResponseConstructor = responseTypeConstructor(this.windowObject, "Response");
@@ -4712,7 +4731,7 @@
             }
             leg.outcome = "fetched";
             if (task.sessionGeneration === this.sessionGeneration) {
-              this.recordTotalSize(leg.url, result.totalSize);
+              this.recordTotalSize(task.bankKey, result.totalSize);
               if (this.isEnabled()) {
                 try {
                   this.storeTask(task, result);
@@ -4773,7 +4792,7 @@
     }
     emitChunkDiagnostic(task, leg, bytes, durationMs, result, range = task) {
       const data = {
-        source: scrubUrl(leg.url),
+        source: scrubUrl(task.url),
         mirror: mirrorForUrl2(leg.url),
         chunkIndex: task.chunkIndex,
         start: range.start,

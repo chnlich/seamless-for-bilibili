@@ -19,7 +19,9 @@ import {
   classifyRequest,
   chunkIndex,
   headerValue,
+  isMediaHost,
   parseContentRange,
+  parseRangeHeader,
   partialResponseHeaders,
   planFetchRanges,
   rangeLength,
@@ -327,13 +329,22 @@ export class SegmentBank {
     }
   }
 
+  // 视频页的媒体识别：主机是已知 B 站 CDN 后缀，或地址路径列在播放信息的地址簿里。
+  // 两者都不成立且请求带闭合 Range 时，补读一次页面内联 __playinfo__ 再判——播放器的
+  // 首个分片常常先于 playurl 响应发出。没有闭合 Range 的请求（API 调用等）不触发补读。
   requestClassification(url, headers) {
-    return classifyRequest({
+    const classify = () => classifyRequest({
       url,
       headers,
       enabled: this.isEnabled(),
       locationObject: this.windowObject.location,
+      isListedMedia: (parsed) => this.addressBook.has(parsed.pathname),
     });
+    const classification = classify();
+    if (classification.reason !== 'non_media_host') return classification;
+    if (parseRangeHeader(headerValue(headers, 'Range')) === undefined) return classification;
+    this.readInlinePlayinfo();
+    return classify();
   }
 
   isPlayurlUrl(url) {
@@ -563,21 +574,43 @@ export class SegmentBank {
     visitPlayurlRepresentations(data, ({ urls, representation }) => {
       try {
         const parsedUrls = urls.map((url) => new URL(url));
-        const pathname = parsedUrls[0].pathname;
-        this.addressBook.set(pathname, {
+        // 条目按每个地址的路径各存一份：PCDN 地址与自由镜像的路径不同，播放器请求
+        // 列表里的任一路径都要查到同一条目。
+        const entry = {
           urls,
           observedAt,
           representation,
           supportFormats,
           label: representationLabel(representation, supportFormats),
-        });
+        };
+        for (const parsed of parsedUrls) this.addressBook.set(parsed.pathname, entry);
       } catch (error) {
         console.error('[BilibiliBuffer] playurl 地址簿 URL 无效', error);
       }
     });
   }
 
+  // 视频页的配对：按播放器请求的路径查条目，在条目里选主机不同的地址作第二路，
+  // 已知 B 站 CDN 后缀的主机优先。两路路径可以不同；每个地址带自己的签名原样请求。
   pairDecisionFor(url) {
+    const playerUrl = new URL(url);
+    const entry = this.addressBook.get(playerUrl.pathname);
+    if (entry === undefined) return { pairUrl: undefined, miss: 'no_book_entry' };
+    if (this.now() - entry.observedAt > this.config.pairFreshnessMs) return { pairUrl: undefined, miss: 'stale' };
+    const candidates = entry.urls
+      .map((entryUrl) => ({ entryUrl, hostname: new URL(entryUrl).hostname }))
+      .filter((candidate) => candidate.hostname !== playerUrl.hostname);
+    const pair = candidates.find((candidate) => isMediaHost(candidate.hostname)) ?? candidates[0];
+    if (pair === undefined) return { pairUrl: undefined, miss: 'no_alt_host' };
+    return { pairUrl: pair.entryUrl };
+  }
+
+  pairUrlFor(url) {
+    return this.pairDecisionFor(url).pairUrl;
+  }
+
+  // 直播页的配对沿用主备同路径规则：条目内地址路径一致，取第一个主机不同的地址。
+  livePairDecisionFor(url) {
     const playerUrl = new URL(url);
     const entry = this.addressBook.get(playerUrl.pathname);
     if (entry === undefined) return { pairUrl: undefined, miss: 'no_book_entry' };
@@ -591,12 +624,8 @@ export class SegmentBank {
     return { pairUrl: undefined, miss: 'no_alt_host' };
   }
 
-  pairUrlFor(url) {
-    return this.pairDecisionFor(url).pairUrl;
-  }
-
   evaluateLivePair(url) {
-    return this.pairDecisionFor(url);
+    return this.livePairDecisionFor(url);
   }
 
   // HLS 分片配对：地址簿里同流目录的 .m3u8 条目（同 cluster 主备由 Bilibili 自带，
@@ -1566,8 +1595,8 @@ export class SegmentBank {
     return readMemoryRange(this.chunks, bankKeyValue, start, end, this.config.chunkBytes);
   }
 
-  recordTotalSize(url, totalSize) {
-    this.stateFor(bankKey(url)).totalSize = totalSize;
+  recordTotalSize(bankKeyValue, totalSize) {
+    this.stateFor(bankKeyValue).totalSize = totalSize;
   }
 
   createResponse(bytes, start, end, totalSize, url) {
@@ -2061,7 +2090,7 @@ export class SegmentBank {
           }
           leg.outcome = 'fetched';
           if (task.sessionGeneration === this.sessionGeneration) {
-            this.recordTotalSize(leg.url, result.totalSize);
+            this.recordTotalSize(task.bankKey, result.totalSize);
             if (this.isEnabled()) {
               try {
                 this.storeTask(task, result);
@@ -2123,7 +2152,7 @@ export class SegmentBank {
 
   emitChunkDiagnostic(task, leg, bytes, durationMs, result, range = task) {
     const data = {
-      source: scrubUrl(leg.url),
+      source: scrubUrl(task.url),
       mirror: mirrorForUrl(leg.url),
       chunkIndex: task.chunkIndex,
       start: range.start,

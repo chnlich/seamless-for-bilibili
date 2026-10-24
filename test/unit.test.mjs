@@ -1644,6 +1644,55 @@ test('CDN panel aggregates paired legs by source pathname and renders no media U
   }
 });
 
+test('CDN panel groups a race whose legs came from different paths into one paired race', async () => {
+  const fixture = logsPageFixture();
+  try {
+    const logs = await fixture.importModule();
+    // 一场竞速的两路路径可以不同；事件按播放器请求的地址（source）归组，
+    // 每一路的主机记在 mirror，所以两腿仍归成一场竞速。
+    const source = 'https://cn-hbxy-cu-01-11.edge.mountaintoys.cn:4483/v1/resource/upgcxcode/12/34/567890/567890-1-100026.m4s';
+    const summary = logs.aggregateCdnEvents([
+      {
+        code: 'bank.fetch.chunk',
+        data: {
+          source,
+          mirror: 'cn-hbxy-cu-01-11.edge.mountaintoys.cn',
+          slot: 0,
+          chunkIndex: 0,
+          start: 0,
+          result: 'lost_race',
+          bytes: 16,
+        },
+      },
+      {
+        code: 'bank.fetch.chunk',
+        data: {
+          source,
+          mirror: 'upos-sz-mirroraliov.bilivideo.com',
+          slot: 1,
+          chunkIndex: 0,
+          start: 0,
+          result: 'fetched',
+          bytes: 16,
+          ttfbMs: 20,
+        },
+      },
+    ]);
+    assert.equal(summary.totalChunks, 1);
+    assert.equal(summary.pairedChunks, 1);
+    assert.equal(summary.pairCoverage, 1);
+    assert.deepEqual(
+      summary.rows.map(({ mirror, racesEntered, wins }) => ({ mirror, racesEntered, wins })),
+      [
+        { mirror: 'cn-hbxy-cu-01-11.edge.mountaintoys.cn', racesEntered: 1, wins: 0 },
+        { mirror: 'upos-sz-mirroraliov.bilivideo.com', racesEntered: 1, wins: 1 },
+      ],
+    );
+  } finally {
+    await fixture.close?.();
+  }
+});
+
 // CDN 面板只按单个 session 统计，而页面能选的 session 只有当前 session：
 // 选不到 session 时按钮禁用、状态行直说路径（实测按钮必报
 // 「请选择一个 session」，页面上却无项可选，是条死路）。

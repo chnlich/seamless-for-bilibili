@@ -1,6 +1,5 @@
 import { BankFallbackError, BankNetworkError } from './errors.js';
 import { scrubUrl } from '../diagnostics/privacy.js';
-import { classifyRequest } from './logic.js';
 import { classifyLiveRequest } from './live.js';
 
 const EVENT_NAMES = Object.freeze([
@@ -273,12 +272,7 @@ export function createBankXMLHttpRequestClass({ windowObject, nativeConstructor,
         ? url
         : undefined;
       const enabled = bankEnabled(bank);
-      const classification = classifyRequest({
-        url,
-        headers: this._headers,
-        enabled,
-        locationObject: windowObject.location,
-      });
+      const classification = bank.requestClassification(url, this._headers);
       this._range = classification.range;
       if (!asyncFlag) {
         if (enabled) {

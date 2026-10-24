@@ -51,6 +51,10 @@ import {
 const MEDIA_URL = 'https://upos-sz-mirrorcosov.bilivideo.com/video/track.m4s?deadline=secret&upsig=secret';
 const PAIR_URL = 'https://upos-hz-mirrorakam.akamaized.net/video/track.m4s?deadline=pair&upsig=pair';
 const MEDIA_KEY = '/video/track.m4s';
+const PCDN_PATH = '/v1/resource/upgcxcode/12/34/567890/567890-1-100026.m4s';
+const MCDN_URL = `https://xy1-1-2.mcdn.bilivideo.cn:8082${PCDN_PATH}?os=mcdn&deadline=mcdn&upsig=mcdn`;
+const MOUNTAINTOYS_URL = `https://cn-hbxy-cu-01-11.edge.mountaintoys.cn:4483${PCDN_PATH}?deadline=mountain&upsig=mountain`;
+const UPOS_PCDN_PAIR_URL = 'https://upos-sz-mirroraliov.bilivideo.com/upgcxcode/12/34/567890/567890-1-100026.m4s?deadline=upos&upsig=upos';
 const PLAYURL_URL = 'https://api.bilibili.com/x/player/wbi/playurl?bvid=secret';
 const LIVE_LOCATION = new URL('https://live.bilibili.com/21452505');
 const LIVE_URL = 'https://d1--ov-gotcha07.bilivideo.com/live-bvc/1/stream.flv?expires=4102444800&sign=main';
@@ -268,27 +272,38 @@ test('closed single Range and video media hosts are the only intercepted shape',
     url: MEDIA_URL,
     headers: { Range: 'bytes=4-9' },
     locationObject,
+    isListedMedia: () => false,
   }).range, { start: 4, end: 9 });
   assert.equal(classifyRequest({
     url: MEDIA_URL,
     headers: { Range: 'bytes=4-' },
     locationObject,
+    isListedMedia: () => false,
   }).reason, 'range_not_closed');
   assert.equal(classifyRequest({
     url: MEDIA_URL,
     headers: {},
     locationObject,
+    isListedMedia: () => false,
   }).reason, 'range_missing');
   assert.equal(classifyRequest({
     url: 'https://api.bilibili.com/video/track.m4s',
     headers: { Range: 'bytes=4-9' },
     locationObject,
+    isListedMedia: () => false,
   }).reason, 'non_media_host');
+  assert.deepEqual(classifyRequest({
+    url: 'https://api.bilibili.com/video/track.m4s',
+    headers: { Range: 'bytes=4-9' },
+    locationObject,
+    isListedMedia: (parsed) => parsed.pathname === '/video/track.m4s',
+  }).range, { start: 4, end: 9 });
   assert.equal(classifyRequest({
     url: MEDIA_URL,
     headers: { Range: 'bytes=4-9' },
     enabled: false,
     locationObject,
+    isListedMedia: () => false,
   }).intercepted, false);
 });
 
@@ -1661,7 +1676,7 @@ test('tail chunks are validated and stored when a raced response ends at totalSi
   bank.destroy();
 });
 
-test('empty, stale, mismatched, and race-disabled address books degrade to one leg', async () => {
+test('empty, stale, same-host, and race-disabled address books degrade to one leg', async () => {
   const runSingle = async ({ config, now, observe, advance }) => {
     const calls = [];
     const { bank } = createBank({
@@ -1698,9 +1713,131 @@ test('empty, stale, mismatched, and race-disabled address books degrade to one l
   });
   await runSingle({
     config: configFor({ raceLegs: 2 }),
-    observe: playurlBody(MEDIA_URL, ['https://upos-hz-mirrorakam.akamaized.net/video/other.m4s']),
+    observe: playurlBody(MEDIA_URL, ['https://upos-sz-mirrorcosov.bilivideo.com/video/other.m4s']),
   });
   await runSingle({ config: configFor({ raceLegs: 1 }), observe: playurlBody() });
+});
+
+test('a playurl-listed PCDN segment pairs with the address-book upos URL and logs the player source on both legs', async () => {
+  const config = configFor({ raceLegs: 2, lookAheadChunks: 1 });
+  const legCalls = [];
+  const { bank, windowObject } = createBank({
+    config,
+    playinfo: playurlBody(MCDN_URL, [MOUNTAINTOYS_URL, UPOS_PCDN_PAIR_URL]),
+    nativeFetch: async (url, init) => {
+      const range = parseRangeHeader(init.headers.Range);
+      legCalls.push(url);
+      // 第二路（upos）先到，用来核对总长度记在播放器请求的资源上。
+      if (url === MOUNTAINTOYS_URL) await new Promise((resolve) => setImmediate(resolve));
+      return responseFor(range.start, range.end, 100, bytesFor(range.start, range.end));
+    },
+  });
+  const response = await fetchThrough(bank, MOUNTAINTOYS_URL, { headers: { Range: 'bytes=0-15' } });
+  assert.equal(response.status, 206);
+  assert.deepEqual(legCalls, [MOUNTAINTOYS_URL, UPOS_PCDN_PAIR_URL]);
+  assert.equal(new URL(legCalls[1]).searchParams.get('upsig'), 'upos');
+  assert.equal(bank.stateFor(PCDN_PATH).totalSize, 100);
+  assert.equal(bank.chunks.get(`${PCDN_PATH}#0`).totalSize, 100);
+  await tick();
+  const chunkEvents = windowObject.messages.filter((message) => message.code === 'bank.fetch.chunk');
+  const playerSource = `https://cn-hbxy-cu-01-11.edge.mountaintoys.cn:4483${PCDN_PATH}`;
+  assert.deepEqual(chunkEvents.map(({ data }) => data.source), [playerSource, playerSource]);
+  assert.deepEqual(chunkEvents.map(({ data }) => data.slot).sort(), [0, 1]);
+  const fetched = chunkEvents.find(({ data }) => data.result === 'fetched').data;
+  const lost = chunkEvents.find(({ data }) => data.result === 'lost_race').data;
+  assert.equal(fetched.mirror, new URL(UPOS_PCDN_PAIR_URL).hostname);
+  assert.equal(lost.mirror, new URL(MOUNTAINTOYS_URL).hostname);
+  bank.destroy();
+});
+
+test('an mcdn request and a mountaintoys request sharing one playurl path both pair with the upos URL', async () => {
+  const sharedPath = '/v1/resource/upgcxcode/56/78/901234/901234-1-100026.m4s';
+  const mcdnSharedUrl = `https://xy2-2-3.mcdn.bilivideo.cn:8082${sharedPath}?os=mcdn&deadline=mcdn2&upsig=mcdn2`;
+  const mountaintoysSharedUrl = `https://cn-hbxy-cu-02-12.edge.mountaintoys.cn:4483${sharedPath}?deadline=mountain2&upsig=mountain2`;
+  const { bank, calls } = createBank({
+    config: configFor({ raceLegs: 2, lookAheadChunks: 1 }),
+    playinfo: playurlBody(mcdnSharedUrl, [mountaintoysSharedUrl, UPOS_PCDN_PAIR_URL]),
+  });
+  const entry = bank.addressBook.get(sharedPath);
+  assert.equal(bank.addressBook.get(new URL(UPOS_PCDN_PAIR_URL).pathname), entry);
+  assert.equal(bank.pairUrlFor(mcdnSharedUrl), UPOS_PCDN_PAIR_URL);
+  assert.equal(bank.pairUrlFor(mountaintoysSharedUrl), UPOS_PCDN_PAIR_URL);
+  await fetchThrough(bank, mountaintoysSharedUrl, { headers: { Range: 'bytes=0-15' } });
+  assert.deepEqual(calls.map(({ url }) => url), [mountaintoysSharedUrl, UPOS_PCDN_PAIR_URL]);
+  bank.destroy();
+});
+
+test('a first PCDN segment reads inline playinfo once before classification on a closed-range miss', async () => {
+  const { bank, windowObject, calls } = createBank({
+    config: configFor({ raceLegs: 2, lookAheadChunks: 1 }),
+  });
+  windowObject.__playinfo__ = playurlBody(MCDN_URL, [UPOS_PCDN_PAIR_URL]);
+  let reads = 0;
+  const readInlinePlayinfo = bank.readInlinePlayinfo.bind(bank);
+  bank.readInlinePlayinfo = () => {
+    reads += 1;
+    readInlinePlayinfo();
+  };
+  await fetchThrough(bank, MCDN_URL, { headers: { Range: 'bytes=0-15' } });
+  assert.equal(reads, 1);
+  assert.deepEqual(calls.map(({ url }) => url), [MCDN_URL, UPOS_PCDN_PAIR_URL]);
+  bank.destroy();
+});
+
+test('an unknown host absent from playurl passes as non_media_host and only closed ranges read inline playinfo', async () => {
+  const unknownUrl = 'https://stranger-cdn.example/video/stranger.m4s?signature=secret';
+  const runPass = async (range) => {
+    const calls = [];
+    const { bank, windowObject } = createBank({
+      config: configFor({ raceLegs: 2 }),
+      nativeFetch: async (url) => {
+        calls.push(url);
+        return responseFor(0, 15, 100, bytesFor(0, 15));
+      },
+    });
+    windowObject.__playinfo__ = playurlBody();
+    let reads = 0;
+    const readInlinePlayinfo = bank.readInlinePlayinfo.bind(bank);
+    bank.readInlinePlayinfo = () => {
+      reads += 1;
+      readInlinePlayinfo();
+    };
+    const response = await fetchThrough(bank, unknownUrl, { headers: { Range: range } });
+    const diagnostic = windowObject.messages.find((message) => message.code === 'bank.serve');
+    assert.equal(response.status, 206);
+    assert.deepEqual(calls, [unknownUrl]);
+    assert.equal(diagnostic.data.source, 'https://stranger-cdn.example/video/stranger.m4s');
+    assert.equal(diagnostic.data.result, 'pass');
+    assert.equal(diagnostic.data.reason, 'non_media_host');
+    bank.destroy();
+    return reads;
+  };
+  assert.equal(await runPass('bytes=0-15'), 1);
+  assert.equal(await runPass('bytes=0-'), 0);
+});
+
+test('the XHR channel intercepts a playurl-listed PCDN segment and races the upos URL', async () => {
+  const { bank, windowObject, calls } = createBank({
+    config: configFor({ raceLegs: 2, lookAheadChunks: 1 }),
+    playinfo: playurlBody(MCDN_URL, [MOUNTAINTOYS_URL, UPOS_PCDN_PAIR_URL]),
+  });
+  windowObject.XMLHttpRequest = createBankXMLHttpRequestClass({
+    windowObject,
+    nativeConstructor: NativeXHR,
+    bank,
+  });
+  const xhr = new windowObject.XMLHttpRequest();
+  await new Promise((resolve) => {
+    xhr.addEventListener('loadend', resolve);
+    xhr.open('GET', MOUNTAINTOYS_URL);
+    xhr.setRequestHeader('Range', 'bytes=0-15');
+    xhr.send();
+  });
+  assert.equal(xhr._intercepted, true);
+  assert.equal(xhr.status, 206);
+  assert.deepEqual(calls.map(({ url }) => url), [MOUNTAINTOYS_URL, UPOS_PCDN_PAIR_URL]);
+  assert.deepEqual(xhr._native.sendCalls, []);
+  bank.destroy();
 });
 
 test('the first unpaired chunk reads inline playinfo before building its legs', async () => {
@@ -2142,6 +2279,9 @@ test('XHR preserves readyState 2→3→4 and event ordering with arraybuffer res
   const windowObject = windowFixture();
   const bank = {
     enabled: true,
+    requestClassification(_url, headers) {
+      return { intercepted: true, range: parseRangeHeader(headers.Range) };
+    },
     serveRequest() {
       const bytes = new Uint8Array([1, 2, 3]).buffer;
       return { intercepted: true, response: responseFor(0, 2, 3, new Uint8Array(bytes)), bytes };
@@ -2231,6 +2371,9 @@ test('XHR BankFallbackError returns the request to the native XHR unchanged', as
   const bank = {
     enabled: true,
     emitDiagnostic() {},
+    requestClassification(_url, headers) {
+      return { intercepted: true, range: parseRangeHeader(headers.Range) };
+    },
     serveRequest() {
       throw new BankFallbackError('等待超过补取死线');
     },
@@ -2250,6 +2393,9 @@ test('XHR ignores a cancelled prior generation after open starts a replacement r
   const windowObject = windowFixture();
   const bank = {
     enabled: true,
+    requestClassification(_url, headers) {
+      return { intercepted: true, range: parseRangeHeader(headers.Range) };
+    },
     serveRequest() {
       calls += 1;
       const value = calls === 1 ? 1 : 2;

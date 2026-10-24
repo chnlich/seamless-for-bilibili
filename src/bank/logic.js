@@ -79,13 +79,17 @@ export function isMediaHost(hostname) {
   return hostname.endsWith('.bilivideo.com') || hostname.endsWith('.akamaized.net');
 }
 
-export function classifyRequest({ url, headers, enabled = true, locationObject }) {
+// 媒体分片的识别有两条依据：主机是已知 B 站 CDN 后缀，或地址路径出现在播放信息
+// （playurl 地址簿）里。isListedMedia 由下载层按当前地址簿给出。
+export function classifyRequest({ url, headers, enabled = true, locationObject, isListedMedia }) {
   if (enabled !== true) return { intercepted: false };
   if (locationObject !== undefined && !isVideoLocation(locationObject)) {
     return { intercepted: false, reason: 'not_video_route' };
   }
   const parsed = new URL(url, locationObject?.href);
-  if (!isMediaHost(parsed.hostname)) return { intercepted: false, reason: 'non_media_host' };
+  if (!isMediaHost(parsed.hostname) && !isListedMedia(parsed)) {
+    return { intercepted: false, reason: 'non_media_host' };
+  }
   const rawRange = headerValue(headers, 'Range');
   const range = parseRangeHeader(rawRange);
   if (range === undefined) {
