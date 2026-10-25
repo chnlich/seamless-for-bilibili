@@ -25,7 +25,7 @@
    「正在等…」「播放器解码没跟上…」「还没有下载数据」「…最近 5 秒没有收到数据」、每条线路行都不带 warn 或 bad 色调；
    视频页还要求缓冲条到达 120 秒目标、下载卡第二行不为空；直播页还要求接管行以
    「正在按两条线路竞速下载」开头，fMP4 直播间在这句后面接的 FLV 后备状态照常接受），
-   用 `chrome.action.openPopup()` 打开真实弹窗，
+   用 `chrome.action.openPopup()` 打开真实弹窗（打开、读数与截图在 `scripts/real-popup.mjs`，与 `scripts/live-backup-run.mjs` 共用；商店图的检查留在本脚本），
    捕获明暗两态（暗色经 `prefers-color-scheme` 模拟）与弹窗背后的页面，写出上表输入
    `video-popup-light.png`、`live-popup-light.png`、`video-page.png`、`live-page.png` 与 `report.json`
    （含 commit、buildId、Chrome 版本、视频与房间号、直播格式 FLV/HLS、明暗两态弹窗读数）。

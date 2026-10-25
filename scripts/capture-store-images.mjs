@@ -11,6 +11,10 @@
 //   report.json (commit, buildId, Chrome version, video id, room id, live format FLV/HLS,
 //                the light and dark popup readouts, console errors, event counts)
 //
+// The real popup is opened, read and photographed by real-popup.mjs, which live-backup-run.mjs
+// uses as well. This script adds the store-image checks over it: the popup geometry, the PNG size
+// and the ink on the footer link, the readouts a store shot rejects, and the ceilings.
+//
 // Process rules (skill smooth-bilibili-plugin, they are not negotiable):
 //   - Chrome is spawned by this script with its own temp --user-data-dir and ended by PID:
 //     browser.close() + child.kill(), then a backstop sweep that force-kills only chrome.exe
@@ -31,6 +35,7 @@ import { readStoredEvents } from './extension-log-pull.mjs';
 import { installUnpackedExtension } from './install-unpacked-extension.mjs';
 import { assertInkPainted, decodePngFile } from './png-pixels.mjs';
 import { readProvenance } from './provenance.mjs';
+import { connectRealPopup } from './real-popup.mjs';
 import { DOWNLOAD_CARD_TEXT } from '../src/extension/popup-view.js';
 
 const execFileAsync = promisify(execFile);
@@ -102,61 +107,9 @@ const muteGuardInit = `(() => {
   scan(document);
 })()`;
 
-// Read the popup DOM. Runs inside the popup target; selectors are the popup's own
-// data attributes and classes (popup.html / popup-view.js), never Bilibili's.
-function popupReadout() {
-  const text = (selector) => document.querySelector(selector)?.textContent?.trim() ?? null;
-  const switches = [...document.querySelectorAll('.switches .switch-row')].map((row) => ({
-    label: row.querySelector('span')?.textContent?.trim() ?? null,
-    preference: row.querySelector('input')?.dataset.preference ?? null,
-    checked: row.querySelector('input')?.checked ?? null,
-  }));
-  const lines = [...document.querySelectorAll('.cdn-line')].map((line) => ({
-    name: line.querySelector('.cdn-name')?.textContent?.trim() ?? null,
-    status: line.querySelector('.cdn-status')?.textContent?.trim() ?? null,
-    tone: line.dataset.tone ?? null,
-    statusColor: getComputedStyle(line.querySelector('.cdn-status')).color,
-  }));
-  return {
-    title: text('h1'),
-    switches,
-    bufferSeconds: text('[data-buffer-seconds]'),
-    bufferGoal: text('[data-buffer-goal]'),
-    bufferFillWidth: document.querySelector('[data-buffer-fill]')?.style?.width ?? null,
-    bufferNote: text('[data-buffer-note]'),
-    targetLabel: text('[data-buffer-target-label]'),
-    targetValue: text('[data-target-value]'),
-    stateLineHidden: document.querySelector('[data-status-field="state"]')?.hidden ?? null,
-    livePanelHidden: document.querySelector('[data-live-panel]')?.hidden ?? null,
-    liveTakeover: text('[data-live-takeover]'),
-    errorLine: text('[data-status-field="error"]'),
-    notice: text('[data-notice]'),
-    bodyReady: document.body?.dataset?.ready ?? null,
-    downloadHeadline: text('.cdn-headline'),
-    downloadSubline: text('.cdn-subline'),
-    lines,
-  };
-}
-
-// Layout facts for the capture self-check, read in the popup target. The footer link is
-// the element the 63950b9 captures silently dropped, so its rect is recorded in
-// report.json and verified against the written PNG's pixels.
-function popupGeometry() {
-  const link = document.querySelector('[data-open-logs]');
-  const rect = link?.getBoundingClientRect()?.toJSON() ?? null;
-  return {
-    scrollWidth: document.documentElement.scrollWidth,
-    scrollHeight: document.documentElement.scrollHeight,
-    clientWidth: document.documentElement.clientWidth,
-    clientHeight: document.documentElement.clientHeight,
-    innerWidth: window.innerWidth,
-    innerHeight: window.innerHeight,
-    devicePixelRatio: window.devicePixelRatio,
-    linkRect: rect,
-  };
-}
-
 function log(...parts) { console.log(new Date().toISOString(), ...parts); }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function writeCapture(name, buffer) {
   const target = path.join(outDir, name);
@@ -180,142 +133,15 @@ async function pngSize(file) {
   }
 }
 
-// ---- minimal raw CDP client over the browser endpoint ----------------------
-// Playwright cannot route messages to service workers or screenshot an extension popup
-// target (newCDPSession accepts only Page/Frame), so worker evaluation, popup reads and
-// popup screenshots go through raw CDP.
+// ---- popup: the store-image checks over the shared driver (real-popup.mjs) -------------
 
-class RawCdp {
-  constructor(port) {
-    this.port = port;
-    this.nextId = 1;
-    this.pending = new Map();
-  }
-
-  async connect() {
-    const version = await (await fetch(`http://127.0.0.1:${this.port}/json/version`)).json();
-    this.socket = new WebSocket(version.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => {
-      this.socket.addEventListener('open', resolve, { once: true });
-      this.socket.addEventListener('error', () => reject(new Error('raw cdp connect failed')), { once: true });
-    });
-    this.socket.addEventListener('message', (event) => {
-      const message = JSON.parse(String(event.data));
-      if (message.id !== undefined && this.pending.has(message.id)) {
-        const entry = this.pending.get(message.id);
-        this.pending.delete(message.id);
-        if (message.error !== undefined) entry.reject(new Error(`${message.error.message} (${message.error.code})`));
-        else entry.resolve(message.result);
-      }
-    });
-  }
-
-  send(method, params = {}, sessionId) {
-    const id = this.nextId++;
-    const payload = { id, method, params };
-    if (sessionId !== undefined) payload.sessionId = sessionId;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify(payload));
-    });
-  }
-
-  async attach(targetId) {
-    const { sessionId } = await this.send('Target.attachToTarget', { targetId, flatten: true });
-    return sessionId;
-  }
-
-  async detach(sessionId) {
-    try { await this.send('Target.detachFromTarget', { sessionId }); } catch (error) { /* already gone */ }
-  }
-
-  close() { try { this.socket.close(); } catch (error) { /* socket already gone */ } }
-}
-
-async function findTarget(raw, predicate) {
-  const { targetInfos } = await raw.send('Target.getTargets');
-  return targetInfos.find(predicate) ?? null;
-}
-
-async function evaluateOnTarget(raw, target, expression, { userGesture = false, awaitPromise = true } = {}) {
-  const sessionId = await raw.attach(target.targetId);
-  try {
-    const result = await raw.send('Runtime.evaluate', { expression, userGesture, awaitPromise, returnByValue: true }, sessionId);
-    if (result?.exceptionDetails !== undefined) {
-      throw new Error(`evaluate threw on ${target.type}: ${JSON.stringify(result.exceptionDetails).slice(0, 400)}`);
-    }
-    return result.result?.value;
-  } finally {
-    await raw.detach(sessionId);
-  }
-}
-
-// ---- popup handling --------------------------------------------------------
-
-function extensionWorkerTarget(raw, extensionId) {
-  const prefix = `chrome-extension://${extensionId}/`;
-  return findTarget(raw, (candidate) => candidate.type === 'service_worker' && candidate.url.startsWith(prefix));
-}
-
-function popupTarget(raw, extensionId) {
-  return findTarget(raw, (candidate) => candidate.url.startsWith(`chrome-extension://${extensionId}/popup.html`));
-}
-
-async function closePopupTarget(raw, extensionId) {
-  const target = await popupTarget(raw, extensionId);
-  if (target === null) return;
-  try {
-    await raw.send('Target.closeTarget', { targetId: target.targetId });
-  } catch (error) {
-    if (!String(error).includes('No target with given id found')) throw error;
-  }
-}
-
-// The MV3 service worker idles away within seconds; any runtime message from an extension
-// page wakes it. The waker page (logs.html in a background tab, opened once per run) exists
-// for the whole run.
-async function wakeExtensionWorker(raw, extensionId, wakerTarget) {
-  const worker = await extensionWorkerTarget(raw, extensionId);
-  if (worker !== null) return worker;
-  await evaluateOnTarget(raw, wakerTarget, 'chrome.runtime.sendMessage({version:1,type:"logs:max-event-id"}, () => {})', { awaitPromise: false });
-  for (let attempt = 0; attempt < 24; attempt += 1) {
-    await sleep(250);
-    const woken = await extensionWorkerTarget(raw, extensionId);
-    if (woken !== null) return woken;
-  }
-  throw new Error('extension service worker did not wake');
-}
-
-// Opens the real popup (chrome.action.openPopup() on the service worker) and runs `run`
-// with an attached raw CDP session, then closes it. Counts every open against the ceiling.
-async function withPopup(raw, extensionId, wakerTarget, scenarioBudget, run) {
+// Opens the real popup through the shared driver. Counts every open against the ceiling.
+async function withCountedPopup(popup, scenarioBudget, run) {
   scenarioBudget.popupOpens += 1;
   if (scenarioBudget.popupOpens > MAX_POPUP_OPENS_PER_SCENARIO) {
     throw new Error(`popup open ceiling exceeded (${MAX_POPUP_OPENS_PER_SCENARIO} opens in one scenario)`);
   }
-  await closePopupTarget(raw, extensionId);
-  const worker = await wakeExtensionWorker(raw, extensionId, wakerTarget);
-  await evaluateOnTarget(raw, worker, 'chrome.action.openPopup()', { userGesture: true });
-  let target = null;
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    target = await popupTarget(raw, extensionId);
-    if (target !== null) break;
-    await sleep(250);
-  }
-  if (target === null) throw new Error('popup target not found after chrome.action.openPopup()');
-  const sessionId = await raw.attach(target.targetId);
-  try {
-    await raw.send('Runtime.enable', {}, sessionId);
-    await raw.send('Runtime.evaluate', {
-      expression: 'new Promise((resolve) => { const check = () => document.body?.dataset?.ready === "true" ? resolve() : setTimeout(check, 200); check(); })',
-      awaitPromise: true,
-    }, sessionId);
-    await sleep(900);
-    return await run({ raw, sessionId });
-  } finally {
-    await raw.detach(sessionId);
-    await closePopupTarget(raw, extensionId);
-  }
+  return popup.withPopup(run);
 }
 
 // Captures the whole popup document, then proves on the written PNG that the footer log
@@ -328,9 +154,10 @@ async function withPopup(raw, extensionId, wakerTarget, scenarioBudget, run) {
 // is rejected ("Target does not support metrics override") and the popup has no
 // Browser window handle to resize. The painted area IS the popup viewport, so the run
 // only continues when the whole document, footer link included, lies inside the viewport;
-// the ink check on the written image is the final evidence.
-async function popupScreenshot({ raw, sessionId }, target) {
-  const geometry = await popupEvaluate({ raw, sessionId }, popupGeometry);
+// the ink check on the written image is the final evidence. The footer link's rect is
+// recorded in report.json and verified against the written PNG's pixels.
+async function checkedPopupShot(view, target) {
+  const geometry = await view.geometry();
   const { w, h } = { w: geometry.scrollWidth, h: geometry.scrollHeight };
   if (!Number.isFinite(w) || !Number.isFinite(h) || w < 300 || h < 300) {
     throw new Error(`popup document has no real size (${w}x${h}); refusing to capture an empty popup`);
@@ -353,12 +180,9 @@ async function popupScreenshot({ raw, sessionId }, target) {
   if (geometry.linkRect.bottom > geometry.clientHeight + 0.5) {
     throw new Error(`the footer log link (${JSON.stringify(geometry.linkRect)}) sits below the popup viewport (${geometry.clientHeight}); it would be captured unpainted`);
   }
-  const capture = await raw.send('Page.captureScreenshot', {
-    format: 'png',
-    clip: { x: 0, y: 0, width: w, height: h, scale: 1 },
-  }, sessionId);
-  const buffer = Buffer.from(capture.data, 'base64');
-  const written = await writeCapture(target, buffer);
+  const written = path.join(outDir, target);
+  await view.screenshot(written, geometry);
+  log('wrote', written);
   const size = await pngSize(written);
   // --force-device-scale-factor=2 makes the close-up 2x the popup document size.
   if (size.width !== w * 2 || size.height !== h * 2) {
@@ -369,24 +193,6 @@ async function popupScreenshot({ raw, sessionId }, target) {
   log('ink check', path.basename(target), JSON.stringify({ linkRect: geometry.linkRect, ...ink }));
   return { path: written, ...size, geometry, ink };
 }
-
-async function popupEvaluate({ raw, sessionId }, fn) {
-  const { result, exceptionDetails } = await raw.send('Runtime.evaluate', {
-    expression: `(${fn.toString()})()`,
-    returnByValue: true,
-    awaitPromise: true,
-  }, sessionId);
-  if (exceptionDetails !== undefined) throw new Error(`raw evaluate failed: ${JSON.stringify(exceptionDetails).slice(0, 300)}`);
-  return result.value;
-}
-
-async function popupEmulateColorScheme({ raw, sessionId }, scheme) {
-  await raw.send('Emulation.setEmulatedMedia', {
-    features: [{ name: 'prefers-color-scheme', value: scheme }],
-  }, sessionId);
-}
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ---- scenarios ------------------------------------------------------------
 
@@ -444,9 +250,7 @@ function assertRealReadout(label, readout, { racing }) {
 }
 
 async function captureScenario({
-  raw,
-  extensionId,
-  wakerTarget,
+  popup,
   label,
   page,
   budget,
@@ -459,7 +263,7 @@ async function captureScenario({
   while (Date.now() - startedAt < maxWaitMs) {
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
     try {
-      lastReadout = await withPopup(raw, extensionId, wakerTarget, budget, (popup) => popupEvaluate(popup, popupReadout));
+      lastReadout = await withCountedPopup(popup, budget, (view) => view.readout());
       log(`[${label}] +${elapsed}s popup`, JSON.stringify(lastReadout));
       assertRealReadout(label, lastReadout, { racing });
       reached = true;
@@ -473,15 +277,15 @@ async function captureScenario({
     throw new Error(`${label}: required readout never appeared within ${Math.round(maxWaitMs / 1000)}s; last readout: ${JSON.stringify(lastReadout)}`);
   }
 
-  const capture = await withPopup(raw, extensionId, wakerTarget, budget, async (popup) => {
-    const readout = await popupEvaluate(popup, popupReadout);
+  const capture = await withCountedPopup(popup, budget, async (view) => {
+    const readout = await view.readout();
     assertRealReadout(label, readout, { racing });
-    const light = await popupScreenshot(popup, `${label}-popup-light.png`);
-    await popupEmulateColorScheme(popup, 'dark');
+    const light = await checkedPopupShot(view, `${label}-popup-light.png`);
+    await view.emulateColorScheme('dark');
     await sleep(400);
-    const darkReadout = await popupEvaluate(popup, popupReadout);
-    const dark = await popupScreenshot(popup, `${label}-popup-dark.png`);
-    await popupEmulateColorScheme(popup, 'light');
+    const darkReadout = await view.readout();
+    const dark = await checkedPopupShot(view, `${label}-popup-dark.png`);
+    await view.emulateColorScheme('light');
     return { readout, darkReadout, light, dark };
   });
   const pagePath = await writeCapture(`${label}-page.png`, await page.screenshot({ type: 'png' }));
@@ -590,11 +394,9 @@ const collectConsole = (page) => {
   });
 };
 
-const raw = new RawCdp(cdpPort);
-let wakerTargetId;
+let popup;
 const budget = { popupOpens: 0 };
 try {
-  await raw.connect();
   // Preflight: a Chrome that ignores --screen-info clamps the headless popup again.
   const screenAvailable = await context.pages()[0].evaluate(() => ({ width: screen.availWidth, height: screen.availHeight }));
   report.provenance.screenAvailable = screenAvailable;
@@ -612,20 +414,9 @@ try {
   log('extension loaded', extensionId, 'chrome', report.provenance.browserVersion);
   context.on('page', collectConsole);
 
-  const waker = await raw.send('Target.createTarget', {
-    url: `chrome-extension://${extensionId}/logs.html`,
-    background: true,
-  });
-  wakerTargetId = waker.targetId;
-  const wakerTarget = await (async () => {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const info = await findTarget(raw, (candidate) => candidate.targetId === wakerTargetId);
-      if (info !== null) return info;
-      await sleep(250);
-    }
-    throw new Error('waker page target not found');
-  })();
-  report.provenance.wakerTargetUrl = wakerTarget.url;
+  // The waker page (logs.html in a background tab) is opened once per run and exists for all of it.
+  popup = await connectRealPopup({ cdpPort, extensionId });
+  report.provenance.wakerTargetUrl = popup.wakerUrl;
 
   // Video scenario: one cold video, playback started on the media element (never the skin).
   const videoPage = await context.newPage();
@@ -644,9 +435,7 @@ try {
   log('video element ready', JSON.stringify(videoState));
 
   const video = await captureScenario({
-    raw,
-    extensionId,
-    wakerTarget,
+    popup,
     label: 'video',
     page: videoPage,
     budget,
@@ -687,9 +476,7 @@ try {
   log('live element ready', JSON.stringify(liveState));
 
   const live = await captureScenario({
-    raw,
-    extensionId,
-    wakerTarget,
+    popup,
     label: 'live',
     page: livePage,
     budget,
@@ -720,8 +507,8 @@ try {
   log('report written');
   log(`tab opens used: ${tabOpens}/${MAX_TAB_OPENS}; popup opens: ${budget.popupOpens} (ceiling ${MAX_POPUP_OPENS_PER_SCENARIO} per scenario)`);
 } finally {
-  try { if (wakerTargetId !== undefined) await raw.send('Target.closeTarget', { targetId: wakerTargetId }); } catch (error) { /* already gone */ }
-  raw.close();
+  // The browser must end by PID whatever happens to the popup driver, so a failed close is logged.
+  await popup?.close().catch((error) => log('popup driver close failed', String(error)));
   await browser.close().catch((error) => log('browser close failed', String(error)));
   try { chromeProcess.kill(); } catch (error) { /* exited already */ }
   log('browser closed');

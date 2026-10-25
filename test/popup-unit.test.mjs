@@ -16,6 +16,7 @@ import {
   storedPreferences,
 } from '../src/extension/popup-live.js';
 import { deriveDownloadStatus } from '../src/diagnostics/download-status.js';
+import { popupReadout } from '../scripts/real-popup.mjs';
 import {
   DOWNLOAD_CARD_TEXT,
   NO_PAGE_MESSAGES,
@@ -1136,6 +1137,58 @@ test('live takeover renders the plain line and degrades on read errors', () => {
   assert.equal(refs.takeover.textContent, '直播状态读取失败');
   renderLiveTakeover(refs, { facts: emptyLiveFacts(), liveEnabled: false });
   assert.equal(refs.takeover.textContent, SWITCH_OFF_TEXT.liveOff);
+});
+
+// real-popup 驱动（scripts/real-popup.mjs）按选择器读弹窗：类名或属性一改名，读出的字段就成了 null——
+// 商店图捕获要等满超时才失败，直播留证则在错误的时刻拍照、还照常退出。这里让驱动的读数函数
+// 在弹窗自己的渲染器填好的文档上跑一遍。
+test('the real-popup driver reads back every card the popup renders', () => {
+  const document = popupDocument();
+  const refs = popupRefs(document);
+  const mirrors = ['upos-hz-mirrorakam.akamaized.net', 'upos-sz-mirrorcosov.bilivideo.com'];
+  const facts = { serveCount: 1, engagement: 'engaged', pairedAddressAvailable: true };
+  renderBuffer(document, refs, { forwardSeconds: 80.4, targetSeconds: 120, stateText: 'state x', targetLabel: 'label x' });
+  renderCdnLines(document, document.querySelector('[data-cdn-lines]'), {
+    headline: 'headline x',
+    subline: 'subline x',
+    lines: [
+      { mirror: mirrors[0], tone: 'ok', text: 'status a' },
+      { mirror: mirrors[1], tone: 'warn', text: 'status b' },
+    ],
+  });
+  renderLiveTakeover({ takeover: document.querySelector('[data-live-takeover]') }, { facts });
+  document.querySelector('[data-live-panel]').hidden = false;
+  refs.errorLine.textContent = 'error x';
+  document.querySelector('[data-notice]').textContent = 'notice x';
+  document.body.dataset.ready = 'true';
+
+  const readout = new Function('document', 'getComputedStyle', `return (${popupReadout.toString()})();`)(
+    document,
+    document.defaultView.getComputedStyle,
+  );
+  assert.equal(readout.title, document.querySelector('h1').textContent.trim());
+  assert.deepEqual(readout.switches.map((entry) => entry.preference), preferenceNames());
+  assert.deepEqual(readout.switches.map((entry) => entry.label), [...document.querySelectorAll('.switch-row span')].map((span) => span.textContent));
+  assert.equal(readout.bodyReady, 'true');
+  assert.equal(readout.bufferSeconds, refs.seconds.textContent);
+  assert.equal(readout.bufferGoal, refs.goal.textContent);
+  assert.equal(readout.bufferFillWidth, refs.fill.style.width);
+  assert.equal(readout.targetLabel, 'label x');
+  assert.equal(readout.targetValue, 'state x');
+  assert.equal(readout.stateLineHidden, false);
+  assert.equal(readout.livePanelHidden, false);
+  assert.equal(readout.liveTakeover, liveTakeoverText(facts));
+  assert.equal(readout.errorLine, 'error x');
+  assert.equal(readout.notice, 'notice x');
+  assert.equal(readout.downloadHeadline, 'headline x');
+  assert.equal(readout.downloadSubline, 'subline x');
+  assert.deepEqual(
+    readout.lines.map(({ name, status, tone }) => ({ name, status, tone })),
+    [
+      { name: shortMirrorName(mirrors[0]), status: 'status a', tone: 'ok' },
+      { name: shortMirrorName(mirrors[1]), status: 'status b', tone: 'warn' },
+    ],
+  );
 });
 
 test('pages without the content script collapse the cards down to one friendly line', () => {

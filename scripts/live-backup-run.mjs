@@ -23,9 +23,10 @@
 // With --popup-captures <dir> the real toolbar popup is opened and photographed: once in the normal
 // phase and, with --delay-every, in each of the first MAX_HELD_CAPTURES held segments while the
 // hold lasts (--delay-ms of at least MIN_HELD_CAPTURE_HOLD_MS). Each capture writes <phase>.png and
-// <phase>.json (the readout of the popup's first line, takeover line and line rows) into <dir>;
-// the report lists them. Chrome then runs at device scale factor 2 on a large virtual screen, so
-// the popup is not clamped by the screen edge.
+// <phase>.json (the popup readout of real-popup.mjs, with the first line in downloadHeadline, the
+// takeover line in liveTakeover and the line rows in lines) into <dir>; the report lists them.
+// Chrome then runs at device scale factor 2 on a large virtual screen, so the popup is not
+// clamped by the screen edge.
 //
 // Chrome runs with hardware video decode off, as the daily Chrome does; without hardware decode
 // Chrome cannot play HEVC, so the room's player picks its AVC stream, as it does there.
@@ -394,7 +395,7 @@ try {
       const entry = { phase, png: screenshotPath, ...capture };
       await fs.writeFile(path.join(options.popupCaptures, `${phase}.json`), `${JSON.stringify(entry, null, 2)}\n`, 'utf8');
       popupCaptures.push(entry);
-      log(`popup capture ${phase} matched=${capture.matched} first line ${JSON.stringify(capture.readout.headline)}`);
+      log(`popup capture ${phase} matched=${capture.matched} first line ${JSON.stringify(capture.readout.downloadHeadline)}`);
     } catch (error) {
       popupCaptures.push({ phase, error: error.message });
       log(`popup capture ${phase} failed: ${error.message}`);
@@ -409,7 +410,7 @@ try {
     popupQueue = popupQueue.then(async () => {
       await sleep(record.at + HELD_CAPTURE_OPEN_AFTER_MS - Date.now());
       await takePopupCapture(phase, {
-        until: (readout) => (readout.headline ?? '').startsWith('在等一个分片'),
+        until: (readout) => (readout.downloadHeadline ?? '').startsWith('在等一个分片'),
         timeoutMs: record.at + options.delayMs - HELD_CAPTURE_MARGIN_MS - Date.now(),
       });
     });
@@ -424,7 +425,7 @@ try {
     popupQueue = popupQueue.then(async () => {
       await sleep(holdingStartsAt - NORMAL_CAPTURE_LEAD_MS - Date.now());
       await takePopupCapture('normal', {
-        until: (readout) => (readout.headline ?? '').startsWith('正在下载'),
+        until: (readout) => (readout.downloadHeadline ?? '').startsWith('正在下载'),
         timeoutMs: 4000,
       });
     });
