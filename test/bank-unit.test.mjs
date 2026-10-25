@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BANK_CONFIG, LIVE_FLV_BACKUP_CONFIG } from '../src/constants.js';
+import { BANK_CONFIG, LIVE_FLV_BACKUP_CONFIG, LIVE_INVENTORY_CONFIG } from '../src/constants.js';
 import {
   BANK_ENABLED_ATTRIBUTE,
   BANK_MESSAGE_NAMESPACE,
@@ -36,6 +36,7 @@ import {
   parseBiliPlaylist,
   parseMediaSegment,
   planSegment,
+  playlistSegmentNames,
 } from '../src/bank/flv-rebuild.js';
 import {
   LiveStreamStitcher,
@@ -4412,7 +4413,7 @@ function hlsSegmentUrls(name) {
   };
 }
 
-function flvBackupHarness({ playlistText, enabled = true, playinfo = flvBackupPlayinfo(), flvResponder } = {}) {
+function flvBackupHarness({ playlistText, enabled = true, playinfo = flvBackupPlayinfo(), flvResponder, now } = {}) {
   const timers = manualTimers();
   const flvFeed = liveFeed();
   const feeds = new Map();
@@ -4427,6 +4428,7 @@ function flvBackupHarness({ playlistText, enabled = true, playinfo = flvBackupPl
     config: liveConfig(),
     location: LIVE_LOCATION,
     enabled,
+    now,
     nativeFetch: async (url, init = {}) => {
       calls.push(url);
       if (url === FLV_BACKUP_URL) return flvResponder === undefined ? flvFeed.response : flvResponder();
@@ -4843,5 +4845,417 @@ test('the FLV backup reconnects at most three times, then gives up with a full-r
   assert.equal(flvErrors[0].errorName, 'TypeError');
   assert.equal(errors.length, 1);
   assert.deepEqual(harness.events('bank.serve').map((data) => data.winner), ['network', 'network']);
+  bank.destroy();
+});
+
+// ---- 直播在途快照（live.inventory）----
+
+const SWITCHED_STREAM_DIR = '/live-bvc/791488/live_i9bl9s_SIPAZ9L_1b53ey_2500/';
+
+function plainPlaylist(names) {
+  return [
+    '#EXTM3U',
+    '#EXT-X-VERSION:7',
+    '#EXT-X-MEDIA-SEQUENCE:100',
+    '#EXT-X-TARGETDURATION:1',
+    ...names.flatMap((name) => ['#EXTINF:1.000,', `${name}?trid=1`]),
+  ].join('\n') + '\n';
+}
+
+function segmentName(index) {
+  return `${423384050 + index}.m4s`;
+}
+
+// 页面的检查定时器换成手动推进的时钟：advance 按页面的检查周期推进 now 并触发一次检查。
+// 分片腿的停滞计时用不会触发的手动计时器，腿只受测试推进的字节与时钟影响。
+function inventoryBank() {
+  const clock = { value: 1_000_000 };
+  const feeds = new Map();
+  const state = { playlist: plainPlaylist([segmentName(0)]) };
+  const feedFor = (url) => {
+    if (!feeds.has(url)) feeds.set(url, liveFeed({ headers: { 'Content-Type': 'video/mp4' } }));
+    return feeds.get(url);
+  };
+  const fixture = createLiveBank({
+    playinfo: HLS_PLAYURL_BODY,
+    timers: manualTimers(),
+    now: () => clock.value,
+    nativeFetch: async (url) => {
+      if (new URL(url).pathname.endsWith('.m3u8')) {
+        return new Response(state.playlist, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } });
+      }
+      return feedFor(url).response;
+    },
+  });
+  const timer = { callback: undefined, ms: undefined, clearedIds: [] };
+  fixture.windowObject.setInterval = (callback, ms) => {
+    timer.callback = callback;
+    timer.ms = ms;
+    return 7;
+  };
+  fixture.windowObject.clearInterval = (id) => {
+    timer.clearedIds.push(id);
+  };
+  const harness = {
+    ...fixture,
+    clock,
+    timer,
+    feedFor,
+    events: (code = 'live.inventory') => fixture.windowObject.messages
+      .filter((message) => message.code === code)
+      .map(({ data }) => data),
+    advance(milliseconds) {
+      assert.equal(milliseconds % LIVE_INVENTORY_CONFIG.tickMs, 0);
+      for (let spent = 0; spent < milliseconds; spent += LIVE_INVENTORY_CONFIG.tickMs) {
+        clock.value += LIVE_INVENTORY_CONFIG.tickMs;
+        timer.callback();
+      }
+    },
+    async observePlaylist(names, url = HLS_MAIN_PLAYLIST) {
+      state.playlist = plainPlaylist(names);
+      await liveFetchThrough(fixture.bank, url);
+    },
+    request(name, dir = HLS_STREAM_DIR) {
+      const url = dir === HLS_STREAM_DIR
+        ? hlsSegmentUrls(name).player
+        : `https://d1--ov-gotcha207.bilivideo.com${dir}${name}?expires=4102444800&sign=seg207`;
+      return hlsFetchThrough(fixture.bank, url);
+    },
+    // 两腿同时送齐同样的字节：分片交付。
+    finish(name, bytes = encoded('ABCD')) {
+      for (const url of Object.values(hlsSegmentUrls(name))) {
+        const feed = feedFor(url);
+        feed.push(bytes);
+        feed.close();
+      }
+    },
+    async deliver(name) {
+      const response = harness.request(name);
+      await settle();
+      harness.finish(name);
+      return (await response).arrayBuffer();
+    },
+  };
+  return harness;
+}
+
+test('playlist segment names list every segment, with or without AUX values, by the parser\'s own rule', () => {
+  const text = [
+    '#EXTM3U',
+    '#EXT-X-MEDIA-SEQUENCE:10',
+    '#EXT-BILI-AUX:1|K|2|3',
+    '#EXTINF:1.0,',
+    '10.m4s?trid=1',
+    '#EXTINF:1.0,',
+    '/path/11.m4s?x=1',
+    '',
+  ].join('\n');
+  assert.deepEqual(playlistSegmentNames(text), ['10.m4s', '11.m4s']);
+  assert.deepEqual(parseBiliPlaylist(text).entries.map((entry) => entry.name), ['10.m4s']);
+});
+
+test('normal live playback writes no live.inventory: segments land about once a second', async () => {
+  const harness = inventoryBank();
+  await harness.observePlaylist([segmentName(0), segmentName(1)]);
+  for (let index = 0; index < 8; index += 1) {
+    await harness.deliver(segmentName(index));
+    harness.advance(1_000);
+  }
+  assert.equal(harness.timer.ms, LIVE_INVENTORY_CONFIG.tickMs);
+  assert.deepEqual(harness.events(), []);
+  harness.bank.destroy();
+  assert.equal(harness.timer.clearedIds.includes(7), true);
+});
+
+test('a held segment writes a snapshot every 2 seconds, one delivered snapshot when it lands, then stops', async () => {
+  const harness = inventoryBank();
+  await harness.observePlaylist([segmentName(0), segmentName(1)]);
+  await harness.deliver(segmentName(0));
+  const held = harness.request(segmentName(1));
+  await settle();
+
+  harness.advance(1_750);
+  assert.deepEqual(harness.events(), []);
+  harness.advance(250);
+  assert.deepEqual(harness.events(), [{
+    streamPath: HLS_STREAM_DIR,
+    delivered: false,
+    inflight: [{
+      streamPath: HLS_STREAM_DIR,
+      ageMs: 2_000,
+      legs: [
+        { slot: 0, mirror: 'd1--ov-gotcha207.bilivideo.com', bytes: 0, lastByteAgeMs: null },
+        { slot: 1, mirror: 'd1--ov-gotcha105.bilivideo.com', bytes: 0, lastByteAgeMs: null },
+      ],
+    }],
+    playlistResponseAgeMs: 2_000,
+    playlistNewSegmentAgeMs: 2_000,
+    flvFrameAgeMs: null,
+  }]);
+
+  harness.advance(1_750);
+  assert.equal(harness.events().length, 1);
+  harness.advance(250);
+  assert.equal(harness.events().length, 2);
+  assert.equal(harness.events()[1].inflight[0].ageMs, 4_000);
+
+  // 一条腿开始收字节：已收字节与距上次收字节的时间进快照，另一条腿仍是 0 字节。
+  harness.feedFor(hlsSegmentUrls(segmentName(1)).player).push(encoded('AB'));
+  await settle();
+  harness.advance(2_000);
+  const third = harness.events()[2];
+  assert.deepEqual(third.inflight[0].legs.map((leg) => [leg.slot, leg.bytes, leg.lastByteAgeMs]), [
+    [0, 2, 2_000],
+    [1, 0, null],
+  ]);
+  assert.equal(third.inflight[0].ageMs, 6_000);
+
+  // 交付：写一份 delivered 收尾快照，之后不再写。
+  harness.feedFor(hlsSegmentUrls(segmentName(1)).player).push(encoded('CD'));
+  harness.feedFor(hlsSegmentUrls(segmentName(1)).player).close();
+  harness.feedFor(hlsSegmentUrls(segmentName(1)).pair).push(encoded('ABCD'));
+  harness.feedFor(hlsSegmentUrls(segmentName(1)).pair).close();
+  assert.equal(new TextDecoder().decode(await (await held).arrayBuffer()), 'ABCD');
+  const events = harness.events();
+  assert.equal(events.length, 4);
+  assert.equal(events[3].delivered, true);
+  assert.deepEqual(events[3].inflight, []);
+  harness.advance(1_750);
+  assert.equal(harness.events().length, 4);
+  harness.bank.destroy();
+});
+
+test('a request the player cancels leaves the snapshots running without a delivered snapshot', async () => {
+  const harness = inventoryBank();
+  await harness.observePlaylist([segmentName(0)]);
+  await harness.deliver(segmentName(0));
+  const controller = new AbortController();
+  const held = hlsFetchThrough(harness.bank, hlsSegmentUrls(segmentName(1)).player, { signal: controller.signal });
+  await settle();
+  harness.advance(2_000);
+  assert.equal(harness.events().length, 1);
+  assert.equal(harness.events()[0].inflight.length, 1);
+  controller.abort();
+  await assert.rejects(held.then((response) => response.arrayBuffer()), { name: 'AbortError' });
+  harness.advance(2_000);
+  const events = harness.events();
+  assert.equal(events.length, 2);
+  assert.equal(events.every((data) => data.delivered === false), true);
+  assert.deepEqual(events[1].inflight, []);
+  harness.bank.destroy();
+});
+
+test('a younger segment landing while an older request keeps waiting does not close the series', async () => {
+  const harness = inventoryBank();
+  await harness.observePlaylist([segmentName(0), segmentName(1), segmentName(2)]);
+  await harness.deliver(segmentName(0));
+  const held = harness.request(segmentName(1));
+  await settle();
+  harness.advance(2_000);
+  assert.equal(harness.events().length, 1);
+
+  // 播放器又请求并拿到了后面的分片：挂住的请求仍在途满 2 秒，这一轮不收尾，下一份照 2 秒节奏写。
+  await harness.deliver(segmentName(2));
+  harness.advance(1_750);
+  assert.equal(harness.events().length, 1);
+  harness.advance(250);
+  const [, next] = harness.events();
+  assert.equal(next.delivered, false);
+  assert.deepEqual(next.inflight.map((request) => request.ageMs), [4_000]);
+
+  // 挂住的那个交付，迹象才消失：收尾快照。
+  harness.finish(segmentName(1));
+  assert.equal(new TextDecoder().decode(await (await held).arrayBuffer()), 'ABCD');
+  const events = harness.events();
+  assert.equal(events.length, 3);
+  assert.equal(events[2].delivered, true);
+  assert.deepEqual(events[2].inflight, []);
+  harness.advance(1_750);
+  assert.equal(harness.events().length, 3);
+  harness.bank.destroy();
+});
+
+test('the waiting request ending without delivery closes the series once other segments kept landing', async () => {
+  const harness = inventoryBank();
+  await harness.observePlaylist([segmentName(0), segmentName(1), segmentName(2)]);
+  await harness.deliver(segmentName(0));
+  const controller = new AbortController();
+  const held = hlsFetchThrough(harness.bank, hlsSegmentUrls(segmentName(1)).player, { signal: controller.signal });
+  await settle();
+  harness.advance(2_000);
+  assert.equal(harness.events().length, 1);
+  await harness.deliver(segmentName(2));
+  assert.equal(harness.events().length, 1);
+
+  controller.abort();
+  await assert.rejects(held.then((response) => response.arrayBuffer()), { name: 'AbortError' });
+  const events = harness.events();
+  assert.equal(events.length, 2);
+  assert.equal(events[1].delivered, true);
+  assert.deepEqual(events[1].inflight, []);
+  harness.bank.destroy();
+});
+
+test('a stall on the very first segment writes snapshots before anything was delivered or listed', async () => {
+  const harness = inventoryBank();
+  harness.request(segmentName(0));
+  await settle();
+  harness.advance(1_750);
+  assert.deepEqual(harness.events(), []);
+  harness.advance(250);
+  const [snapshot] = harness.events();
+  assert.equal(snapshot.streamPath, HLS_STREAM_DIR);
+  assert.equal(snapshot.delivered, false);
+  assert.equal(snapshot.inflight[0].ageMs, 2_000);
+  assert.deepEqual(
+    [snapshot.playlistResponseAgeMs, snapshot.playlistNewSegmentAgeMs, snapshot.flvFrameAgeMs],
+    [null, null, null],
+  );
+  harness.bank.destroy();
+});
+
+test('with no request in flight the snapshots carry the playlist ages: refreshing without new segments, then new ones', async () => {
+  const harness = inventoryBank();
+  const names = [segmentName(0), segmentName(1)];
+  await harness.observePlaylist(names);
+  harness.advance(2_000);
+  const [first] = harness.events();
+  assert.equal(first.streamPath, HLS_STREAM_DIR);
+  assert.deepEqual(first.inflight, []);
+  assert.deepEqual([first.playlistResponseAgeMs, first.playlistNewSegmentAgeMs], [2_000, 2_000]);
+
+  harness.advance(1_000);
+  await harness.observePlaylist(names);
+  harness.advance(1_000);
+  const second = harness.events()[1];
+  assert.deepEqual([second.playlistResponseAgeMs, second.playlistNewSegmentAgeMs], [1_000, 4_000]);
+
+  await harness.observePlaylist([...names, segmentName(2)]);
+  harness.advance(2_000);
+  const third = harness.events()[2];
+  assert.deepEqual([third.playlistResponseAgeMs, third.playlistNewSegmentAgeMs], [2_000, 2_000]);
+  harness.bank.destroy();
+});
+
+test('at a quality switch both streams are listed in flight and the playlist ages follow the newest request\'s stream', async () => {
+  const harness = inventoryBank();
+  await harness.observePlaylist([segmentName(0)]);
+  harness.request(segmentName(0));
+  await settle();
+  harness.advance(1_000);
+  harness.request('500.m4s', SWITCHED_STREAM_DIR);
+  await settle();
+  harness.advance(1_000);
+  const [snapshot] = harness.events();
+  assert.equal(snapshot.streamPath, SWITCHED_STREAM_DIR);
+  assert.deepEqual(snapshot.inflight.map((request) => [request.streamPath, request.ageMs, request.legs.length]), [
+    [HLS_STREAM_DIR, 2_000, 2],
+    [SWITCHED_STREAM_DIR, 1_000, 1],
+  ]);
+  // 新流还没有播放列表响应：年龄不属于它就是 null，不借旧流的。
+  assert.deepEqual([snapshot.playlistResponseAgeMs, snapshot.playlistNewSegmentAgeMs], [null, null]);
+
+  await harness.observePlaylist(['500.m4s'], `https://d1--ov-gotcha105.bilivideo.com${SWITCHED_STREAM_DIR}index.m3u8?expires=4102444800&sign=hls105`);
+  harness.advance(2_000);
+  const next = harness.events()[1];
+  assert.deepEqual([next.playlistResponseAgeMs, next.playlistNewSegmentAgeMs], [2_000, 2_000]);
+  harness.bank.destroy();
+});
+
+test('no snapshot while the live switch is off, and switching back on does not count the off time as a stall', async () => {
+  const harness = inventoryBank();
+  await harness.observePlaylist([segmentName(0)]);
+  harness.windowObject.attributes.set(BANK_ENABLED_ATTRIBUTE, 'false');
+  harness.advance(10_000);
+  assert.deepEqual(harness.events(), []);
+  harness.windowObject.attributes.set(BANK_ENABLED_ATTRIBUTE, 'true');
+  harness.advance(1_750);
+  assert.deepEqual(harness.events(), []);
+  harness.advance(250);
+  assert.equal(harness.events().length, 1);
+  harness.bank.destroy();
+});
+
+test('the XHR channel feeds playlists and segment requests into the snapshots like fetch', async () => {
+  const harness = inventoryBank();
+  const { bank, windowObject } = harness;
+  windowObject.XMLHttpRequest = createBankXMLHttpRequestClass({ windowObject, nativeConstructor: NativeXHR, bank });
+  const playlistXhr = new windowObject.XMLHttpRequest();
+  playlistXhr.open('GET', HLS_MAIN_PLAYLIST);
+  playlistXhr.send();
+  playlistXhr._native.status = 200;
+  playlistXhr._native.responseText = plainPlaylist([segmentName(0)]);
+  playlistXhr._native.emit('load');
+  const xhr = new windowObject.XMLHttpRequest();
+  xhr.responseType = 'arraybuffer';
+  xhr.open('GET', hlsSegmentUrls(segmentName(0)).player);
+  xhr.send();
+  await settle();
+  harness.advance(2_000);
+  const [snapshot] = harness.events();
+  assert.equal(snapshot.inflight.length, 1);
+  assert.equal(snapshot.inflight[0].ageMs, 2_000);
+  assert.deepEqual([snapshot.playlistResponseAgeMs, snapshot.playlistNewSegmentAgeMs], [2_000, 2_000]);
+  bank.destroy();
+});
+
+test('snapshots carry the FLV frame age and list the rebuild leg as slot 2 until it assembles', async () => {
+  const live = syntheticLive({ videoCount: 160, keyFrames: [0, 125] });
+  const [first, second] = live.segments;
+  const clock = { value: 1_000_000 };
+  const harness = flvBackupHarness({ playlistText: syntheticPlaylist(live.segments), now: () => clock.value });
+  const { bank, windowObject } = harness;
+  let tickCallback;
+  windowObject.setInterval = (callback) => {
+    tickCallback = callback;
+    return 7;
+  };
+  const advance = (milliseconds) => {
+    for (let spent = 0; spent < milliseconds; spent += LIVE_INVENTORY_CONFIG.tickMs) {
+      clock.value += LIVE_INVENTORY_CONFIG.tickMs;
+      tickCallback();
+    }
+  };
+  await liveFetchThrough(bank, HLS_MAIN_PLAYLIST);
+  await calibrateOverFetch(harness, live, live.flvBetween(0, 1_990));
+
+  // 网络两腿不回响应头，FLV 帧又没到这个分片的终点：三条腿都在等。
+  harness.segmentModes.set(second.aux.name, 'hold');
+  const response = hlsFetchThrough(bank, hlsSegmentUrls(second.aux.name).player);
+  await settle();
+  advance(2_000);
+  const [waiting] = harness.events('live.inventory');
+  assert.deepEqual(waiting.inflight[0].legs.map((leg) => [leg.slot, leg.mirror, leg.bytes, leg.lastByteAgeMs]), [
+    [0, 'd1--ov-gotcha207.bilivideo.com', 0, null],
+    [1, 'd1--ov-gotcha105.bilivideo.com', 0, null],
+    [2, FLV_BACKUP_HOST, 0, null],
+  ]);
+  assert.equal(waiting.flvFrameAgeMs, 2_000);
+
+  // FLV 帧到齐：拼接腿胜出，收尾快照里 FLV 帧年龄从 0 起算。
+  harness.flvFeed.push(live.flvBetween(1_990, 1e9));
+  const delivered = await response;
+  assert.equal(Buffer.compare(Buffer.from(new Uint8Array(await delivered.arrayBuffer())), Buffer.from(second.bytes)), 0);
+  const closing = harness.events('live.inventory').at(-1);
+  assert.equal(closing.delivered, true);
+  assert.equal(closing.flvFrameAgeMs, 0);
+  assert.deepEqual(closing.inflight, []);
+  bank.destroy();
+});
+
+test('a live FLV stream has no HLS signal: the snapshots stay unarmed and nothing is written', async () => {
+  const feed = liveFeed();
+  const { bank, windowObject } = createLiveBank({ nativeFetch: async () => feed.response });
+  const intervals = [];
+  windowObject.setInterval = (callback, ms) => {
+    intervals.push(ms);
+    return 7;
+  };
+  const response = await liveFetchThrough(bank);
+  feed.push(encoded('XYZ'));
+  feed.close();
+  assert.equal(await response.text(), 'XYZ');
+  assert.deepEqual(intervals, []);
+  assert.equal(windowObject.messages.some((message) => message.code === 'live.inventory'), false);
   bank.destroy();
 });

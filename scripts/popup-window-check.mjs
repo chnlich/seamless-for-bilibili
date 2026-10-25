@@ -2229,7 +2229,6 @@ async function runLiveTakeoverStatesPack() {
       { serveCount: 1, engagement: 'failed', pairedAddressAvailable: false, pairRejected: false, flvBackup: 'unavailable' },
       liveEnabledOn,
     );
-    const emptyLinesMessage = DOWNLOAD_CARD_TEXT.noRecords;
     const nameA = shortMirrorName('e2e-live.bilivideo.com');
     const nameB = shortMirrorName('e2e-live-b.bilivideo.com');
     const countMatches = (text, pattern) => (text.match(pattern) ?? []).length;
@@ -2273,20 +2272,22 @@ async function runLiveTakeoverStatesPack() {
     assert.deepEqual(await flvBackupEvents(singleTabId), noHlsEntry, '单路房间的 FLV 后备事件与地址簿不符');
     markScenario('直播单路接管：弹窗接管行如实报无可用备用线路与无 FLV 后备（no_hls_entry），线路卡一行镜像如实');
 
-    // 只拉播放列表：接管从未介入（只有 pass 事实），如实报未接管，线路卡如实报还没有数据。
+    // 只拉播放列表：接管从未介入（只有 pass 事实），如实报未接管。夹具拉三次播放列表就
+    // 停下，没有任何下载记录；页面上有 HLS 信号却不再请求，线路卡按在途快照如实报
+    // 播放器多少秒没有请求数据（秒数随快照与弹窗刷新的节拍而定）。
     const playlistTabId = await activateLiveTab(LIVE_PLAYLIST_URL);
     await waitForState(
       readState,
       (state) => state.ready === 'true' && state.noPage === false && state.notice === ''
         && state.livePanelHidden === false && state.bufferCardHidden === true
         && state.takeover === unhandledText
-        && state.cdnCard === emptyLinesMessage
+        && /^播放器 \d+ 秒没有请求数据$/.test(state.cdnCard)
         ? true
         : `expected the playlist-only state, got takeover=${JSON.stringify(state.takeover)} cdn=${JSON.stringify(state.cdnCard)}`,
       { timeoutMs: 30000, what: 'popup showing playlist-only live page' },
     );
     assert.deepEqual(await flvBackupEvents(playlistTabId), [], '只拉播放列表的房间不该打开 FLV 后备');
-    markScenario('直播页面只拉播放列表：弹窗接管行如实报未接管，线路卡如实报还没有数据，FLV 后备从未打开');
+    markScenario('直播页面只拉播放列表：弹窗接管行如实报未接管，线路卡如实报播放器不再请求数据，FLV 后备从未打开');
 
     // 镜像全灭：两条腿的 502 如实落到面板（接管请求失败、线路卡两行报服务器错误），页面控制台
     // 按既有口径全量如实报错，这份报错同时充当了本组捕获通道的阳性对照。

@@ -1942,6 +1942,56 @@ test('live.stream.stitch allowlist sanitisation keeps verdict fields and scrubs 
   });
 });
 
+test('live.inventory sanitisation keeps null ages and the nested request and leg structure', () => {
+  assert.deepEqual(sanitizeEventData('live.inventory', {
+    streamPath: '/live-bvc/1/stream/?expires=4102444800&sign=secret',
+    delivered: false,
+    inflight: [{
+      streamPath: '/live-bvc/1/stream/',
+      ageMs: 2500,
+      legs: [
+        { slot: 0, mirror: 'd1--ov-gotcha207.bilivideo.com', bytes: 0, lastByteAgeMs: null },
+        { slot: 2, mirror: 'd1--cn-gotcha04.bilivideo.com', bytes: 4096, lastByteAgeMs: 120, secretToken: 'drop' },
+      ],
+      secretToken: 'drop',
+    }],
+    playlistResponseAgeMs: 800,
+    playlistNewSegmentAgeMs: null,
+    flvFrameAgeMs: null,
+    secretToken: 'drop',
+  }), {
+    streamPath: '/live-bvc/1/stream/',
+    delivered: false,
+    inflight: [{
+      streamPath: '/live-bvc/1/stream/',
+      ageMs: 2500,
+      legs: [
+        { slot: 0, mirror: 'd1--ov-gotcha207.bilivideo.com', bytes: 0, lastByteAgeMs: null },
+        { slot: 2, mirror: 'd1--cn-gotcha04.bilivideo.com', bytes: 4096, lastByteAgeMs: 120 },
+      ],
+    }],
+    playlistResponseAgeMs: 800,
+    playlistNewSegmentAgeMs: null,
+    flvFrameAgeMs: null,
+  });
+  // 非法值落成「未提供」，不会把结构弄丢；顶层 inflight 数组不再被当成视频页的计数。
+  assert.deepEqual(sanitizeEventData('live.inventory', {
+    delivered: 'yes',
+    inflight: [{ streamPath: 'no-slash', ageMs: -1, legs: [{ slot: 7, mirror: 5, bytes: 1.5, lastByteAgeMs: 'x' }] }],
+    playlistResponseAgeMs: -3,
+  }), {
+    delivered: '未提供',
+    inflight: [{
+      streamPath: '未提供',
+      ageMs: '未提供',
+      legs: [{ slot: '未提供', mirror: '未提供', bytes: '未提供', lastByteAgeMs: '未提供' }],
+    }],
+    playlistResponseAgeMs: '未提供',
+  });
+  assert.throws(() => sanitizeEventData('live.inventory', { inflight: [null] }));
+  assert.equal(sanitizeEventData('bank.inventory', { inflight: 3 }).inflight, 3);
+});
+
 test('bridge and privacy error contracts preserve deep causes, scrub URLs, and mark cycles', () => {
   let deepest = Object.assign(new Error('deep https://secret.example/path?token=redact'), { code: 'DEEP' });
   for (let index = 0; index < 24; index += 1) {

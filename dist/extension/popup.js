@@ -35,6 +35,13 @@
     reconnectDelayMs: 1e3,
     maxCalibrationAttempts: 10
   });
+  var LIVE_INVENTORY_CONFIG = Object.freeze({
+    stallSignMs: 2e3,
+    snapshotIntervalMs: 2e3,
+    tickMs: 250,
+    noticeMs: 3e3,
+    validMs: 3e3
+  });
 
   // src/diagnostics/log-session.js
   var UNKNOWN_SESSION_ID = "未提供";
@@ -152,7 +159,14 @@
     quietVideo: "正在下载，最近 5 秒没有收到数据",
     quietLive: "最近 5 秒没有收到数据",
     lineIdle: "空闲",
-    lineLostRace: "另一条线路更快"
+    lineLostRace: "另一条线路更快",
+    lineAborted: "播放器已取消",
+    lineFramesMissing: "FLV 里没有这段画面",
+    flvAlsoQuiet: "，FLV 后备也没有新画面"
+  });
+  var LIVE_LINE_ENDED = Object.freeze({
+    aborted: Object.freeze({ text: DOWNLOAD_CARD_TEXT.lineAborted, tone: "idle" }),
+    frames_missing: Object.freeze({ text: DOWNLOAD_CARD_TEXT.lineFramesMissing, tone: "warn" })
   });
   function speedText(bitsPerSecond) {
     const mbps = bitsPerSecond / 1e6;
@@ -190,8 +204,59 @@
       if (line.lastResultInWindow === "lost_race") {
         return { mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineLostRace, tone: "idle" };
       }
+      const ended = live ? LIVE_LINE_ENDED[line.lastResultInWindow] : void 0;
+      if (ended !== void 0) return { mirror: line.mirror, ...ended };
       return { mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineIdle, tone: "idle" };
     });
+  }
+  function wholeSeconds(milliseconds) {
+    return Math.floor(milliseconds / 1e3);
+  }
+  function bytesText(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  function liveWaitOf(snapshot, nowMs) {
+    if (snapshot === void 0 || snapshot.delivered) return void 0;
+    if (snapshot.readAgeMs >= LIVE_INVENTORY_CONFIG.validMs) return void 0;
+    const elapsedMs = nowMs - snapshot.wallTimeMs;
+    const waiting = snapshot.inflight.filter((request) => request.streamPath === snapshot.streamPath);
+    if (waiting.length > 0) {
+      const oldest = waiting.reduce((picked, request) => request.ageMs > picked.ageMs ? request : picked);
+      const waitedMs = oldest.ageMs + elapsedMs;
+      if (waitedMs < LIVE_INVENTORY_CONFIG.stallSignMs) return void 0;
+      const seconds = wholeSeconds(waitedMs);
+      const receivedBytes = Math.max(0, ...oldest.legs.map((leg) => leg.bytes));
+      return {
+        headline: receivedBytes === 0 ? `在等一个分片，已 ${seconds} 秒没收到数据` : `分片下载中，已 ${seconds} 秒，收到 ${bytesText(receivedBytes)}`,
+        legs: oldest.legs.map((leg) => leg.bytes > 0 ? { mirror: leg.mirror, text: `下载中 · 已收到 ${bytesText(leg.bytes)}`, tone: "ok" } : { mirror: leg.mirror, text: `等待中 ${seconds} 秒`, tone: "warn" })
+      };
+    }
+    const shown = (ageMs) => ageMs === null ? null : ageMs + elapsedMs;
+    const responseMs = shown(snapshot.playlistResponseAgeMs);
+    const newSegmentMs = shown(snapshot.playlistNewSegmentAgeMs);
+    if (responseMs === null) return void 0;
+    if (responseMs >= LIVE_INVENTORY_CONFIG.noticeMs) {
+      return { headline: `播放器 ${wholeSeconds(responseMs)} 秒没有请求数据`, legs: void 0 };
+    }
+    if (newSegmentMs !== null && newSegmentMs >= LIVE_INVENTORY_CONFIG.noticeMs) {
+      const flvMs = shown(snapshot.flvFrameAgeMs);
+      const flvQuiet = flvMs !== null && flvMs >= LIVE_INVENTORY_CONFIG.noticeMs;
+      return {
+        headline: `播放列表 ${wholeSeconds(newSegmentMs)} 秒没有新分片${flvQuiet ? DOWNLOAD_CARD_TEXT.flvAlsoQuiet : ""}`,
+        legs: void 0
+      };
+    }
+    return void 0;
+  }
+  function waitLineRows(status, wait) {
+    if (wait.legs === void 0) {
+      return status.lines.map((line) => ({ mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineIdle, tone: "idle" }));
+    }
+    const rows = new Map(lineRowsOf(status, { live: true, inventoryQuiet: false }).map((row) => [row.mirror, row]));
+    for (const leg of wait.legs) rows.set(leg.mirror, leg);
+    return [...rows.values()].sort((left, right) => String(left.mirror).localeCompare(String(right.mirror)));
   }
   var DECODER_STALL_FORWARD_SECONDS = 2;
   function videoHeadline({ status, missingData, decoderStall, forwardSeconds, currentTime, lag }) {
@@ -221,10 +286,12 @@
     const rounds = Number.isSafeInteger(lag?.failedRounds) && lag.failedRounds >= 1 ? lag.failedRounds : 0;
     return `已提前下载到约 ${clockText(ahead)}（全长 ${clockText(duration)}）` + (rounds >= 1 ? `，之后的数据已重试 ${rounds} 轮` : "");
   }
-  function downloadLinesView({ response, error, inFlight, live, readouts, vodEnabled, liveEnabled: liveEnabled2 }) {
+  function downloadLinesView({ response, error, inFlight, live, readouts, vodEnabled, liveEnabled: liveEnabled2, nowMs }) {
     if (error !== void 0) return { message: DOWNLOAD_CARD_TEXT.readFailed };
     if (response === void 0) return { message: inFlight === true ? DOWNLOAD_CARD_TEXT.loading : DOWNLOAD_CARD_TEXT.noSession };
     const status = response.downloadStatus;
+    const wait = live === true && liveEnabled2 !== false ? liveWaitOf(status.liveInventory, nowMs) : void 0;
+    if (wait !== void 0) return { headline: wait.headline, subline: void 0, lines: waitLineRows(status, wait) };
     if (!status.hasRecords) {
       const switchOn = live === true ? liveEnabled2 !== false : vodEnabled !== false;
       const headline = switchOn ? DOWNLOAD_CARD_TEXT.noRecords : live === true ? DOWNLOAD_CARD_TEXT.liveSwitchOff : DOWNLOAD_CARD_TEXT.videoSwitchOff;
@@ -428,7 +495,8 @@
       live: popupRoute === POPUP_ROUTE.LIVE,
       readouts: latestReadouts,
       vodEnabled: enhancementEnabled,
-      liveEnabled
+      liveEnabled,
+      nowMs: Date.now()
     }));
   }
   function renderLivePanel() {

@@ -35,6 +35,13 @@
     reconnectDelayMs: 1e3,
     maxCalibrationAttempts: 10
   });
+  var LIVE_INVENTORY_CONFIG = Object.freeze({
+    stallSignMs: 2e3,
+    snapshotIntervalMs: 2e3,
+    tickMs: 250,
+    noticeMs: 3e3,
+    validMs: 3e3
+  });
 
   // src/diagnostics/catalog.js
   var MEDIA_EVENT_NAMES = Object.freeze([
@@ -93,6 +100,7 @@
     "live.stream.stitch",
     "live.playurl_observed",
     "live.flv.backup",
+    "live.inventory",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
@@ -213,6 +221,16 @@
       "mirror",
       "reason",
       "offsetChangeMs"
+    ]),
+    // live.inventory：inflight 里的 streamPath、ageMs、legs（slot、mirror、bytes、lastByteAgeMs）
+    // 是 inflight 的内部字段，不进这张顶层字段表。
+    liveInventory: Object.freeze([
+      "streamPath",
+      "delivered",
+      "inflight",
+      "playlistResponseAgeMs",
+      "playlistNewSegmentAgeMs",
+      "flvFrameAgeMs"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),

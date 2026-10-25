@@ -51,6 +51,8 @@ export class LiveFlvBackup {
     this.reconnectTimer = undefined;
     this.url = undefined;
     this.lastHeaders = undefined;
+    // 最近一次收到视频帧的时刻（now 的口径）；还没收到过为 undefined。
+    this.lastVideoFrameAt = undefined;
   }
 
   get mirror() {
@@ -157,6 +159,7 @@ export class LiveFlvBackup {
 
   noteFrames(connection, frames) {
     if (frames.length === 0) return;
+    if (frames.some((frame) => frame.kind === 'video')) this.lastVideoFrameAt = this.now();
     const firstFrames = connection.firstTs === undefined;
     if (firstFrames) connection.firstTs = frames[0].ts;
     this.rebuilder.appendFrames(frames);

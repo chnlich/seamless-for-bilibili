@@ -100,6 +100,7 @@ function renderRacePanel() {
     readouts: latestReadouts,
     vodEnabled: enhancementEnabled,
     liveEnabled,
+    nowMs: Date.now(),
   }));
 }
 

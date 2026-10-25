@@ -36,6 +36,13 @@
     reconnectDelayMs: 1e3,
     maxCalibrationAttempts: 10
   });
+  var LIVE_INVENTORY_CONFIG = Object.freeze({
+    stallSignMs: 2e3,
+    snapshotIntervalMs: 2e3,
+    tickMs: 250,
+    noticeMs: 3e3,
+    validMs: 3e3
+  });
   var DIAGNOSTIC_MESSAGE_VERSION = 1;
 
   // src/diagnostics/catalog.js
@@ -95,6 +102,7 @@
     "live.stream.stitch",
     "live.playurl_observed",
     "live.flv.backup",
+    "live.inventory",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
@@ -226,6 +234,16 @@
       "reason",
       "offsetChangeMs"
     ]),
+    // live.inventory：inflight 里的 streamPath、ageMs、legs（slot、mirror、bytes、lastByteAgeMs）
+    // 是 inflight 的内部字段，不进这张顶层字段表。
+    liveInventory: Object.freeze([
+      "streamPath",
+      "delivered",
+      "inflight",
+      "playlistResponseAgeMs",
+      "playlistNewSegmentAgeMs",
+      "flvFrameAgeMs"
+    ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),
     log: Object.freeze(["errorName", "message", "code"])
@@ -238,6 +256,7 @@
     if (code.startsWith("resource.")) return DATA_ALLOWLIST.resource;
     if (code.startsWith("bridge.")) return DATA_ALLOWLIST.bridge;
     if (code.startsWith("bank.")) return DATA_ALLOWLIST.bank;
+    if (code === "live.inventory") return DATA_ALLOWLIST.liveInventory;
     if (code.startsWith("live.")) return DATA_ALLOWLIST.live;
     if (code.startsWith("extension.")) return DATA_ALLOWLIST.extension;
     if (code.startsWith("log.persist.")) return DATA_ALLOWLIST.persist;
@@ -401,6 +420,37 @@
       return safe;
     });
   }
+  function safeNullableAge(value) {
+    return value === null ? null : safeNonnegativeInteger(value);
+  }
+  function safeLiveInventoryLegs(value) {
+    if (!Array.isArray(value)) return UNKNOWN_VALUE;
+    return value.map((leg) => {
+      if (leg === null || typeof leg !== "object" || Array.isArray(leg)) {
+        throw new Error("live inventory leg structure is invalid");
+      }
+      return {
+        slot: [0, 1, 2].includes(leg.slot) ? leg.slot : UNKNOWN_VALUE,
+        mirror: typeof leg.mirror === "string" ? leg.mirror : UNKNOWN_VALUE,
+        bytes: safeNonnegativeInteger(leg.bytes),
+        lastByteAgeMs: safeNullableAge(leg.lastByteAgeMs)
+      };
+    });
+  }
+  function safeLiveInventoryRequests(value) {
+    if (!Array.isArray(value)) return UNKNOWN_VALUE;
+    return value.map((request) => {
+      if (request === null || typeof request !== "object" || Array.isArray(request)) {
+        throw new Error("live inventory request structure is invalid");
+      }
+      return {
+        streamPath: typeof request.streamPath === "string" && request.streamPath.startsWith("/") ? scrubPathname(request.streamPath) : UNKNOWN_VALUE,
+        ageMs: safeNonnegativeInteger(request.ageMs),
+        legs: safeLiveInventoryLegs(request.legs)
+      };
+    });
+  }
+  var LIVE_INVENTORY_AGE_FIELDS = /* @__PURE__ */ new Set(["playlistResponseAgeMs", "playlistNewSegmentAgeMs", "flvFrameAgeMs"]);
   function safeAppendErrors(value) {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return UNKNOWN_VALUE;
     const result = {};
@@ -472,6 +522,10 @@
       return scrubPreferenceName(value);
     }
     if (field === "source" || field === "previousSource" || field === "name") return scrubUrl(value);
+    if (code === "live.inventory") {
+      if (field === "inflight") return safeLiveInventoryRequests(value);
+      if (LIVE_INVENTORY_AGE_FIELDS.has(field)) return safeNullableAge(value);
+    }
     if (field === "bufferedRanges" || field === "seekableRanges" || field === "bufferedBefore" || field === "bufferedAfter") return safeRangeList(value);
     if (field === "sourceBufferRanges") return safeSourceBufferRanges(value);
     if (field === "resources") return safeInventoryResources(value);
@@ -484,7 +538,7 @@
       return browserMetric(value);
     }
     if (field === "enabled") return value === true || value === false ? value : UNKNOWN_VALUE;
-    if (["disabled", "routeActive", "pairedAddressAvailable", "mismatch"].includes(field)) {
+    if (["disabled", "routeActive", "pairedAddressAvailable", "mismatch", "delivered"].includes(field)) {
       return value === true || value === false ? value : UNKNOWN_VALUE;
     }
     if ([
@@ -631,7 +685,7 @@
   }
 
   // src/build-id.js
-  var BUILT_BUILD_ID = true ? "src-2027ff5d94a77214764ef5f2" : "source-build";
+  var BUILT_BUILD_ID = true ? "src-48cbde056c379ae57d204e3a" : "source-build";
   function readBuildId() {
     return BUILT_BUILD_ID;
   }

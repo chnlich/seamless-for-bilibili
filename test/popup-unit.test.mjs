@@ -21,6 +21,7 @@ import {
   NO_PAGE_MESSAGES,
   SWITCH_OFF_TEXT,
   applyPageAvailability,
+  bytesText,
   clockText,
   downloadLinesView,
   liveTakeoverText,
@@ -268,8 +269,19 @@ function completionEvents() {
   ];
 }
 
-function downloadCard({ events, latestInventory, nowMs, live = false, readouts, vodEnabled = true, liveEnabled = true }) {
-  const status = deriveDownloadStatus({ chunkEvents: events, latestInventory, nowMs });
+// nowMs 是 worker 取数的时刻，renderNowMs 是弹窗渲染的时刻（默认同一时刻）。
+function downloadCard({
+  events,
+  latestInventory,
+  latestLiveInventory,
+  nowMs,
+  renderNowMs = nowMs,
+  live = false,
+  readouts,
+  vodEnabled = true,
+  liveEnabled = true,
+}) {
+  const status = deriveDownloadStatus({ chunkEvents: events, latestInventory, latestLiveInventory, nowMs });
   const response = { sampleCount: events.length, summary: { rows: [] }, downloadStatus: status };
   const view = downloadLinesView({
     response,
@@ -279,6 +291,7 @@ function downloadCard({ events, latestInventory, nowMs, live = false, readouts, 
     readouts,
     vodEnabled,
     liveEnabled,
+    nowMs: renderNowMs,
   });
   const document = popupDocument();
   const container = document.querySelector('[data-cdn-lines]');
@@ -556,6 +569,303 @@ test('live page when the last record on a line is a server error reports it in r
     { name: 'ov-gotcha207', text: '服务器返回错误', tone: 'bad' },
     { name: 'ov-gotcha207b', text: '服务器返回错误', tone: 'bad' },
   ]);
+});
+
+const LIVE_STREAM_DIR = '/live-bvc/791488/live_i9bl9s_SIPAZ9L_1b53ey_4000/';
+const SWITCHED_FROM_DIR = '/live-bvc/791488/live_i9bl9s_SIPAZ9L_1b53ey_2500/';
+const LIVE_PLAYER_HOST = 'd1--ov-gotcha207.bilivideo.com';
+const LIVE_PAIR_HOST = 'd1--ov-gotcha105.bilivideo.com';
+const LIVE_FLV_HOST = 'd1--cn-gotcha04.bilivideo.com';
+
+function liveInventoryEvent({
+  at,
+  delivered = false,
+  streamPath = LIVE_STREAM_DIR,
+  inflight = [],
+  playlistResponseAgeMs = null,
+  playlistNewSegmentAgeMs = null,
+  flvFrameAgeMs = null,
+}) {
+  return {
+    wallTime: new Date(at).toISOString(),
+    data: { streamPath, delivered, inflight, playlistResponseAgeMs, playlistNewSegmentAgeMs, flvFrameAgeMs },
+  };
+}
+
+function inflightRequest({ ageMs, streamPath = LIVE_STREAM_DIR, legs }) {
+  return { streamPath, ageMs, legs };
+}
+
+function inflightLeg(slot, mirror, bytes = 0) {
+  return { slot, mirror, bytes, lastByteAgeMs: bytes === 0 ? null : 200 };
+}
+
+function liveCard(options) {
+  return downloadCard({ events: [], latestInventory: undefined, nowMs: NOW_A, live: true, ...options });
+}
+
+// 直播页上一条刚结束的下载记录，让线路行与合计速度有内容可写。
+function liveFetched(mirror, at, result = 'fetched', slot = 0) {
+  return fetchEvent({
+    at,
+    mirror,
+    path: `${LIVE_STREAM_DIR}423384050.m4s`,
+    chunkIndex: 0,
+    bytes: result === 'fetched' ? 156_250 : 0,
+    durationMs: 400,
+    slot,
+    result,
+  });
+}
+
+test('live snapshot row 1: a segment request waiting with every leg at zero bytes names the wait, before any leg has finished', () => {
+  const card = liveCard({
+    latestLiveInventory: liveInventoryEvent({
+      at: NOW_A - 1_000,
+      inflight: [inflightRequest({
+        ageMs: 7_000,
+        legs: [
+          inflightLeg(0, LIVE_PLAYER_HOST),
+          inflightLeg(1, LIVE_PAIR_HOST),
+          inflightLeg(2, LIVE_FLV_HOST),
+        ],
+      })],
+      playlistResponseAgeMs: 400,
+      playlistNewSegmentAgeMs: 400,
+    }),
+  });
+  assert.equal(card.headline, '在等一个分片，已 8 秒没收到数据');
+  assert.equal(card.subline, null);
+  assert.equal(card.message, null);
+  assert.deepEqual(card.rows, [
+    { name: 'cn-gotcha04', text: '等待中 8 秒', tone: 'warn' },
+    { name: 'ov-gotcha105', text: '等待中 8 秒', tone: 'warn' },
+    { name: 'ov-gotcha207', text: '等待中 8 秒', tone: 'warn' },
+  ]);
+});
+
+test('live snapshot row 1 needs the request to have waited 2 seconds, counting the time since the snapshot was written', () => {
+  const snapshot = (ageMs) => liveInventoryEvent({
+    at: NOW_A - 100,
+    inflight: [inflightRequest({ ageMs, legs: [inflightLeg(0, LIVE_PLAYER_HOST)] })],
+  });
+  const waiting = liveCard({ latestLiveInventory: snapshot(1_900) });
+  assert.equal(waiting.headline, '在等一个分片，已 2 秒没收到数据');
+  // 不满 2 秒时快照没有可说的话：还没有任何结束的腿，仍写「还没有下载数据」。
+  const early = liveCard({ latestLiveInventory: snapshot(1_899) });
+  assert.equal(early.headline, DOWNLOAD_CARD_TEXT.noRecords);
+  assert.equal(early.rows.length, 0);
+});
+
+test('live snapshot row 2: bytes arriving slowly name the legs that received data and keep waiting on the rest', () => {
+  const card = liveCard({
+    latestLiveInventory: liveInventoryEvent({
+      at: NOW_A - 1_000,
+      inflight: [inflightRequest({
+        ageMs: 5_000,
+        legs: [inflightLeg(0, LIVE_PLAYER_HOST, 307_200), inflightLeg(1, LIVE_PAIR_HOST)],
+      })],
+    }),
+  });
+  assert.equal(card.headline, '分片下载中，已 6 秒，收到 300 KB');
+  assert.deepEqual(card.rows, [
+    { name: 'ov-gotcha105', text: '等待中 6 秒', tone: 'warn' },
+    { name: 'ov-gotcha207', text: '下载中 · 已收到 300 KB', tone: 'ok' },
+  ]);
+});
+
+test('live snapshot rows 1 and 2 keep the lines of finished legs next to the waiting ones', () => {
+  const card = liveCard({
+    events: [liveFetched(LIVE_PAIR_HOST, NOW_A - 3_000, 'http_error', 1)],
+    latestLiveInventory: liveInventoryEvent({
+      at: NOW_A - 500,
+      inflight: [inflightRequest({ ageMs: 3_000, legs: [inflightLeg(0, LIVE_PLAYER_HOST)] })],
+    }),
+  });
+  assert.equal(card.headline, '在等一个分片，已 3 秒没收到数据');
+  assert.deepEqual(card.rows, [
+    { name: 'ov-gotcha105', text: '服务器返回错误', tone: 'bad' },
+    { name: 'ov-gotcha207', text: '等待中 3 秒', tone: 'warn' },
+  ]);
+});
+
+test('live snapshot row 3: the playlist still refreshes but adds no segment, lines read idle, FLV silence is appended', () => {
+  const events = [liveFetched(LIVE_PLAYER_HOST, NOW_A - 4_000)];
+  const withFlv = (flvFrameAgeMs) => liveCard({
+    events,
+    latestLiveInventory: liveInventoryEvent({
+      at: NOW_A - 1_000,
+      playlistResponseAgeMs: 500,
+      playlistNewSegmentAgeMs: 11_000,
+      flvFrameAgeMs,
+    }),
+  });
+  const quiet = withFlv(4_000);
+  assert.equal(quiet.headline, '播放列表 12 秒没有新分片，FLV 后备也没有新画面');
+  assert.deepEqual(quiet.rows, [{ name: 'ov-gotcha207', text: '空闲', tone: 'idle' }]);
+  // FLV 连接 3 秒内还有画面，或没有 FLV 后备，都不接这一句。
+  assert.equal(withFlv(1_000).headline, '播放列表 12 秒没有新分片');
+  assert.equal(withFlv(null).headline, '播放列表 12 秒没有新分片');
+  // 3 秒的门槛含边界：新分片年龄加上写出后的 1 秒刚好 3 秒就写。
+  const edge = liveCard({
+    latestLiveInventory: liveInventoryEvent({ at: NOW_A - 1_000, playlistResponseAgeMs: 0, playlistNewSegmentAgeMs: 2_000 }),
+  });
+  assert.equal(edge.headline, '播放列表 3 秒没有新分片');
+  const below = liveCard({
+    latestLiveInventory: liveInventoryEvent({ at: NOW_A - 1_000, playlistResponseAgeMs: 0, playlistNewSegmentAgeMs: 1_999 }),
+  });
+  assert.equal(below.headline, DOWNLOAD_CARD_TEXT.noRecords);
+});
+
+test('live snapshot row 4: the player stopped refreshing the playlist, lines read idle', () => {
+  const card = liveCard({
+    events: [liveFetched(LIVE_PLAYER_HOST, NOW_A - 4_000)],
+    latestLiveInventory: liveInventoryEvent({
+      at: NOW_A - 1_000,
+      playlistResponseAgeMs: 11_000,
+      playlistNewSegmentAgeMs: 11_000,
+      flvFrameAgeMs: 11_000,
+    }),
+  });
+  assert.equal(card.headline, '播放器 12 秒没有请求数据');
+  assert.deepEqual(card.rows, [{ name: 'ov-gotcha207', text: '空闲', tone: 'idle' }]);
+  // 播放列表上一份响应满 3 秒归第 4 行，不满 3 秒（仍在刷新）才轮得到第 3 行。
+  const refreshing = liveCard({
+    latestLiveInventory: liveInventoryEvent({ at: NOW_A - 1_000, playlistResponseAgeMs: 1_999, playlistNewSegmentAgeMs: 9_000 }),
+  });
+  assert.equal(refreshing.headline, '播放列表 10 秒没有新分片');
+  const stopped = liveCard({
+    latestLiveInventory: liveInventoryEvent({ at: NOW_A - 1_000, playlistResponseAgeMs: 2_000, playlistNewSegmentAgeMs: 9_000 }),
+  });
+  assert.equal(stopped.headline, '播放器 3 秒没有请求数据');
+  // 这个流还没有播放列表响应时没有可说的话。
+  const unknown = liveCard({
+    latestLiveInventory: liveInventoryEvent({ at: NOW_A - 1_000 }),
+  });
+  assert.equal(unknown.headline, DOWNLOAD_CARD_TEXT.noRecords);
+});
+
+test('live snapshot rows 5 and 6 keep the download-record wording when no snapshot row holds', () => {
+  const calm = (events) => liveCard({
+    events,
+    latestLiveInventory: liveInventoryEvent({
+      at: NOW_A - 500,
+      inflight: [inflightRequest({ ageMs: 300, legs: [inflightLeg(0, LIVE_PLAYER_HOST)] })],
+      playlistResponseAgeMs: 200,
+      playlistNewSegmentAgeMs: 200,
+    }),
+  });
+  const downloading = calm([liveFetched(LIVE_PLAYER_HOST, NOW_A - 1_000), liveFetched(LIVE_PLAYER_HOST, NOW_A - 2_000)]);
+  assert.equal(downloading.headline, '正在下载 · 合计 0.5 Mbps');
+  assert.deepEqual(downloading.rows, [{ name: 'ov-gotcha207', text: '下载中 · 0.5 Mbps', tone: 'ok' }]);
+  const quiet = calm([liveFetched(LIVE_PLAYER_HOST, NOW_A - 20_000)]);
+  assert.equal(quiet.headline, '最近 5 秒没有收到数据');
+  assert.deepEqual(quiet.rows, [{ name: 'ov-gotcha207', text: '空闲', tone: 'idle' }]);
+});
+
+test('a snapshot speaks only while valid: not after delivery, not 3 seconds after its write, not with the live switch off', () => {
+  const stalled = (at, delivered = false) => liveInventoryEvent({
+    at,
+    delivered,
+    inflight: [inflightRequest({ ageMs: 5_000, legs: [inflightLeg(0, LIVE_PLAYER_HOST)] })],
+  });
+  assert.equal(liveCard({ latestLiveInventory: stalled(NOW_A - 2_999) }).headline, '在等一个分片，已 7 秒没收到数据');
+  assert.equal(liveCard({ latestLiveInventory: stalled(NOW_A - 3_000) }).headline, DOWNLOAD_CARD_TEXT.noRecords);
+  assert.equal(liveCard({ latestLiveInventory: stalled(NOW_A - 100, true) }).headline, DOWNLOAD_CARD_TEXT.noRecords);
+  const off = liveCard({ latestLiveInventory: stalled(NOW_A - 100), liveEnabled: false });
+  assert.equal(off.headline, DOWNLOAD_CARD_TEXT.liveSwitchOff);
+  // 视频页不读直播快照。
+  const video = downloadCard({
+    events: [],
+    latestInventory: undefined,
+    latestLiveInventory: stalled(NOW_A - 100),
+    nowMs: NOW_A,
+    live: false,
+  });
+  assert.equal(video.headline, DOWNLOAD_CARD_TEXT.noRecords);
+});
+
+test('validity follows the read time while the seconds keep counting up to the render time', () => {
+  const snapshot = liveInventoryEvent({
+    at: NOW_A - 2_900,
+    inflight: [inflightRequest({ ageMs: 4_000, legs: [inflightLeg(0, LIVE_PLAYER_HOST)] })],
+  });
+  // 取数时快照写出 2.9 秒，弹窗到下一次取数前继续渲染：快照不会在两次取数之间过期，秒数照走。
+  const atRead = liveCard({ latestLiveInventory: snapshot });
+  assert.equal(atRead.headline, '在等一个分片，已 6 秒没收到数据');
+  const later = liveCard({ latestLiveInventory: snapshot, renderNowMs: NOW_A + 1_500 });
+  assert.equal(later.headline, '在等一个分片，已 8 秒没收到数据');
+  assert.deepEqual(later.rows, [{ name: 'ov-gotcha207', text: '等待中 8 秒', tone: 'warn' }]);
+});
+
+test('at a quality switch only the request of the current stream names the wait', () => {
+  const oldRequest = inflightRequest({
+    ageMs: 9_000,
+    streamPath: SWITCHED_FROM_DIR,
+    legs: [inflightLeg(0, LIVE_PLAYER_HOST), inflightLeg(1, LIVE_PAIR_HOST)],
+  });
+  const newRequest = inflightRequest({
+    ageMs: 2_500,
+    legs: [inflightLeg(0, LIVE_PLAYER_HOST, 1_000)],
+  });
+  const card = liveCard({
+    latestLiveInventory: liveInventoryEvent({
+      at: NOW_A - 500,
+      inflight: [oldRequest, newRequest],
+      playlistResponseAgeMs: 100,
+      playlistNewSegmentAgeMs: 100,
+    }),
+  });
+  assert.equal(card.headline, '分片下载中，已 3 秒，收到 1000 B');
+  assert.deepEqual(card.rows, [{ name: 'ov-gotcha207', text: '下载中 · 已收到 1000 B', tone: 'ok' }]);
+  // 当前流没有在途请求时，旧流还没放手的请求不算播放器在等的分片：按播放列表的事实写。
+  const idleCurrent = liveCard({
+    latestLiveInventory: liveInventoryEvent({
+      at: NOW_A - 1_000,
+      inflight: [oldRequest],
+      playlistResponseAgeMs: 11_000,
+      playlistNewSegmentAgeMs: 11_000,
+    }),
+  });
+  assert.equal(idleCurrent.headline, '播放器 12 秒没有请求数据');
+});
+
+test('the oldest request of the current stream names the wait when two are in flight', () => {
+  const card = liveCard({
+    latestLiveInventory: liveInventoryEvent({
+      at: NOW_A,
+      inflight: [
+        inflightRequest({ ageMs: 2_000, legs: [inflightLeg(0, LIVE_PLAYER_HOST)] }),
+        inflightRequest({ ageMs: 6_000, legs: [inflightLeg(0, LIVE_PLAYER_HOST), inflightLeg(1, LIVE_PAIR_HOST)] }),
+      ],
+    }),
+  });
+  assert.equal(card.headline, '在等一个分片，已 6 秒没收到数据');
+  assert.equal(card.rows.length, 2);
+});
+
+test('live lines name a leg the player cancelled and an FLV leg that found no frames; the video page keeps them idle', () => {
+  const events = [
+    liveFetched(LIVE_PLAYER_HOST, NOW_A - 3_000, 'aborted'),
+    liveFetched(LIVE_FLV_HOST, NOW_A - 2_500, 'frames_missing', 2),
+  ];
+  const live = liveCard({ events });
+  assert.equal(live.headline, '最近 5 秒没有收到数据');
+  assert.deepEqual(live.rows, [
+    { name: 'cn-gotcha04', text: 'FLV 里没有这段画面', tone: 'warn' },
+    { name: 'ov-gotcha207', text: '播放器已取消', tone: 'idle' },
+  ]);
+  const video = downloadCard({ events, latestInventory: undefined, nowMs: NOW_A, live: false });
+  assert.deepEqual(video.rows.map((row) => row.text), ['空闲', '空闲']);
+});
+
+test('byte counts read as bytes, KB or MB', () => {
+  assert.equal(bytesText(0), '0 B');
+  assert.equal(bytesText(1_023), '1023 B');
+  assert.equal(bytesText(1_024), '1 KB');
+  assert.equal(bytesText(307_200), '300 KB');
+  assert.equal(bytesText(1_048_576), '1.0 MB');
+  assert.equal(bytesText(5_400_000), '5.1 MB');
 });
 
 test('download card view covers loading, failure, and no-session messages', () => {

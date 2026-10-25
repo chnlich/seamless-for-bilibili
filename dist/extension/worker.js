@@ -35,6 +35,13 @@
     reconnectDelayMs: 1e3,
     maxCalibrationAttempts: 10
   });
+  var LIVE_INVENTORY_CONFIG = Object.freeze({
+    stallSignMs: 2e3,
+    snapshotIntervalMs: 2e3,
+    tickMs: 250,
+    noticeMs: 3e3,
+    validMs: 3e3
+  });
   var DIAGNOSTIC_MESSAGE_VERSION = 1;
 
   // src/diagnostics/catalog.js
@@ -94,6 +101,7 @@
     "live.stream.stitch",
     "live.playurl_observed",
     "live.flv.backup",
+    "live.inventory",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
@@ -225,6 +233,16 @@
       "reason",
       "offsetChangeMs"
     ]),
+    // live.inventory：inflight 里的 streamPath、ageMs、legs（slot、mirror、bytes、lastByteAgeMs）
+    // 是 inflight 的内部字段，不进这张顶层字段表。
+    liveInventory: Object.freeze([
+      "streamPath",
+      "delivered",
+      "inflight",
+      "playlistResponseAgeMs",
+      "playlistNewSegmentAgeMs",
+      "flvFrameAgeMs"
+    ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),
     log: Object.freeze(["errorName", "message", "code"])
@@ -237,6 +255,7 @@
     if (code.startsWith("resource.")) return DATA_ALLOWLIST.resource;
     if (code.startsWith("bridge.")) return DATA_ALLOWLIST.bridge;
     if (code.startsWith("bank.")) return DATA_ALLOWLIST.bank;
+    if (code === "live.inventory") return DATA_ALLOWLIST.liveInventory;
     if (code.startsWith("live.")) return DATA_ALLOWLIST.live;
     if (code.startsWith("extension.")) return DATA_ALLOWLIST.extension;
     if (code.startsWith("log.persist.")) return DATA_ALLOWLIST.persist;
@@ -547,6 +566,37 @@
       return safe;
     });
   }
+  function safeNullableAge(value) {
+    return value === null ? null : safeNonnegativeInteger(value);
+  }
+  function safeLiveInventoryLegs(value) {
+    if (!Array.isArray(value)) return UNKNOWN_VALUE;
+    return value.map((leg) => {
+      if (leg === null || typeof leg !== "object" || Array.isArray(leg)) {
+        throw new Error("live inventory leg structure is invalid");
+      }
+      return {
+        slot: [0, 1, 2].includes(leg.slot) ? leg.slot : UNKNOWN_VALUE,
+        mirror: typeof leg.mirror === "string" ? leg.mirror : UNKNOWN_VALUE,
+        bytes: safeNonnegativeInteger(leg.bytes),
+        lastByteAgeMs: safeNullableAge(leg.lastByteAgeMs)
+      };
+    });
+  }
+  function safeLiveInventoryRequests(value) {
+    if (!Array.isArray(value)) return UNKNOWN_VALUE;
+    return value.map((request) => {
+      if (request === null || typeof request !== "object" || Array.isArray(request)) {
+        throw new Error("live inventory request structure is invalid");
+      }
+      return {
+        streamPath: typeof request.streamPath === "string" && request.streamPath.startsWith("/") ? scrubPathname(request.streamPath) : UNKNOWN_VALUE,
+        ageMs: safeNonnegativeInteger(request.ageMs),
+        legs: safeLiveInventoryLegs(request.legs)
+      };
+    });
+  }
+  var LIVE_INVENTORY_AGE_FIELDS = /* @__PURE__ */ new Set(["playlistResponseAgeMs", "playlistNewSegmentAgeMs", "flvFrameAgeMs"]);
   function safeAppendErrors(value) {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return UNKNOWN_VALUE;
     const result = {};
@@ -618,6 +668,10 @@
       return scrubPreferenceName(value);
     }
     if (field === "source" || field === "previousSource" || field === "name") return scrubUrl(value);
+    if (code === "live.inventory") {
+      if (field === "inflight") return safeLiveInventoryRequests(value);
+      if (LIVE_INVENTORY_AGE_FIELDS.has(field)) return safeNullableAge(value);
+    }
     if (field === "bufferedRanges" || field === "seekableRanges" || field === "bufferedBefore" || field === "bufferedAfter") return safeRangeList(value);
     if (field === "sourceBufferRanges") return safeSourceBufferRanges(value);
     if (field === "resources") return safeInventoryResources(value);
@@ -630,7 +684,7 @@
       return browserMetric(value);
     }
     if (field === "enabled") return value === true || value === false ? value : UNKNOWN_VALUE;
-    if (["disabled", "routeActive", "pairedAddressAvailable", "mismatch"].includes(field)) {
+    if (["disabled", "routeActive", "pairedAddressAvailable", "mismatch", "delivered"].includes(field)) {
       return value === true || value === false ? value : UNKNOWN_VALUE;
     }
     if ([
@@ -1053,7 +1107,24 @@
     }
     return perMirror.size === 0 ? 0 : Math.max(...perMirror.values());
   }
-  function deriveDownloadStatus({ chunkEvents, latestInventory, nowMs }) {
+  function foldLiveInventory(event, nowMs) {
+    if (event === void 0) return void 0;
+    const wallTimeMs = Date.parse(event.wallTime);
+    if (!Number.isFinite(wallTimeMs)) throw new Error(`live.inventory 记录缺少有效 wallTime: ${JSON.stringify(event.wallTime)}`);
+    const data = event.data;
+    const ageOrNull = (age) => Number.isFinite(age) ? age : null;
+    return {
+      wallTimeMs,
+      readAgeMs: nowMs - wallTimeMs,
+      delivered: data.delivered === true,
+      streamPath: data.streamPath,
+      inflight: Array.isArray(data.inflight) ? data.inflight : [],
+      playlistResponseAgeMs: ageOrNull(data.playlistResponseAgeMs),
+      playlistNewSegmentAgeMs: ageOrNull(data.playlistNewSegmentAgeMs),
+      flvFrameAgeMs: ageOrNull(data.flvFrameAgeMs)
+    };
+  }
+  function deriveDownloadStatus({ chunkEvents, latestInventory, latestLiveInventory, nowMs }) {
     const lines = /* @__PURE__ */ new Map();
     for (const event of chunkEvents) {
       const data = event.data;
@@ -1101,7 +1172,8 @@
       anyLineBytesInWindow: lineRows.some((line) => line.receivedInWindow),
       totalBitsPerSecond: lineRows.reduce((total, line) => total + line.bitsPerSecond, 0),
       lines: lineRows,
-      inventory
+      inventory,
+      liveInventory: foldLiveInventory(latestLiveInventory, nowMs)
     };
   }
 
@@ -1501,13 +1573,19 @@
       );
       const events = [];
       let latestInventory;
+      let latestLiveInventory;
       let maxEventId = 0;
       request.onerror = () => reject(request.error || new Error("读取 CDN summary 事件失败"));
       request.onsuccess = () => {
         const cursor = request.result;
         if (cursor === null) {
           const summary = aggregateCdnEvents(events);
-          const downloadStatus = deriveDownloadStatus({ chunkEvents: events, latestInventory, nowMs: Date.now() });
+          const downloadStatus = deriveDownloadStatus({
+            chunkEvents: events,
+            latestInventory,
+            latestLiveInventory,
+            nowMs: Date.now()
+          });
           resolve({ maxEventId, sampleCount: events.length, summary, downloadStatus });
           return;
         }
@@ -1516,6 +1594,7 @@
         if (Number.isInteger(eventId) && eventId > maxEventId) maxEventId = eventId;
         if (event.code === "bank.fetch.chunk") events.push(event);
         if (event.code === "bank.inventory") latestInventory = event;
+        if (event.code === "live.inventory") latestLiveInventory = event;
         cursor.continue();
       };
       transaction.oncomplete = () => database.close();

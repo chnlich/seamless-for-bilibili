@@ -2,7 +2,8 @@
 // profile, muted, headless unless --headed, the extension loaded unpacked from dist/extension.
 //
 //   BILIBILI_E2E_CHROME=<chrome.exe> [BILIBILI_E2E_COMMIT_SHA=<sha>] node scripts/live-backup-run.mjs \
-//     --room <roomId> --minutes <m> [--delay-every <n> --delay-ms <ms>] [--report <file>] [--headed]
+//     --room <roomId> --minutes <m> [--delay-every <n> --delay-ms <ms> [--hold-flv]] \
+//     [--popup-captures <dir>] [--report <file>] [--headed]
 //
 // With --delay-every, every fMP4 media segment whose media sequence number is a multiple of n is
 // held for --delay-ms before its request reaches the network, on every host, so both network legs
@@ -10,14 +11,32 @@
 // --delay-after-ms (default 20000) after page load: the first network segment calibrates the
 // rebuild, and before calibration there is no rebuild leg to race.
 //
+// With --hold-flv (needs --delay-every) the FLV connection is held as well, so no leg of a held
+// segment can deliver: from the start of holding on, no byte of an FLV response body reaches the
+// page (the connection stays open and looks stalled to the backup), and segments are held
+// FLV_HOLD_LEAD_MS later, once the stalled connection has been dropped together with the frame
+// window the rebuild leg builds from. Both network legs then wait on the hold, and the rebuild
+// leg has no calibration or no frames. The backup reconnects into the same hold and gives up with
+// its full-rate console error, so the console verdict of such a run reads fail; the report's FLV
+// timeline shows the reconnects and the give-up.
+//
+// With --popup-captures <dir> the real toolbar popup is opened and photographed: once in the normal
+// phase and, with --delay-every, in each of the first MAX_HELD_CAPTURES held segments while the
+// hold lasts (--delay-ms of at least MIN_HELD_CAPTURE_HOLD_MS). Each capture writes <phase>.png and
+// <phase>.json (the readout of the popup's first line, takeover line and line rows) into <dir>;
+// the report lists them. Chrome then runs at device scale factor 2 on a large virtual screen, so
+// the popup is not clamped by the screen edge.
+//
 // Chrome runs with hardware video decode off, as the daily Chrome does; without hardware decode
 // Chrome cannot play HEVC, so the room's player picks its AVC stream, as it does there.
 //
 // The report covers: playback continuity from a 200 ms in-page sampler of the video element (every
 // stretch of 1 s or more where currentTime stops while the element is not paused), the winner of
 // every served segment and of the delayed ones, the rebuild leg's results, FLV backup states and
-// reconnects, network traffic by kind from CDP Network.dataReceived against the single-stream
-// traffic (one copy of every served segment), a console classification, and provenance.
+// reconnects, the live.inventory snapshots (counts before and after holding starts, the gaps
+// between the snapshots of one stall, the snapshots written after delivery), the popup captures,
+// network traffic by kind from CDP Network.dataReceived against the single-stream traffic (one
+// copy of every served segment), a console classification, and provenance.
 // Preflight asserts the Chrome executable, the built extension and that the room is live.
 
 import fs from 'node:fs/promises';
@@ -30,17 +49,49 @@ import { startConsoleCapture, triggerExtensionPositiveControl } from './console-
 import { installUnpackedExtension } from './install-unpacked-extension.mjs';
 import { readStoredEvents } from './extension-log-pull.mjs';
 import { readProvenance } from './provenance.mjs';
+import { connectRealPopup } from './real-popup.mjs';
 import { parseBiliPlaylist } from '../src/bank/flv-rebuild.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extensionDirectory = path.join(root, 'dist', 'extension');
 
+// A connection without bytes for LIVE_FLV_BACKUP stallMs (10 s) is dropped with the backup's frame
+// window; segments are held this much after the FLV connection, so the window is gone by then.
+const FLV_HOLD_LEAD_MS = 12000;
+// The normal-phase popup capture is taken this long before holding starts; opening the popup and
+// its first summary read take a few seconds.
+const NORMAL_CAPTURE_LEAD_MS = 8000;
+// Two held segments show the waiting text at two different moments; more only repeats it.
+const MAX_HELD_CAPTURES = 2;
+// The popup opens this long after a hold starts: the first snapshot is written once the request
+// has waited 2 s (LIVE_INVENTORY_CONFIG.stallSignMs), and the popup reads it within about a second.
+const HELD_CAPTURE_OPEN_AFTER_MS = 2500;
+// The popup is read until this long before the hold ends, then photographed as it is.
+const HELD_CAPTURE_MARGIN_MS = 1000;
+// Open delay, a first read and the photograph need this much of a hold.
+const MIN_HELD_CAPTURE_HOLD_MS = 6000;
+// Chrome's virtual screen for headless runs with popup captures: wide enough that the popup is
+// not clamped by the screen edge at device scale factor 2.
+const HEADLESS_SCREEN = '{0,0 3840x2400}';
+
 function parseArguments(argv) {
-  const options = { headed: false, delayEvery: undefined, delayMs: undefined, delayAfterMs: 20000, report: undefined };
+  const options = {
+    headed: false,
+    holdFlv: false,
+    delayEvery: undefined,
+    delayMs: undefined,
+    delayAfterMs: 20000,
+    popupCaptures: undefined,
+    report: undefined,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index];
     if (name === '--headed') {
       options.headed = true;
+      continue;
+    }
+    if (name === '--hold-flv') {
+      options.holdFlv = true;
       continue;
     }
     const value = argv[index + 1];
@@ -51,6 +102,7 @@ function parseArguments(argv) {
     else if (name === '--delay-every') options.delayEvery = Number(value);
     else if (name === '--delay-ms') options.delayMs = Number(value);
     else if (name === '--delay-after-ms') options.delayAfterMs = Number(value);
+    else if (name === '--popup-captures') options.popupCaptures = value;
     else if (name === '--report') options.report = value;
     else throw new Error(`unknown argument ${name}`);
   }
@@ -58,6 +110,15 @@ function parseArguments(argv) {
   if (!(options.minutes > 0)) throw new Error('--minutes <m> is required');
   if ((options.delayEvery === undefined) !== (options.delayMs === undefined)) {
     throw new Error('--delay-every and --delay-ms go together');
+  }
+  if (options.holdFlv && options.delayEvery === undefined) throw new Error('--hold-flv needs --delay-every and --delay-ms');
+  if (options.popupCaptures !== undefined) {
+    if (options.delayAfterMs < NORMAL_CAPTURE_LEAD_MS + 4000) {
+      throw new Error(`--popup-captures needs --delay-after-ms of at least ${NORMAL_CAPTURE_LEAD_MS + 4000}`);
+    }
+    if (options.delayMs !== undefined && options.delayMs < MIN_HELD_CAPTURE_HOLD_MS) {
+      throw new Error(`--popup-captures needs --delay-ms of at least ${MIN_HELD_CAPTURE_HOLD_MS}`);
+    }
   }
   return options;
 }
@@ -81,6 +142,36 @@ const pageInit = () => {
     window.__liveSamples.push([Date.now(), video.currentTime, video.paused, video.readyState, ahead]);
   }, 200);
 };
+
+// Installed with --hold-flv, runs in every frame: from closeAtMs on, the reads of an FLV response
+// body never return data. The body stream and the connection stay as they are, so an abort of the
+// connection errors the pending read, as it does on a connection that stalled.
+const flvGateInit = (closeAtMs) => {
+  const bodyGetter = Object.getOwnPropertyDescriptor(Response.prototype, 'body').get;
+  const gated = new WeakSet();
+  Object.defineProperty(Response.prototype, 'body', {
+    configurable: true,
+    get() {
+      const body = bodyGetter.call(this);
+      if (body === null || gated.has(body) || !URL.canParse(this.url) || !new URL(this.url).pathname.endsWith('.flv')) return body;
+      gated.add(body);
+      const getReader = body.getReader.bind(body);
+      body.getReader = (...args) => {
+        const reader = getReader(...args);
+        const read = reader.read.bind(reader);
+        // reader.closed stays pending while the connection is open and unread.
+        reader.read = async () => {
+          if (Date.now() >= closeAtMs) await reader.closed;
+          return read();
+        };
+        return reader;
+      };
+      return body;
+    },
+  });
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function segmentNameOf(url) {
   const pathname = new URL(url).pathname;
@@ -135,6 +226,28 @@ function countBy(values) {
   return counts;
 }
 
+// The live.inventory snapshots of the player's session: how many were written before holding
+// starts and from then on, the gaps between consecutive snapshots of one stall (the cadence; a
+// delivered snapshot closes the stall and has no cadence), the delivered snapshots, and the
+// snapshots themselves.
+function inventorySummary(snapshots, holdingStartsAt) {
+  const wallTimeOf = (event) => Date.parse(event.wallTime);
+  const gaps = [];
+  for (let index = 1; index < snapshots.length; index += 1) {
+    if (snapshots[index - 1].data.delivered || snapshots[index].data.delivered) continue;
+    gaps.push(wallTimeOf(snapshots[index]) - wallTimeOf(snapshots[index - 1]));
+  }
+  gaps.sort((left, right) => left - right);
+  return {
+    total: snapshots.length,
+    beforeHolding: holdingStartsAt === undefined ? null : snapshots.filter((event) => wallTimeOf(event) < holdingStartsAt).length,
+    fromHolding: holdingStartsAt === undefined ? null : snapshots.filter((event) => wallTimeOf(event) >= holdingStartsAt).length,
+    delivered: snapshots.filter((event) => event.data.delivered).length,
+    gapsMs: gaps.length === 0 ? null : { count: gaps.length, min: gaps[0], median: gaps[gaps.length >> 1], max: gaps.at(-1) },
+    snapshots: snapshots.slice(0, 80).map((event) => ({ wallTime: event.wallTime, ...event.data })),
+  };
+}
+
 // The session record (buildId) and the popup's live summary for one session.
 async function readSessionFacts(context, extensionId, sessionId) {
   const page = await context.newPage();
@@ -172,7 +285,13 @@ const report = {
   minutes: options.minutes,
   injection: options.delayEvery === undefined
     ? null
-    : { every: options.delayEvery, delayMs: options.delayMs, afterMs: options.delayAfterMs },
+    : {
+      every: options.delayEvery,
+      delayMs: options.delayMs,
+      afterMs: options.delayAfterMs,
+      holdFlv: options.holdFlv,
+      segmentsHeldAfterFlvMs: options.holdFlv ? FLV_HOLD_LEAD_MS : 0,
+    },
   provenance: {
     commitSha: process.env.BILIBILI_E2E_COMMIT_SHA ?? provenance.commitSha,
     buildId: provenance.buildId,
@@ -182,14 +301,22 @@ const report = {
   },
 };
 const injections = [];
+// Holding (segments, and with --hold-flv the FLV connection) starts at holdingStartsAt; segments
+// are held from injectFrom on, which is later by FLV_HOLD_LEAD_MS with --hold-flv. Without
+// --delay-every nothing is held and holdingStartsAt only places the normal-phase popup capture.
+let holdingStartsAt;
 let injectFrom = Number.POSITIVE_INFINITY;
 const traffic = { flv: 0, m4s: 0, m3u8: 0, other: 0 };
 const aux = new Map();
 // Every change of the playlist's EXT-X-MAP name; each one resets the backup's calibration.
 const mapChanges = [];
 const samples = [];
+const popupCaptures = [];
+// Popup captures run one at a time, in the order they were scheduled.
+let popupQueue = Promise.resolve();
 let context;
 let consoleCapture;
+let popup;
 try {
   context = await chromium.launchPersistentContext(profileDirectory, {
     executablePath: chromeExecutablePath,
@@ -201,6 +328,11 @@ try {
       '--enable-unsafe-extension-debugging',
       '--autoplay-policy=no-user-gesture-required',
       '--disable-accelerated-video-decode',
+      ...(options.popupCaptures === undefined ? [] : [
+        '--force-device-scale-factor=2',
+        '--window-position=0,0',
+        ...(options.headed ? [] : [`--screen-info=${HEADLESS_SCREEN}`]),
+      ]),
     ],
   });
   report.provenance.browserVersion = context.browser().version();
@@ -208,6 +340,10 @@ try {
   const extensionId = await installUnpackedExtension(context.browser(), extensionDirectory);
   consoleCapture = await startConsoleCapture(cdpPort, extensionId);
   await triggerExtensionPositiveControl(context, extensionId, consoleCapture);
+  if (options.popupCaptures !== undefined) {
+    await fs.mkdir(options.popupCaptures, { recursive: true });
+    popup = await connectRealPopup({ cdpPort, extensionId });
+  }
   await context.addInitScript({ content: `(${pageInit.toString()})()` });
   if (options.delayEvery !== undefined) {
     await context.route((url) => {
@@ -218,6 +354,7 @@ try {
       const record = { at: Date.now(), name: segmentNameOf(url), host: new URL(url).hostname, delayMs: options.delayMs };
       injections.push(record);
       log(`inject hold ${record.name} ${record.host} ${options.delayMs} ms`);
+      scheduleHeldCapture(record);
       await new Promise((resolve) => setTimeout(resolve, options.delayMs));
       try {
         await route.continue();
@@ -247,9 +384,51 @@ try {
     traffic[requestKinds.get(requestId) ?? 'other'] += dataLength;
   });
   await network.send('Network.enable');
+
+  // A failed capture is logged and listed in the report.
+  async function takePopupCapture(phase, { until, timeoutMs }) {
+    const screenshotPath = path.join(options.popupCaptures, `${phase}.png`);
+    try {
+      await page.bringToFront();
+      const capture = await popup.capture({ until, timeoutMs, screenshotPath });
+      const entry = { phase, png: screenshotPath, ...capture };
+      await fs.writeFile(path.join(options.popupCaptures, `${phase}.json`), `${JSON.stringify(entry, null, 2)}\n`, 'utf8');
+      popupCaptures.push(entry);
+      log(`popup capture ${phase} matched=${capture.matched} first line ${JSON.stringify(capture.readout.headline)}`);
+    } catch (error) {
+      popupCaptures.push({ phase, error: error.message });
+      log(`popup capture ${phase} failed: ${error.message}`);
+    }
+  }
+  // The first request of each of the first held segments schedules one capture of its hold.
+  const heldCaptured = new Set();
+  function scheduleHeldCapture(record) {
+    if (popup === undefined || heldCaptured.size >= MAX_HELD_CAPTURES || heldCaptured.has(record.name)) return;
+    heldCaptured.add(record.name);
+    const phase = `held-${heldCaptured.size}`;
+    popupQueue = popupQueue.then(async () => {
+      await sleep(record.at + HELD_CAPTURE_OPEN_AFTER_MS - Date.now());
+      await takePopupCapture(phase, {
+        until: (readout) => (readout.headline ?? '').startsWith('在等一个分片'),
+        timeoutMs: record.at + options.delayMs - HELD_CAPTURE_MARGIN_MS - Date.now(),
+      });
+    });
+  }
+
   const startedAt = Date.now();
-  injectFrom = startedAt + options.delayAfterMs;
+  holdingStartsAt = startedAt + options.delayAfterMs;
+  injectFrom = holdingStartsAt + (options.holdFlv ? FLV_HOLD_LEAD_MS : 0);
+  if (options.holdFlv) await context.addInitScript({ content: `(${flvGateInit.toString()})(${holdingStartsAt})` });
   await page.goto(`https://live.bilibili.com/${options.room}`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  if (popup !== undefined) {
+    popupQueue = popupQueue.then(async () => {
+      await sleep(holdingStartsAt - NORMAL_CAPTURE_LEAD_MS - Date.now());
+      await takePopupCapture('normal', {
+        until: (readout) => (readout.headline ?? '').startsWith('正在下载'),
+        timeoutMs: 4000,
+      });
+    });
+  }
   const deadline = startedAt + options.minutes * 60000;
   while (Date.now() < deadline) {
     await page.waitForTimeout(Math.min(30000, deadline - Date.now()));
@@ -262,6 +441,7 @@ try {
       + `traffic=${JSON.stringify(traffic)} injections=${injections.length}`);
   }
   samples.sort((left, right) => left[0] - right[0]);
+  await popupQueue;
   await page.close();
   // 1 = live; anything else means the broadcast ended during the run (2 = rotation, 0 = offline).
   report.liveStatusAtEnd = (await roomLiveStatus(options.room)).live_status;
@@ -346,6 +526,14 @@ try {
     networkLegsOverSingleStream: singleStreamBytes === 0 ? null : traffic.m4s / singleStreamBytes,
   };
   report.errors = countBy(events.filter((event) => event.code === 'log.error').map((event) => `${event.data?.code}: ${event.data?.message}`));
+  report.holding = options.delayEvery === undefined
+    ? null
+    : { startsAt: new Date(holdingStartsAt).toISOString(), segmentsHeldFrom: new Date(injectFrom).toISOString() };
+  report.liveInventory = inventorySummary(
+    events.filter((event) => event.code === 'live.inventory'),
+    options.delayEvery === undefined ? undefined : holdingStartsAt,
+  );
+  report.popupCaptures = popupCaptures;
   report.popupFacts = sessionFacts.facts;
   report.console = consoleCapture.verdict();
   report.consoleEvents = countBy(consoleCapture.events
@@ -353,11 +541,16 @@ try {
     .map((event) => `${event.source} ${event.kind} ${event.text.slice(0, 160)}`));
   report.injections = injections;
 } finally {
-  await consoleCapture?.close();
-  await context?.close();
-  await fs.rm(profileDirectory, { recursive: true, force: true });
+  try {
+    await popup?.close();
+  } finally {
+    await consoleCapture?.close();
+    await context?.close();
+    await fs.rm(profileDirectory, { recursive: true, force: true });
+  }
 }
 
 const output = `${JSON.stringify(report, null, 2)}\n`;
 if (options.report !== undefined) await fs.writeFile(options.report, output, 'utf8');
 console.log(output);
+if (popupCaptures.some((entry) => entry.error !== undefined)) process.exitCode = 1;

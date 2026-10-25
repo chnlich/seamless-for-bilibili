@@ -59,6 +59,7 @@ export const EVENT_CODES = Object.freeze([
   'live.stream.stitch',
   'live.playurl_observed',
   'live.flv.backup',
+  'live.inventory',
   'extension.started',
   'extension.boot_error',
   'extension.observer_error',
@@ -194,6 +195,16 @@ export const DATA_ALLOWLIST = Object.freeze({
     'reason',
     'offsetChangeMs',
   ]),
+  // live.inventory：inflight 里的 streamPath、ageMs、legs（slot、mirror、bytes、lastByteAgeMs）
+  // 是 inflight 的内部字段，不进这张顶层字段表。
+  liveInventory: Object.freeze([
+    'streamPath',
+    'delivered',
+    'inflight',
+    'playlistResponseAgeMs',
+    'playlistNewSegmentAgeMs',
+    'flvFrameAgeMs',
+  ]),
   extension: Object.freeze(['action', 'reason', 'status']),
   persist: Object.freeze(['status', 'batchSize', 'eventCount', 'message', 'code']),
   log: Object.freeze(['errorName', 'message', 'code']),
@@ -207,6 +218,7 @@ export function allowedDataFields(code) {
   if (code.startsWith('resource.')) return DATA_ALLOWLIST.resource;
   if (code.startsWith('bridge.')) return DATA_ALLOWLIST.bridge;
   if (code.startsWith('bank.')) return DATA_ALLOWLIST.bank;
+  if (code === 'live.inventory') return DATA_ALLOWLIST.liveInventory;
   if (code.startsWith('live.')) return DATA_ALLOWLIST.live;
   if (code.startsWith('extension.')) return DATA_ALLOWLIST.extension;
   if (code.startsWith('log.persist.')) return DATA_ALLOWLIST.persist;

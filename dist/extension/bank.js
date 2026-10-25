@@ -35,6 +35,13 @@
     reconnectDelayMs: 1e3,
     maxCalibrationAttempts: 10
   });
+  var LIVE_INVENTORY_CONFIG = Object.freeze({
+    stallSignMs: 2e3,
+    snapshotIntervalMs: 2e3,
+    tickMs: 250,
+    noticeMs: 3e3,
+    validMs: 3e3
+  });
 
   // src/diagnostics/catalog.js
   var MEDIA_EVENT_NAMES = Object.freeze([
@@ -93,6 +100,7 @@
     "live.stream.stitch",
     "live.playurl_observed",
     "live.flv.backup",
+    "live.inventory",
     "extension.started",
     "extension.boot_error",
     "extension.observer_error",
@@ -213,6 +221,16 @@
       "mirror",
       "reason",
       "offsetChangeMs"
+    ]),
+    // live.inventory：inflight 里的 streamPath、ageMs、legs（slot、mirror、bytes、lastByteAgeMs）
+    // 是 inflight 的内部字段，不进这张顶层字段表。
+    liveInventory: Object.freeze([
+      "streamPath",
+      "delivered",
+      "inflight",
+      "playlistResponseAgeMs",
+      "playlistNewSegmentAgeMs",
+      "flvFrameAgeMs"
     ]),
     extension: Object.freeze(["action", "reason", "status"]),
     persist: Object.freeze(["status", "batchSize", "eventCount", "message", "code"]),
@@ -780,6 +798,18 @@
     if (!/^[0-9a-fA-F]+$/.test(text)) throw new Error(`播放列表 ${label} 不是十六进制: ${text}`);
     return Number.parseInt(text, 16);
   }
+  function segmentNameOf(line) {
+    return line.split("?", 1)[0].split("/").at(-1);
+  }
+  function playlistSegmentNames(text) {
+    const names = [];
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (line.length === 0 || line.startsWith("#")) continue;
+      names.push(segmentNameOf(line));
+    }
+    return names;
+  }
   function parseBiliPlaylist(text) {
     const lines = text.split(/\r?\n/);
     let mediaSequence;
@@ -821,7 +851,7 @@
       }
       if (line.startsWith("#")) continue;
       if (mediaSequence === void 0) throw new Error("播放列表分片出现在 EXT-X-MEDIA-SEQUENCE 之前");
-      const name = line.split("?", 1)[0].split("/").at(-1);
+      const name = segmentNameOf(line);
       if (pendingAux !== void 0) {
         entries.push({ name, msn: mediaSequence + index, duration: pendingDuration, ...pendingAux });
       }
@@ -2019,6 +2049,7 @@
       this.reconnectTimer = void 0;
       this.url = void 0;
       this.lastHeaders = void 0;
+      this.lastVideoFrameAt = void 0;
     }
     get mirror() {
       return this.url === void 0 ? void 0 : new URL(this.url).hostname;
@@ -2116,6 +2147,7 @@
     }
     noteFrames(connection, frames) {
       if (frames.length === 0) return;
+      if (frames.some((frame) => frame.kind === "video")) this.lastVideoFrameAt = this.now();
       const firstFrames = connection.firstTs === void 0;
       if (firstFrames) connection.firstTs = frames[0].ts;
       this.rebuilder.appendFrames(frames);
@@ -2254,6 +2286,124 @@
       if (result.status === "verified") this.settle(request, { bytes: result.bytes });
       else if (result.status === "mismatch") this.settle(request, void 0, new FlvRebuildFailure("crc_mismatch", result.bytes));
       else this.settle(request, void 0, new FlvRebuildFailure("frames_missing"));
+    }
+  };
+
+  // src/bank/live-inventory.js
+  var MAX_TRACKED_STREAMS = 8;
+  var MAX_SEEN_SEGMENT_NAMES = 512;
+  function ageSince(at, since) {
+    return since === void 0 ? null : at - since;
+  }
+  var LiveInventory = class {
+    constructor({ now, timers, emit, isEnabled, flvLastFrameAt }) {
+      this.now = now;
+      this.timers = timers;
+      this.emit = emit;
+      this.isEnabled = isEnabled;
+      this.flvLastFrameAt = flvLastFrameAt;
+      this.requests = /* @__PURE__ */ new Set();
+      this.streams = /* @__PURE__ */ new Map();
+      this.currentStreamPath = void 0;
+      this.timer = void 0;
+      this.sinceAt = void 0;
+      this.episodeActive = false;
+      this.lastSnapshotAt = void 0;
+    }
+    arm() {
+      if (this.timer !== void 0) return;
+      this.sinceAt = this.now();
+      this.timer = this.timers.setInterval(() => this.tick(), LIVE_INVENTORY_CONFIG.tickMs);
+    }
+    // legs 在每次写快照时现取：返回仍在下载的腿 [{ slot, mirror, bytes, lastByteAt }]。
+    requestStarted({ streamPath, legs }) {
+      this.arm();
+      const request = { streamPath, startedAt: this.now(), legs };
+      this.requests.add(request);
+      this.currentStreamPath = streamPath;
+      return request;
+    }
+    noteEnded(request) {
+      this.requests.delete(request);
+      this.closeSettledEpisode(this.now());
+    }
+    noteDelivered(request) {
+      const at = this.now();
+      this.requests.delete(request);
+      this.sinceAt = at;
+      this.closeSettledEpisode(at);
+    }
+    closeSettledEpisode(at) {
+      if (!this.episodeActive || this.stallSignHolds(at)) return;
+      this.episodeActive = false;
+      this.emit(this.snapshot(at, true));
+    }
+    // 一份播放列表响应：名字没见过的分片算新分片。
+    notePlaylist(streamPath, segmentNames) {
+      this.arm();
+      const at = this.now();
+      let stream = this.streams.get(streamPath);
+      if (stream === void 0) {
+        stream = { responseAt: at, newSegmentAt: void 0, seenNames: /* @__PURE__ */ new Set() };
+        this.streams.set(streamPath, stream);
+        while (this.streams.size > MAX_TRACKED_STREAMS) this.streams.delete(this.streams.keys().next().value);
+      }
+      stream.responseAt = at;
+      for (const name of segmentNames) {
+        if (stream.seenNames.has(name)) continue;
+        stream.seenNames.add(name);
+        stream.newSegmentAt = at;
+      }
+      while (stream.seenNames.size > MAX_SEEN_SEGMENT_NAMES) {
+        stream.seenNames.delete(stream.seenNames.values().next().value);
+      }
+      if (this.currentStreamPath === void 0) this.currentStreamPath = streamPath;
+    }
+    stallSignHolds(at) {
+      if (at - this.sinceAt >= LIVE_INVENTORY_CONFIG.stallSignMs) return true;
+      for (const request of this.requests) {
+        if (at - request.startedAt >= LIVE_INVENTORY_CONFIG.stallSignMs) return true;
+      }
+      return false;
+    }
+    // 接管关闭期间不写快照，重新开启后也不把关闭的时间算作没有交付。
+    tick() {
+      const at = this.now();
+      if (!this.isEnabled()) {
+        this.sinceAt = at;
+        this.episodeActive = false;
+        return;
+      }
+      if (!this.stallSignHolds(at)) return;
+      if (this.episodeActive && at - this.lastSnapshotAt < LIVE_INVENTORY_CONFIG.snapshotIntervalMs) return;
+      this.episodeActive = true;
+      this.lastSnapshotAt = at;
+      this.emit(this.snapshot(at, false));
+    }
+    snapshot(at, delivered) {
+      const streamPath = this.currentStreamPath;
+      const stream = this.streams.get(streamPath);
+      return {
+        streamPath,
+        delivered,
+        inflight: [...this.requests].map((request) => ({
+          streamPath: request.streamPath,
+          ageMs: at - request.startedAt,
+          legs: request.legs().map((leg) => ({
+            slot: leg.slot,
+            mirror: leg.mirror,
+            bytes: leg.bytes,
+            lastByteAgeMs: ageSince(at, leg.lastByteAt)
+          }))
+        })),
+        playlistResponseAgeMs: ageSince(at, stream?.responseAt),
+        playlistNewSegmentAgeMs: ageSince(at, stream?.newSegmentAt),
+        flvFrameAgeMs: ageSince(at, this.flvLastFrameAt(streamPath))
+      };
+    }
+    destroy() {
+      if (this.timer !== void 0) this.timers.clearInterval(this.timer);
+      this.timer = void 0;
     }
   };
 
@@ -2943,6 +3093,16 @@
       this.livePlaylists = /* @__PURE__ */ new Map();
       this.liveFlvBackup = void 0;
       this.liveFlvUnavailable = /* @__PURE__ */ new Map();
+      this.liveInventory = new LiveInventory({
+        now: this.now,
+        timers: {
+          setInterval: (callback, ms) => this.windowObject.setInterval(callback, ms),
+          clearInterval: (timer) => this.windowObject.clearInterval(timer)
+        },
+        emit: (payload) => this.emitDiagnostic("live.inventory", payload),
+        isEnabled: () => this.isEnabled(),
+        flvLastFrameAt: (streamPath) => this.liveFlvBackup?.hlsStreamPath === streamPath ? this.liveFlvBackup.lastVideoFrameAt : void 0
+      });
       this.addressBook = /* @__PURE__ */ new Map();
       this.lastInventoryPayload = void 0;
       this.lastInventoryPublishedAt = void 0;
@@ -3119,6 +3279,7 @@
     }
     observeLivePlaylistText(url, text) {
       const streamPath = hlsStreamPathOf(new URL(url).pathname);
+      this.liveInventory.notePlaylist(streamPath, playlistSegmentNames(text));
       const playlist = parseBiliPlaylist(text);
       let state = this.livePlaylists.get(streamPath);
       if (state === void 0) {
@@ -3823,6 +3984,8 @@
         startedAt: void 0,
         ttfbAt: void 0,
         byteCount: 0,
+        lastByteAt: void 0,
+        ended: false,
         httpStatus: void 0,
         errorName: void 0,
         outcome: void 0,
@@ -3838,6 +4001,21 @@
         settled: false,
         request: backup.requestSegment(aux)
       } : void 0;
+      const inventoryRequest = this.liveInventory.requestStarted({
+        streamPath,
+        legs: () => {
+          const running = legs.filter((leg) => !leg.ended).map((leg) => ({
+            slot: leg.slot,
+            mirror: mirrorForUrl2(leg.url),
+            bytes: leg.byteCount,
+            lastByteAt: leg.lastByteAt
+          }));
+          if (rebuildLeg !== void 0 && !rebuildLeg.settled) {
+            running.push({ slot: rebuildLeg.slot, mirror: rebuildLeg.mirror, bytes: 0, lastByteAt: void 0 });
+          }
+          return running;
+        }
+      });
       let headersSettled = false;
       let resolveHeaders;
       let rejectHeaders;
@@ -3914,6 +4092,7 @@
           return;
         }
         finished = true;
+        this.liveInventory.noteDelivered(inventoryRequest);
         const rebuilt = leg === rebuildLeg;
         if (rebuilt) settleHeaders(backup.lastHeaders);
         emitSegmentChunk(leg, "fetched");
@@ -3944,6 +4123,7 @@
           return;
         }
         finished = true;
+        this.liveInventory.noteEnded(inventoryRequest);
         for (const leg of legs) clearSegmentLegStall(leg);
         emitFailedServe(error);
         if (!headersSettled) {
@@ -3957,6 +4137,7 @@
         if (cancelled || finished) return;
         cancelled = true;
         finished = true;
+        this.liveInventory.noteEnded(inventoryRequest);
         rebuildLeg?.request.cancel();
         for (const leg of legs) {
           clearSegmentLegStall(leg);
@@ -4171,6 +4352,7 @@
               if (leg.ttfbAt === void 0) leg.ttfbAt = performanceNow(this.windowObject);
               bodyChunks.push(read.value.slice());
               leg.byteCount += read.value.byteLength;
+              leg.lastByteAt = this.now();
               armStall();
             }
             if (leg.controller.signal.aborted) throw abortError2();
@@ -4195,6 +4377,7 @@
           contentType: headerValue(response.headers, "Content-Type") || void 0
         };
       } finally {
+        leg.ended = true;
         if (leg.stallTimer !== void 0) {
           this.windowObject.clearTimeout(leg.stallTimer);
           leg.stallTimer = void 0;
@@ -4470,6 +4653,7 @@
       }
       this.queue = [];
       this.closeLiveFlvBackup();
+      this.liveInventory.destroy();
       this.emitDiagnostic("bank.disabled", { reason });
     }
     clearLegStall(leg) {
@@ -4917,6 +5101,7 @@
       }
       this.queue = [];
       this.closeLiveFlvBackup();
+      this.liveInventory.destroy();
       this.releaseSession();
     }
   };

@@ -199,6 +199,53 @@ test('CDN summary scans one session through the composite index and reports an e
   });
 });
 
+test('CDN summary hands the newest live.inventory snapshot of the session to the download status', async () => {
+  const indexedDb = new FakeIndexedDB();
+  const live = session('session-live-inventory', '/21452505');
+  const other = session('session-live-other', '/22222222');
+  const snapshot = (sessionId, sequence, ageMs, delivered, ageOfWallTimeMs) => ({
+    ...event(sessionId, sequence, 'live.inventory', {
+      streamPath: '/live-bvc/1/stream/?sign=secret',
+      delivered,
+      inflight: delivered ? [] : [{
+        streamPath: '/live-bvc/1/stream/',
+        ageMs,
+        legs: [{ slot: 0, mirror: 'cdn-a.example', bytes: 0, lastByteAgeMs: null }],
+      }],
+      playlistResponseAgeMs: 300,
+      playlistNewSegmentAgeMs: null,
+      flvFrameAgeMs: null,
+    }),
+    wallTime: new Date(Date.now() - ageOfWallTimeMs).toISOString(),
+  });
+  await appendBatch(message(live, [
+    event(live.sessionId, 1),
+    snapshot(live.sessionId, 2, 2_000, false, 5_000),
+    snapshot(live.sessionId, 3, 4_000, false, 1_000),
+  ]), sender(1, '/21452505'), indexedDb);
+  await appendBatch(message(other, [
+    event(other.sessionId, 1),
+    snapshot(other.sessionId, 2, 9_000, false, 100),
+  ]), sender(2, '/22222222'), indexedDb);
+
+  const { downloadStatus } = await readLogs({ type: 'logs:cdn-summary', version: 1, sessionId: live.sessionId }, indexedDb);
+  const folded = downloadStatus.liveInventory;
+  assert.equal(folded.inflight[0].ageMs, 4_000);
+  assert.equal(folded.streamPath, '/live-bvc/1/stream/');
+  assert.deepEqual(folded.inflight[0].legs, [{ slot: 0, mirror: 'cdn-a.example', bytes: 0, lastByteAgeMs: null }]);
+  assert.equal(folded.playlistNewSegmentAgeMs, null);
+  assert.equal(folded.delivered, false);
+  assert.equal(folded.readAgeMs >= 1_000 && folded.readAgeMs < 4_000, true);
+
+  await appendBatch(message(live, [snapshot(live.sessionId, 4, 0, true, 10)]), sender(1, '/21452505'), indexedDb);
+  const closing = await readLogs({ type: 'logs:cdn-summary', version: 1, sessionId: live.sessionId }, indexedDb);
+  assert.equal(closing.downloadStatus.liveInventory.delivered, true);
+  assert.deepEqual(closing.downloadStatus.liveInventory.inflight, []);
+
+  const none = await readLogs({ type: 'logs:cdn-summary', version: 1, sessionId: 'session-without-snapshot' }, indexedDb);
+  assert.equal(none.downloadStatus.liveInventory, undefined);
+});
+
 function timedSession(sessionId, startedAtIso, pathname = '/100') {
   return {
     schemaVersion: 1,

@@ -2,6 +2,8 @@
 // 输入全部来自既有只读事实（readouts、status snapshot、logs:cdn-summary），
 // 这里不做任何网络请求，也不影响播放。
 
+import { LIVE_INVENTORY_CONFIG } from '../constants.js';
+
 // 活动标签页没有内容脚本可答时只有这一句提示。弹窗没有 tabs 权限、看不到标签页
 // 地址（按 url 过滤也恒为空），分不出「页面不是 Bilibili」和「Bilibili 页面在扩展
 // 安装或更新前就已打开」，所以这一句必须对两种情况都成立：给出未运行的事实、
@@ -73,6 +75,15 @@ export const DOWNLOAD_CARD_TEXT = Object.freeze({
   quietLive: '最近 5 秒没有收到数据',
   lineIdle: '空闲',
   lineLostRace: '另一条线路更快',
+  lineAborted: '播放器已取消',
+  lineFramesMissing: 'FLV 里没有这段画面',
+  flvAlsoQuiet: '，FLV 后备也没有新画面',
+});
+
+// 直播页结束的腿另有两种写法：播放器取消了请求；拼接腿在 FLV 帧窗口里等不到这段画面。
+const LIVE_LINE_ENDED = Object.freeze({
+  aborted: Object.freeze({ text: DOWNLOAD_CARD_TEXT.lineAborted, tone: 'idle' }),
+  frames_missing: Object.freeze({ text: DOWNLOAD_CARD_TEXT.lineFramesMissing, tone: 'warn' }),
 });
 
 // 大于等于 10 Mbps 取整数，以下留一位小数：低速时小数位说明「不是零」，
@@ -129,8 +140,80 @@ function lineRowsOf(status, { live, inventoryQuiet }) {
     if (line.lastResultInWindow === 'lost_race') {
       return { mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineLostRace, tone: 'idle' };
     }
+    const ended = live ? LIVE_LINE_ENDED[line.lastResultInWindow] : undefined;
+    if (ended !== undefined) return { mirror: line.mirror, ...ended };
     return { mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineIdle, tone: 'idle' };
   });
+}
+
+function wholeSeconds(milliseconds) {
+  return Math.floor(milliseconds / 1000);
+}
+
+// 已收字节：不足 1 KB 写字节，1 MB 以下写 KB，以上写一位小数的 MB（1 KB = 1024 字节）。
+export function bytesText(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// 直播在途快照（live.inventory）说出此刻在等什么。快照有效的条件：取数时刻距写出不满
+// validMs，且不是分片交付后的收尾快照。写出的秒数是快照里的年龄加上写出后经过的时间。
+// 从上往下取第一条成立的：
+// 1. 当前流有分片请求在途满 stallSignMs，各腿都是 0 字节；
+// 2. 同上，已收到部分字节；
+// 3. 当前流没有在途请求，播放列表仍在刷新（上一份响应不满 noticeMs），但新分片已
+//    noticeMs 以上没出现，FLV 连接也同样久没收到画面时后接一句；
+// 4. 当前流没有在途请求，播放列表已 noticeMs 以上没刷新。
+// 换档时新旧两条流的请求可能同时在途，播放器等的是当前流的那条，只看当前流。
+// 其余情况返回 undefined，卡片照旧按线路记录写。legs 是 1、2 行里在途各腿的线路行；
+// 3、4 行没有在途腿，线路一律写空闲。
+function liveWaitOf(snapshot, nowMs) {
+  if (snapshot === undefined || snapshot.delivered) return undefined;
+  if (snapshot.readAgeMs >= LIVE_INVENTORY_CONFIG.validMs) return undefined;
+  const elapsedMs = nowMs - snapshot.wallTimeMs;
+  const waiting = snapshot.inflight.filter((request) => request.streamPath === snapshot.streamPath);
+  if (waiting.length > 0) {
+    const oldest = waiting.reduce((picked, request) => (request.ageMs > picked.ageMs ? request : picked));
+    const waitedMs = oldest.ageMs + elapsedMs;
+    if (waitedMs < LIVE_INVENTORY_CONFIG.stallSignMs) return undefined;
+    const seconds = wholeSeconds(waitedMs);
+    const receivedBytes = Math.max(0, ...oldest.legs.map((leg) => leg.bytes));
+    return {
+      headline: receivedBytes === 0
+        ? `在等一个分片，已 ${seconds} 秒没收到数据`
+        : `分片下载中，已 ${seconds} 秒，收到 ${bytesText(receivedBytes)}`,
+      legs: oldest.legs.map((leg) => (leg.bytes > 0
+        ? { mirror: leg.mirror, text: `下载中 · 已收到 ${bytesText(leg.bytes)}`, tone: 'ok' }
+        : { mirror: leg.mirror, text: `等待中 ${seconds} 秒`, tone: 'warn' })),
+    };
+  }
+  const shown = (ageMs) => (ageMs === null ? null : ageMs + elapsedMs);
+  const responseMs = shown(snapshot.playlistResponseAgeMs);
+  const newSegmentMs = shown(snapshot.playlistNewSegmentAgeMs);
+  if (responseMs === null) return undefined;
+  if (responseMs >= LIVE_INVENTORY_CONFIG.noticeMs) {
+    return { headline: `播放器 ${wholeSeconds(responseMs)} 秒没有请求数据`, legs: undefined };
+  }
+  if (newSegmentMs !== null && newSegmentMs >= LIVE_INVENTORY_CONFIG.noticeMs) {
+    const flvMs = shown(snapshot.flvFrameAgeMs);
+    const flvQuiet = flvMs !== null && flvMs >= LIVE_INVENTORY_CONFIG.noticeMs;
+    return {
+      headline: `播放列表 ${wholeSeconds(newSegmentMs)} 秒没有新分片${flvQuiet ? DOWNLOAD_CARD_TEXT.flvAlsoQuiet : ''}`,
+      legs: undefined,
+    };
+  }
+  return undefined;
+}
+
+// 在途快照说话时的线路行：有在途腿的线路按腿写，其余线路沿用结束记录的写法。
+function waitLineRows(status, wait) {
+  if (wait.legs === undefined) {
+    return status.lines.map((line) => ({ mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineIdle, tone: 'idle' }));
+  }
+  const rows = new Map(lineRowsOf(status, { live: true, inventoryQuiet: false }).map((row) => [row.mirror, row]));
+  for (const leg of wait.legs) rows.set(leg.mirror, leg);
+  return [...rows.values()].sort((left, right) => String(left.mirror).localeCompare(String(right.mirror)));
 }
 
 // 播放位置之后至少有这么多秒连续数据，就说解码器没跟上。网络供不上时缓冲在播放
@@ -187,11 +270,15 @@ function videoSubline({ status, missingData, lag, readouts }) {
 
 // 组装一张卡片：{ message }（读取中、读取失败、没有 session）或
 // { headline, subline, lines }。直播页没有第二行，也没有等待行与暂停行：
-// 直播流没有固定的时间位置，下载也不按设计暂停。
-export function downloadLinesView({ response, error, inFlight, live, readouts, vodEnabled, liveEnabled }) {
+// 直播流没有固定的时间位置，下载也不按设计暂停。直播页有有效的在途快照且它说得出
+// 在等什么时，第一行与线路行按快照写（见 liveWaitOf），哪怕还没有任何结束的腿。
+// nowMs 是渲染时刻，只用于把快照里的年龄加上写出后经过的时间。
+export function downloadLinesView({ response, error, inFlight, live, readouts, vodEnabled, liveEnabled, nowMs }) {
   if (error !== undefined) return { message: DOWNLOAD_CARD_TEXT.readFailed };
   if (response === undefined) return { message: inFlight === true ? DOWNLOAD_CARD_TEXT.loading : DOWNLOAD_CARD_TEXT.noSession };
   const status = response.downloadStatus;
+  const wait = live === true && liveEnabled !== false ? liveWaitOf(status.liveInventory, nowMs) : undefined;
+  if (wait !== undefined) return { headline: wait.headline, subline: undefined, lines: waitLineRows(status, wait) };
   if (!status.hasRecords) {
     const switchOn = live === true ? liveEnabled !== false : vodEnabled !== false;
     const headline = switchOn

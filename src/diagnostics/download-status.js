@@ -1,6 +1,7 @@
 // 把一次播放会话的下载记录折算成弹窗「下载线路」卡片要读的下载状态。
 // 纯函数：输入是 session 的 bank.fetch.chunk 记录序列（按存储顺序，含 wallTime）、
-// 最新一条 bank.inventory 事件（可缺）与查询时刻；worker 在 logs:cdn-summary 里调用
+// 最新一条 bank.inventory 事件（可缺）、最新一条 live.inventory 事件（可缺）与查询时刻；
+// worker 在 logs:cdn-summary 里调用
 // （src/diagnostics/worker.js 的 readCdnSummary），弹窗只把结果拼成人话。
 // 速度口径：每条记录的字节平均摊在它的耗时里（结束时刻 wallTime 往前推 durationMs），
 // 累加落在最近 SPEED_WINDOW_MS 的部分，乘 8 再除以窗口秒数得比特每秒。
@@ -61,7 +62,29 @@ function failedRoundsForResource(resource, chunkEvents) {
   return perMirror.size === 0 ? 0 : Math.max(...perMirror.values());
 }
 
-export function deriveDownloadStatus({ chunkEvents, latestInventory, nowMs }) {
+// 直播在途快照：三个年龄字段下载层没有这项事实时是 null，其余非有限值也折成 null。
+// readAgeMs 是取数时刻距快照写出的毫秒数：弹窗按它判断快照是否还有效（与线路速度窗口
+// 一样按取数时刻算，弹窗两次取数之间不会让有效的快照过期）；wallTimeMs 供弹窗把年龄
+// 加上写出后经过的时间。
+function foldLiveInventory(event, nowMs) {
+  if (event === undefined) return undefined;
+  const wallTimeMs = Date.parse(event.wallTime);
+  if (!Number.isFinite(wallTimeMs)) throw new Error(`live.inventory 记录缺少有效 wallTime: ${JSON.stringify(event.wallTime)}`);
+  const data = event.data;
+  const ageOrNull = (age) => (Number.isFinite(age) ? age : null);
+  return {
+    wallTimeMs,
+    readAgeMs: nowMs - wallTimeMs,
+    delivered: data.delivered === true,
+    streamPath: data.streamPath,
+    inflight: Array.isArray(data.inflight) ? data.inflight : [],
+    playlistResponseAgeMs: ageOrNull(data.playlistResponseAgeMs),
+    playlistNewSegmentAgeMs: ageOrNull(data.playlistNewSegmentAgeMs),
+    flvFrameAgeMs: ageOrNull(data.flvFrameAgeMs),
+  };
+}
+
+export function deriveDownloadStatus({ chunkEvents, latestInventory, latestLiveInventory, nowMs }) {
   const lines = new Map();
   for (const event of chunkEvents) {
     const data = event.data;
@@ -119,5 +142,6 @@ export function deriveDownloadStatus({ chunkEvents, latestInventory, nowMs }) {
     totalBitsPerSecond: lineRows.reduce((total, line) => total + line.bitsPerSecond, 0),
     lines: lineRows,
     inventory,
+    liveInventory: foldLiveInventory(latestLiveInventory, nowMs),
   };
 }

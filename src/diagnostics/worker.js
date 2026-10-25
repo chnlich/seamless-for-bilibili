@@ -391,6 +391,7 @@ async function readCdnSummary(message, indexedDbObject) {
     );
     const events = [];
     let latestInventory;
+    let latestLiveInventory;
     let maxEventId = 0;
     request.onerror = () => reject(request.error || new Error('读取 CDN summary 事件失败'));
     request.onsuccess = () => {
@@ -398,7 +399,12 @@ async function readCdnSummary(message, indexedDbObject) {
       if (cursor === null) {
         const summary = aggregateCdnEvents(events);
         // 弹窗的「下载线路」卡片读 downloadStatus，日志页 CDN 面板照旧只读 summary。
-        const downloadStatus = deriveDownloadStatus({ chunkEvents: events, latestInventory, nowMs: Date.now() });
+        const downloadStatus = deriveDownloadStatus({
+          chunkEvents: events,
+          latestInventory,
+          latestLiveInventory,
+          nowMs: Date.now(),
+        });
         resolve({ maxEventId, sampleCount: events.length, summary, downloadStatus });
         return;
       }
@@ -407,6 +413,7 @@ async function readCdnSummary(message, indexedDbObject) {
       if (Number.isInteger(eventId) && eventId > maxEventId) maxEventId = eventId;
       if (event.code === 'bank.fetch.chunk') events.push(event);
       if (event.code === 'bank.inventory') latestInventory = event;
+      if (event.code === 'live.inventory') latestLiveInventory = event;
       cursor.continue();
     };
     transaction.oncomplete = () => database.close();

@@ -34,7 +34,8 @@ import {
   writeMemoryChunk,
 } from './storage.js';
 import { FlvRebuildFailure, LiveFlvBackup } from './flv-backup.js';
-import { parseBiliPlaylist } from './flv-rebuild.js';
+import { parseBiliPlaylist, playlistSegmentNames } from './flv-rebuild.js';
+import { LiveInventory } from './live-inventory.js';
 import {
   LiveStreamStitcher,
   classifyLiveRequest,
@@ -197,6 +198,19 @@ export class SegmentBank {
     // 当前 fMP4 流的 FLV 后备（一页一个播放器，同时只有一条）；unavailable 记已报告过的原因。
     this.liveFlvBackup = undefined;
     this.liveFlvUnavailable = new Map();
+    // 直播在途快照：只观察播放器在等什么，卡顿迹象成立时才写 live.inventory。
+    this.liveInventory = new LiveInventory({
+      now: this.now,
+      timers: {
+        setInterval: (callback, ms) => this.windowObject.setInterval(callback, ms),
+        clearInterval: (timer) => this.windowObject.clearInterval(timer),
+      },
+      emit: (payload) => this.emitDiagnostic('live.inventory', payload),
+      isEnabled: () => this.isEnabled(),
+      flvLastFrameAt: (streamPath) => (this.liveFlvBackup?.hlsStreamPath === streamPath
+        ? this.liveFlvBackup.lastVideoFrameAt
+        : undefined),
+    });
     this.addressBook = new Map();
     this.lastInventoryPayload = undefined;
     this.lastInventoryPublishedAt = undefined;
@@ -396,6 +410,7 @@ export class SegmentBank {
 
   observeLivePlaylistText(url, text) {
     const streamPath = hlsStreamPathOf(new URL(url).pathname);
+    this.liveInventory.notePlaylist(streamPath, playlistSegmentNames(text));
     const playlist = parseBiliPlaylist(text);
     let state = this.livePlaylists.get(streamPath);
     if (state === undefined) {
@@ -1128,6 +1143,8 @@ export class SegmentBank {
       startedAt: undefined,
       ttfbAt: undefined,
       byteCount: 0,
+      lastByteAt: undefined,
+      ended: false,
       httpStatus: undefined,
       errorName: undefined,
       outcome: undefined,
@@ -1145,6 +1162,21 @@ export class SegmentBank {
         request: backup.requestSegment(aux),
       }
       : undefined;
+    const inventoryRequest = this.liveInventory.requestStarted({
+      streamPath,
+      legs: () => {
+        const running = legs.filter((leg) => !leg.ended).map((leg) => ({
+          slot: leg.slot,
+          mirror: mirrorForUrl(leg.url),
+          bytes: leg.byteCount,
+          lastByteAt: leg.lastByteAt,
+        }));
+        if (rebuildLeg !== undefined && !rebuildLeg.settled) {
+          running.push({ slot: rebuildLeg.slot, mirror: rebuildLeg.mirror, bytes: 0, lastByteAt: undefined });
+        }
+        return running;
+      },
+    });
     let headersSettled = false;
     let resolveHeaders;
     let rejectHeaders;
@@ -1222,6 +1254,7 @@ export class SegmentBank {
         return;
       }
       finished = true;
+      this.liveInventory.noteDelivered(inventoryRequest);
       const rebuilt = leg === rebuildLeg;
       // 拼接腿胜出时网络腿可能还没收到响应头：沿用最近一个网络分片的响应头。
       if (rebuilt) settleHeaders(backup.lastHeaders);
@@ -1254,6 +1287,7 @@ export class SegmentBank {
         return;
       }
       finished = true;
+      this.liveInventory.noteEnded(inventoryRequest);
       for (const leg of legs) clearSegmentLegStall(leg);
       emitFailedServe(error);
       if (!headersSettled) {
@@ -1267,6 +1301,7 @@ export class SegmentBank {
       if (cancelled || finished) return;
       cancelled = true;
       finished = true;
+      this.liveInventory.noteEnded(inventoryRequest);
       rebuildLeg?.request.cancel();
       for (const leg of legs) {
         clearSegmentLegStall(leg);
@@ -1487,6 +1522,7 @@ export class SegmentBank {
             if (leg.ttfbAt === undefined) leg.ttfbAt = performanceNow(this.windowObject);
             bodyChunks.push(read.value.slice());
             leg.byteCount += read.value.byteLength;
+            leg.lastByteAt = this.now();
             armStall();
           }
           if (leg.controller.signal.aborted) throw abortError();
@@ -1511,6 +1547,7 @@ export class SegmentBank {
         contentType: headerValue(response.headers, 'Content-Type') || undefined,
       };
     } finally {
+      leg.ended = true;
       if (leg.stallTimer !== undefined) {
         this.windowObject.clearTimeout(leg.stallTimer);
         leg.stallTimer = undefined;
@@ -1799,6 +1836,7 @@ export class SegmentBank {
     }
     this.queue = [];
     this.closeLiveFlvBackup();
+    this.liveInventory.destroy();
     this.emitDiagnostic('bank.disabled', { reason });
   }
 
@@ -2279,6 +2317,7 @@ export class SegmentBank {
     }
     this.queue = [];
     this.closeLiveFlvBackup();
+    this.liveInventory.destroy();
     this.releaseSession();
   }
 }

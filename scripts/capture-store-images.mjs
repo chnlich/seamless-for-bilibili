@@ -71,6 +71,12 @@ const WAITING_HEADLINE_PREFIX = '正在等';
 // stalled either, so the prefix rejects it too.
 const DECODER_STALL_HEADLINE_PREFIX = '播放器解码没跟上';
 
+// The live card names what a stalled stream waits for (liveWaitOf in src/extension/popup-view.js):
+// `在等一个分片，已 <N> 秒没收到数据`, `分片下载中，已 <N> 秒，收到 <bytes>` (a segment request
+// waiting 2 s or longer), `播放列表 <N> 秒没有新分片` and `播放器 <N> 秒没有请求数据` (a playlist or
+// a player gone quiet). A store shot must not show any of them.
+const LIVE_WAIT_HEADLINE_PATTERN = /^(在等一个分片|分片下载中|播放列表 \d+ 秒没有新分片|播放器 \d+ 秒没有请求数据)/;
+
 // Headless Chrome's virtual screen defaults to 800x600 device px, which
 // --force-device-scale-factor=2 turns into 400x300 CSS px: measured on Chrome 154, the popup
 // anchored at y 76 was clamped to a 220 CSS px viewport. --screen-info raises the virtual
@@ -411,6 +417,9 @@ function assertRealReadout(label, readout, { racing }) {
   }
   if (headline.startsWith(DECODER_STALL_HEADLINE_PREFIX)) {
     throw new Error(`${label}: the player's decoder is not keeping up: ${JSON.stringify(headline)}`);
+  }
+  if (LIVE_WAIT_HEADLINE_PATTERN.test(headline)) {
+    throw new Error(`${label}: the live stream is stalled: ${JSON.stringify(headline)}`);
   }
   if (headline === DOWNLOAD_CARD_TEXT.noRecords) {
     throw new Error(`${label}: the download card has no records yet: ${JSON.stringify(headline)}`);

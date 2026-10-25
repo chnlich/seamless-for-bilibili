@@ -57,8 +57,24 @@ function hexValue(text, label) {
   return Number.parseInt(text, 16);
 }
 
+// 分片名：URI 行去掉 query 的最后一段。
+function segmentNameOf(line) {
+  return line.split('?', 1)[0].split('/').at(-1);
+}
+
+// 播放列表里每个分片的名字，不论有没有 EXT-BILI-AUX。
+export function playlistSegmentNames(text) {
+  const names = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith('#')) continue;
+    names.push(segmentNameOf(line));
+  }
+  return names;
+}
+
 // 播放列表：#EXT-BILI-AUX:<首帧显示时间毫秒>|<K 或 N>|<字节数>|<CRC32>，均为十六进制，
-// CRC32 不补前导零。分片名取 URI 行去掉 query 的最后一段。
+// CRC32 不补前导零。
 export function parseBiliPlaylist(text) {
   const lines = text.split(/\r?\n/);
   let mediaSequence;
@@ -100,7 +116,7 @@ export function parseBiliPlaylist(text) {
     }
     if (line.startsWith('#')) continue;
     if (mediaSequence === undefined) throw new Error('播放列表分片出现在 EXT-X-MEDIA-SEQUENCE 之前');
-    const name = line.split('?', 1)[0].split('/').at(-1);
+    const name = segmentNameOf(line);
     if (pendingAux !== undefined) {
       entries.push({ name, msn: mediaSequence + index, duration: pendingDuration, ...pendingAux });
     }

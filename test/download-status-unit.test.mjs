@@ -208,3 +208,59 @@ test('with no inventory snapshot the inventory field stays absent', () => {
   });
   assert.equal(status.inventory, undefined);
 });
+
+function liveInventoryEvent({ at, data }) {
+  return { code: 'live.inventory', wallTime: new Date(at).toISOString(), data };
+}
+
+test('the latest live inventory snapshot folds in with its age at read time and null ages kept', () => {
+  const status = deriveDownloadStatus({
+    chunkEvents: [],
+    latestLiveInventory: liveInventoryEvent({
+      at: NOW - 1_200,
+      data: {
+        streamPath: '/live-bvc/1/stream/',
+        delivered: false,
+        inflight: [{
+          streamPath: '/live-bvc/1/stream/',
+          ageMs: 4_000,
+          legs: [{ slot: 0, mirror: COS, bytes: 0, lastByteAgeMs: null }],
+        }],
+        playlistResponseAgeMs: 900,
+        playlistNewSegmentAgeMs: '未提供',
+        flvFrameAgeMs: null,
+      },
+    }),
+    nowMs: NOW,
+  });
+  assert.deepEqual(status.liveInventory, {
+    wallTimeMs: NOW - 1_200,
+    readAgeMs: 1_200,
+    delivered: false,
+    streamPath: '/live-bvc/1/stream/',
+    inflight: [{
+      streamPath: '/live-bvc/1/stream/',
+      ageMs: 4_000,
+      legs: [{ slot: 0, mirror: COS, bytes: 0, lastByteAgeMs: null }],
+    }],
+    playlistResponseAgeMs: 900,
+    playlistNewSegmentAgeMs: null,
+    flvFrameAgeMs: null,
+  });
+  const closing = deriveDownloadStatus({
+    chunkEvents: [],
+    latestLiveInventory: liveInventoryEvent({ at: NOW - 10, data: { streamPath: '/s/', delivered: true, inflight: [] } }),
+    nowMs: NOW,
+  });
+  assert.equal(closing.liveInventory.delivered, true);
+  assert.deepEqual(closing.liveInventory.inflight, []);
+});
+
+test('with no live inventory snapshot the field stays absent and a snapshot without a valid wallTime fails loudly', () => {
+  assert.equal(deriveDownloadStatus({ chunkEvents: [], nowMs: NOW }).liveInventory, undefined);
+  assert.throws(() => deriveDownloadStatus({
+    chunkEvents: [],
+    latestLiveInventory: { code: 'live.inventory', wallTime: 'not a time', data: { delivered: false, inflight: [] } },
+    nowMs: NOW,
+  }), /live\.inventory/);
+});
