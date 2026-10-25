@@ -42,7 +42,7 @@
   |---|---|
   | `storage` | 仅在 chrome.storage.local 保存两个用户开关（视频增强、直播增强各自启用/关闭），用于记住用户在扩展弹窗中的选择；不保存任何其他数据。 |
   | `unlimitedStorage` | 开发诊断日志保存在扩展自身 origin 的 IndexedDB 中，只保留最近 3 天（72 小时），超期记录自动删除；窗口内的日志只追加、不设条数或容量上限（见仓库 GOAL.md）。实测视频页每打开 1 小时约产生 7 MB，3 天窗口的占用仍可能明显大于浏览器默认配额，unlimitedStorage 移除该配额，使窗口内的日志能连续写入而不因配额写入失败。日志只在本机，用户可在日志页查看或导出，卸载扩展即全部删除。 |
-  | 内容脚本 `https://www.bilibili.com/*` | 下载接管只在视频路由（/video/* 与 /list/watchlater*）启动：拦截播放器的媒体分片请求，由内存缓存应答或代为向 Bilibili 提供的镜像地址取回，并向播放器请求 120 秒缓冲。匹配整个站点是因为扩展在页面内跟随路由变化，脚本须在页面开始时（document_start）就位；在其他路由上不拦截任何请求，只在本地诊断日志记录一条页面路径。 |
+  | 内容脚本 `https://www.bilibili.com/*` | 下载接管只在视频路由（/video/*、/list/watchlater、/list/watchlater/*，以及带语言前缀的 `/<language>/video/*`、`/<language>/list/watchlater`、`/<language>/list/watchlater/*`，如 /zh-Hans/video/*、/en/video/*）启动：拦截播放器的媒体分片请求，由内存缓存应答或代为向 Bilibili 提供的镜像地址取回，并向播放器请求 120 秒缓冲。媒体识别依据是主机以 .bilivideo.com 或 .akamaized.net 结尾，或请求路径列在 Bilibili 播放信息的音视频地址中，因此也覆盖播放信息给出的 PCDN 节点。匹配整个站点是因为扩展在页面内跟随路由变化，脚本须在页面开始时（document_start）就位；在其他路由上不拦截任何请求，只在本地诊断日志记录一条页面路径。 |
   | 内容脚本 `https://live.bilibili.com/*` | 在直播页接管播放器的直播媒体下载：FLV 直播流与 HLS 直播分片（.m4s 与 .ts，.m3u8 播放列表照常放行），对 Bilibili 给出的同集群主备两路地址比对后并发竞速（不预取、不设缓冲目标）。fMP4 直播间（.m4s 分片）另有 FLV 后备第三路：从 Bilibili 自己的播放信息里读出同一直播间的同流名、同编码 FLV 地址，扩展自己开一条 FLV 连接，把每个分片从 FLV 帧逐字节拼出，字节数与 CRC32 都等于播放列表给出的值才参与竞速，对不上的丢弃、从不交给播放器。 |
   | MAIN world 注入（`world: "MAIN"`） | 三个脚本必须运行在页面自身的 JavaScript 环境中：bank.js 包装页面的 fetch/XMLHttpRequest 才能接住播放器发出的媒体请求；source-buffer-shim.js 观察页面的 MediaSource/SourceBuffer 追加与移除，用于本地诊断；main-bridge.js 调用 Bilibili 播放器对象自带的缓冲设置（setStableBufferTime）。MAIN world 不提供 chrome.* API；读取偏好与写日志由 ISOLATED world 的 controller.js 完成。 |
 
@@ -58,7 +58,7 @@
   | 网站内容 / Website content（“例如文字、图片、声音、视频或超链接”） | ✅ 勾选 | 媒体分片（音视频字节）在内存中中转以供给播放器；不落盘、不入日志、不外发。 |
   | 个人身份信息 / 健康 / 财务与支付 / 身份验证信息 / 个人通讯 / 位置 | ⬜ 不勾选 | 日志明确不保存 Cookie、账号、标题、页面文字、弹幕/聊天、API body、音视频字节、帧或截图；不读取位置或 IP；不接触表单与密码。 |
 
-- **数据使用的合规认证（certifications）**：后台的三项认证全部勾选（商店公开页对应显示为：不出售给第三方（已批准用途除外）；不用于或转移至与核心功能无关的用途；不用于信用评估或借贷）。理由：扩展没有任何外部端点，数据根本不离开设备；唯一发出的网络请求是代替播放器向 Bilibili 自身媒体地址发出的媒体请求。如后台项数不同，逐项按同一理由勾选。
+- **数据使用的合规认证（certifications）**：后台的三项认证全部勾选（商店公开页对应显示为：不出售给第三方（已批准用途除外）；不用于或转移至与核心功能无关的用途；不用于信用评估或借贷）。理由：扩展没有外部日志端点，数据不上传；网络请求只用于媒体下载，去向是播放器请求的媒体地址和 Bilibili 播放信息提供的镜像与 FLV 后备地址（包括其列出的 PCDN 节点）。如后台项数不同，逐项按同一理由勾选。
 - **隐私政策网址**：https://github.com/chnlich/seamless-for-bilibili/blob/main/PRIVACY.md
   （仓库为公开仓库；提交前 PRIVACY.md 的当前版本必须已在 main 上，该 URL 是用户可见的。）
 - **Limited Use 声明**：不适用。该要求针对“从 Google API 收到的数据”，本扩展不使用任何 Google API，PRIVACY.md 中不做此声明，以免暗示存在 Google API 数据。

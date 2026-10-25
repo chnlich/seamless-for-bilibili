@@ -2,6 +2,12 @@
 
 ## 中文
 
+### 1.2.1 · [release/1.2.1](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.1)
+
+- 视频页现在也接管 Bilibili 播放信息列出的 PCDN 等 CDN 地址，并可与路径不同的镜像地址竞速，避免这些请求绕过下载增强。
+- 带语言前缀的视频页（如 `/zh-Hans/video/…`、`/en/video/…`）现在也启用下载接管与 120 秒缓冲增强。
+- 修复直播 FLV 后备在流中途丢帧后持续无法拼出分片的问题：用网络送达的分片重新校准，成功后恢复后续分片的拼接；交付前仍核对字节数与 CRC32。
+
 ### 1.2.0 · [release/1.2.0](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.0)
 
 - 弹窗「下载线路」卡片改报此刻的下载状态：合计速度与每条线路（镜像服务器）的速度、视频提前下载到哪里、播放器卡住时在等哪里的数据和已重试了几轮、按设计暂停下载时直说暂停。原来累计的「有错误」「有停滞」和连接时间从弹窗去掉，「FLV 拼接 · 已补上 N 个分片」一行也一起去掉（FLV 后备本身照常参与竞速），历史仍留在日志页的 CDN 竞速面板。
@@ -16,6 +22,12 @@
 - 首次在 Chrome Web Store 发布。
 
 ## English
+
+### 1.2.1 · [release/1.2.1](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.1)
+
+- Video pages now take over PCDN and other CDN addresses listed in Bilibili's playback info, including races between addresses with different paths, so these requests receive the download enhancement too.
+- Video pages with a language prefix (such as `/zh-Hans/video/…` and `/en/video/…`) now receive download takeover and the 120-second buffer enhancement.
+- Fixed the live FLV backup remaining unable to rebuild segments after frames drop mid-stream: a network-delivered segment recalibrates the rebuild, and successful calibration restores later rebuilds; byte length and CRC32 are still checked before delivery.
 
 ### 1.2.0 · [release/1.2.0](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.0)
 

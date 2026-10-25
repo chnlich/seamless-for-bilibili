@@ -1,4 +1,4 @@
-export const VERSION = '1.2.0';
+export const VERSION = '1.2.1';
 
 export const EXTENSION_MANIFEST = Object.freeze({
   manifestVersion: 3,
