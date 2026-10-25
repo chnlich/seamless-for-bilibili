@@ -193,8 +193,10 @@
       return { mirror: line.mirror, text: DOWNLOAD_CARD_TEXT.lineIdle, tone: "idle" };
     });
   }
-  function videoHeadline({ status, waitingNow, currentTime, lag }) {
-    if (waitingNow) {
+  var DECODER_STALL_FORWARD_SECONDS = 2;
+  function videoHeadline({ status, missingData, decoderStall, forwardSeconds, currentTime, lag }) {
+    if (decoderStall) return `播放器解码没跟上，缓冲里还有 ${Math.round(forwardSeconds)} 秒数据`;
+    if (missingData) {
       const rounds = Number.isSafeInteger(lag?.outstanding) && lag.outstanding > 0 && Number.isSafeInteger(lag.failedRounds) && lag.failedRounds >= 1 ? lag.failedRounds : 0;
       return `正在等 ${clockText(currentTime)} 处的数据` + (rounds >= 1 ? `，已重试 ${rounds} 轮` : "");
     }
@@ -205,8 +207,8 @@
     if (status.anyLineBytesInWindow) return `正在下载 · 合计 ${speedText(status.totalBitsPerSecond)}`;
     return DOWNLOAD_CARD_TEXT.quietVideo;
   }
-  function videoSubline({ status, waitingNow, lag, readouts }) {
-    if (waitingNow) return void 0;
+  function videoSubline({ status, missingData, lag, readouts }) {
+    if (missingData) return void 0;
     const candidates = playerResources(status.inventory?.resources);
     const duration = readouts?.duration;
     if (candidates.length === 0 || !Number.isFinite(duration)) return void 0;
@@ -233,10 +235,13 @@
       return { headline, subline: void 0, lines: lineRowsOf(status, { live: true, inventoryQuiet: false }) };
     }
     const waitingNow = readouts?.waiting === true && Number.isFinite(readouts?.currentTime);
+    const forwardSeconds = readouts?.forwardSeconds;
+    const decoderStall = waitingNow && Number.isFinite(forwardSeconds) && forwardSeconds >= DECODER_STALL_FORWARD_SECONDS;
+    const missingData = waitingNow && !decoderStall;
     const lag = lagResource(status.inventory?.resources);
     return {
-      headline: videoHeadline({ status, waitingNow, currentTime: readouts?.currentTime, lag }),
-      subline: videoSubline({ status, waitingNow, lag, readouts }),
+      headline: videoHeadline({ status, missingData, decoderStall, forwardSeconds, currentTime: readouts?.currentTime, lag }),
+      subline: videoSubline({ status, missingData, lag, readouts }),
       lines: lineRowsOf(status, { live: false, inventoryQuiet: status.inventory?.inflight === 0 && status.inventory?.queued === 0 })
     };
   }

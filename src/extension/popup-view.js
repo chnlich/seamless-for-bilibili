@@ -47,6 +47,9 @@ export function shortMirrorName(mirror) {
 // 每条线路一行。输入是 worker 折算好的下载状态（src/diagnostics/download-status.js
 // 的文件头写了速度、15 秒活动窗口与重试轮数的口径）、页面读数（readouts v4）
 // 与开关状态；这里只拼文字，不算记录。
+// 播放器没暂停却播不动时，页面读数只给出 readyState < 3（waiting），网络缺数据与
+// 解码器没跟上都会触发它（https://github.com/whatwg/html/issues/6359）。同一次读数
+// 里的前向缓冲秒数把两者分开：见下面的 DECODER_STALL_FORWARD_SECONDS。
 // 线路自身失败的结果到人话的映射；superseded、aborted、gave_up 是扩展自己放弃的
 // 请求，不算线路的失败。
 export const LINE_FAILURE_TEXTS = Object.freeze({
@@ -130,11 +133,21 @@ function lineRowsOf(status, { live, inventoryQuiet }) {
   });
 }
 
-// 第一行从上往下取第一条成立的：一个时刻只落在一行。等待行的轮数只在该轨还有
-// 播放器请求在等（outstanding > 0）且失败过至少一轮时出现：数据已在扩展手里、
-// 播放器因别的原因在等时，请求会立刻答完，不写轮数。
-function videoHeadline({ status, waitingNow, currentTime, lag }) {
-  if (waitingNow) {
+// 播放位置之后至少有这么多秒连续数据，就说解码器没跟上。网络供不上时缓冲在播放
+// 位置附近就断了，秒数接近 0；只要留下一两秒播放器就能接着解，此时停下只能是
+// 解码那一侧没按时交出下一帧。门槛小才能把解码卡顿从「在等数据」里分出来。
+export const DECODER_STALL_FORWARD_SECONDS = 2;
+
+// 第一行从上往下取第一条成立的：一个时刻只落在一行。播放器没暂停却播不动分两种：
+// 缓冲不够（网络供不上）写等待行，缓冲够（数据已在手里、解码器没跟上）写解码行。
+// 两种原因都让 Chromium 降 readyState 并发 waiting 事件
+// （https://github.com/whatwg/html/issues/6359），所以这里按同一次读数里的
+// forwardSeconds 分开。等待行的轮数只在该轨还有播放器请求在等（outstanding > 0）
+// 且失败过至少一轮时出现：数据已在扩展手里、播放器因别的原因在等时，请求会立刻
+// 答完，不写轮数；解码行同理不带轮数，数据已经到手。
+function videoHeadline({ status, missingData, decoderStall, forwardSeconds, currentTime, lag }) {
+  if (decoderStall) return `播放器解码没跟上，缓冲里还有 ${Math.round(forwardSeconds)} 秒数据`;
+  if (missingData) {
     const rounds = Number.isSafeInteger(lag?.outstanding) && lag.outstanding > 0
       && Number.isSafeInteger(lag.failedRounds) && lag.failedRounds >= 1
       ? lag.failedRounds
@@ -152,9 +165,10 @@ function videoHeadline({ status, waitingNow, currentTime, lag }) {
 }
 
 // 第二行：连续字节终点按平均码率折算成秒，取音视频中较小的那个，再与播放器
-// 自己的缓冲末端取较大者；两条轨都存到文件末尾时直说整个视频已下载。
-function videoSubline({ status, waitingNow, lag, readouts }) {
-  if (waitingNow) return undefined;
+// 自己的缓冲末端取较大者；两条轨都存到文件末尾时直说整个视频已下载。缺数据在等时
+// 不写（第一行已经说了在等）；解码没跟上时照常写，数据已经在手里。
+function videoSubline({ status, missingData, lag, readouts }) {
+  if (missingData) return undefined;
   const candidates = playerResources(status.inventory?.resources);
   const duration = readouts?.duration;
   if (candidates.length === 0 || !Number.isFinite(duration)) return undefined;
@@ -192,10 +206,15 @@ export function downloadLinesView({ response, error, inFlight, live, readouts, v
     return { headline, subline: undefined, lines: lineRowsOf(status, { live: true, inventoryQuiet: false }) };
   }
   const waitingNow = readouts?.waiting === true && Number.isFinite(readouts?.currentTime);
+  const forwardSeconds = readouts?.forwardSeconds;
+  const decoderStall = waitingNow
+    && Number.isFinite(forwardSeconds)
+    && forwardSeconds >= DECODER_STALL_FORWARD_SECONDS;
+  const missingData = waitingNow && !decoderStall;
   const lag = lagResource(status.inventory?.resources);
   return {
-    headline: videoHeadline({ status, waitingNow, currentTime: readouts?.currentTime, lag }),
-    subline: videoSubline({ status, waitingNow, lag, readouts }),
+    headline: videoHeadline({ status, missingData, decoderStall, forwardSeconds, currentTime: readouts?.currentTime, lag }),
+    subline: videoSubline({ status, missingData, lag, readouts }),
     lines: lineRowsOf(status, { live: false, inventoryQuiet: status.inventory?.inflight === 0 && status.inventory?.queued === 0 }),
   };
 }

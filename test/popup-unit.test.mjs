@@ -392,6 +392,40 @@ test('waiting with the data already in hand writes no retry rounds', () => {
   assert.equal(card.headline, '正在等 1:31 处的数据');
 });
 
+test('waiting with 124 seconds buffered names the decoder and keeps the download progress', () => {
+  // 用户实测的那次：播放位置 100:56，缓冲 124 秒，整个视频已存好，第一行却写「在等
+  // 数据」。数据都在手里，停下的是解码器。
+  const card = downloadCard({
+    events: [...raceEvents(), ...chunk3FailureEvents(), ...completionEvents()],
+    latestInventory: incidentInventory({ inflight: 0, queued: 0, videoContiguousEnd: VIDEO_TOTAL }),
+    nowMs: NOW_C,
+    readouts: { waiting: true, currentTime: 6056, duration: 9637, forwardSeconds: 124 },
+  });
+  assert.equal(card.headline, '播放器解码没跟上，缓冲里还有 124 秒数据');
+  assert.equal(card.subline, '整个视频已下载（全长 160:37）');
+});
+
+test('waiting with under 2 seconds buffered still reads as waiting for data', () => {
+  const card = downloadCard({
+    events: raceEvents(),
+    latestInventory: incidentInventory({ inflight: 2, queued: 40, videoContiguousEnd: 3 * MB }),
+    nowMs: NOW_A,
+    readouts: { waiting: true, currentTime: 91.3, duration: DURATION, forwardSeconds: 1.9 },
+  });
+  assert.equal(card.headline, '正在等 1:31 处的数据');
+  assert.equal(card.subline, null);
+});
+
+test('2.6 seconds buffered rounds to 3 seconds in the decoder line, same as the buffer card', () => {
+  const card = downloadCard({
+    events: raceEvents(),
+    latestInventory: incidentInventory({ inflight: 2, queued: 40, videoContiguousEnd: 3 * MB }),
+    nowMs: NOW_A,
+    readouts: { waiting: true, currentTime: 91.3, duration: DURATION, forwardSeconds: 2.6 },
+  });
+  assert.equal(card.headline, '播放器解码没跟上，缓冲里还有 3 秒数据');
+});
+
 test('a new playback session starts the retry rounds at zero', () => {
   const failures = chunk3FailureEvents();
   const newestSession = deriveDownloadStatus({

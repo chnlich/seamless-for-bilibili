@@ -66,6 +66,11 @@ const RACING_STATUS_TEXT = '正在按两条线路竞速下载';
 // `正在等 <m:ss> 处的数据`; the prefix rejects every one of its forms.
 const WAITING_HEADLINE_PREFIX = '正在等';
 
+// The decoder-underflow headline comes from the same function as
+// `播放器解码没跟上，缓冲里还有 <N> 秒数据`; a store shot must not show the player
+// stalled either, so the prefix rejects it too.
+const DECODER_STALL_HEADLINE_PREFIX = '播放器解码没跟上';
+
 // Headless Chrome's virtual screen defaults to 800x600 device px, which
 // --force-device-scale-factor=2 turns into 400x300 CSS px: measured on Chrome 154, the popup
 // anchored at y 76 was clamped to a 220 CSS px viewport. --screen-info raises the virtual
@@ -403,6 +408,9 @@ function assertRealReadout(label, readout, { racing }) {
   }
   if (headline.startsWith(WAITING_HEADLINE_PREFIX)) {
     throw new Error(`${label}: the player is waiting for data: ${JSON.stringify(headline)}`);
+  }
+  if (headline.startsWith(DECODER_STALL_HEADLINE_PREFIX)) {
+    throw new Error(`${label}: the player's decoder is not keeping up: ${JSON.stringify(headline)}`);
   }
   if (headline === DOWNLOAD_CARD_TEXT.noRecords) {
     throw new Error(`${label}: the download card has no records yet: ${JSON.stringify(headline)}`);
