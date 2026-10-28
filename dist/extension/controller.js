@@ -1,6 +1,6 @@
 (() => {
   // src/constants.js
-  var VERSION = "1.2.2";
+  var VERSION = "1.2.3";
   var EXTENSION_MANIFEST = Object.freeze({
     manifestVersion: 3,
     minimumChromeVersion: "120",
@@ -685,7 +685,7 @@
   }
 
   // src/build-id.js
-  var BUILT_BUILD_ID = true ? "src-824b683f8b3c19e972d2fb9a" : "source-build";
+  var BUILT_BUILD_ID = true ? "src-0e872e0c6123c09b57a0a522" : "source-build";
   function readBuildId() {
     return BUILT_BUILD_ID;
   }

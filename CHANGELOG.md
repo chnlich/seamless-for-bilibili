@@ -2,6 +2,10 @@
 
 ## 中文
 
+### 1.2.3 · [release/1.2.3](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.3)
+
+- 视频画面卡住、缓冲里还有 2 秒及以上数据时，弹窗「下载线路」卡片在「播放器解码没跟上，缓冲里还有 N 秒数据」下提示：部分电脑在 Chrome 设置 › 系统里关掉「使用图形加速功能」并重启 Chrome 后，这种卡顿就会消失。这条解码行优先于「还没有下载数据」，本次播放还没有任何下载记录时也会写出提示。
+
 ### 1.2.2 · [release/1.2.2](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.2)
 
 - 弹窗「下载线路」卡片在播放器没暂停却播不动时分清两种原因：播放位置之后的缓冲不到 2 秒，仍写「正在等 m:ss 处的数据」；缓冲里还有 2 秒及以上数据，改写「播放器解码没跟上，缓冲里还有 N 秒数据」，第二行照常显示下载进度，不再把解码卡顿说成在等下载。
@@ -27,6 +31,10 @@
 - 首次在 Chrome Web Store 发布。
 
 ## English
+
+### 1.2.3 · [release/1.2.3](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.3)
+
+- When a video freezes with 2 seconds or more still buffered, the download-lines card now hints beneath 「播放器解码没跟上，缓冲里还有 N 秒数据」 (the player's decoder is not keeping up; N seconds of data are still buffered) that on some computers turning off "Use graphics acceleration when available" in Chrome Settings › System and restarting Chrome stops these stalls. This decoder line takes priority over 「还没有下载数据」 (no download data yet), so the hint appears even when the playback has no download record yet.
 
 ### 1.2.2 · [release/1.2.2](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.2)
 
