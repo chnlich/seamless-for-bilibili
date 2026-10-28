@@ -180,7 +180,8 @@ main.no-page .error-line {
   font-weight: 600;
 }
 
-.cdn-subline {
+.cdn-subline,
+.cdn-hint {
   margin: 2px 0 0;
   color: var(--muted);
   font-size: 12px;
@@ -188,6 +189,7 @@ main.no-page .error-line {
 
 .cdn-line + .cdn-line,
 .cdn-headline + .cdn-line,
+.cdn-hint + .cdn-line,
 .cdn-subline + .cdn-line {
   margin-top: 8px;
   padding-top: 8px;

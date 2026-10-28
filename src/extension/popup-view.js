@@ -221,6 +221,10 @@ function waitLineRows(status, wait) {
 // 解码那一侧没按时交出下一帧。门槛小才能把解码卡顿从「在等数据」里分出来。
 export const DECODER_STALL_FORWARD_SECONDS = 2;
 
+// 卡顿归因的顺序：一台机器关闭硬件解码后同一视频不再卡，另一台关闭图形加速后未测到解码下溢。
+// 扩展没有读取图形加速开关的 API；「部分电脑」在开关开启或关闭时都成立。
+const DECODER_STALL_HINT = '部分电脑在 Chrome 设置 › 系统里关掉「使用图形加速功能」并重启 Chrome 后，这种卡顿就会消失';
+
 // 第一行从上往下取第一条成立的：一个时刻只落在一行。播放器没暂停却播不动分两种：
 // 缓冲不够（网络供不上）写等待行，缓冲够（数据已在手里、解码器没跟上）写解码行。
 // 两种原因都让 Chromium 降 readyState 并发 waiting 事件
@@ -269,7 +273,7 @@ function videoSubline({ status, missingData, lag, readouts }) {
 }
 
 // 组装一张卡片：{ message }（读取中、读取失败、没有 session）或
-// { headline, subline, lines }。直播页没有第二行，也没有等待行与暂停行：
+// { headline, hint, subline, lines }。直播页没有第二行，也没有等待行与暂停行：
 // 直播流没有固定的时间位置，下载也不按设计暂停。直播页有有效的在途快照且它说得出
 // 在等什么时，第一行与线路行按快照写（见 liveWaitOf），哪怕还没有任何结束的腿。
 // nowMs 是渲染时刻，只用于把快照里的年龄加上写出后经过的时间。
@@ -279,7 +283,20 @@ export function downloadLinesView({ response, error, inFlight, live, readouts, v
   const status = response.downloadStatus;
   const wait = live === true && liveEnabled !== false ? liveWaitOf(status.liveInventory, nowMs) : undefined;
   if (wait !== undefined) return { headline: wait.headline, subline: undefined, lines: waitLineRows(status, wait) };
+  const waitingNow = live !== true && readouts?.waiting === true && Number.isFinite(readouts?.currentTime);
+  const forwardSeconds = readouts?.forwardSeconds;
+  const decoderStall = waitingNow
+    && Number.isFinite(forwardSeconds)
+    && forwardSeconds >= DECODER_STALL_FORWARD_SECONDS;
   if (!status.hasRecords) {
+    if (decoderStall) {
+      return {
+        headline: videoHeadline({ status, missingData: false, decoderStall, forwardSeconds, currentTime: readouts.currentTime, lag: undefined }),
+        hint: DECODER_STALL_HINT,
+        subline: undefined,
+        lines: [],
+      };
+    }
     const switchOn = live === true ? liveEnabled !== false : vodEnabled !== false;
     const headline = switchOn
       ? DOWNLOAD_CARD_TEXT.noRecords
@@ -292,15 +309,11 @@ export function downloadLinesView({ response, error, inFlight, live, readouts, v
       : DOWNLOAD_CARD_TEXT.quietLive;
     return { headline, subline: undefined, lines: lineRowsOf(status, { live: true, inventoryQuiet: false }) };
   }
-  const waitingNow = readouts?.waiting === true && Number.isFinite(readouts?.currentTime);
-  const forwardSeconds = readouts?.forwardSeconds;
-  const decoderStall = waitingNow
-    && Number.isFinite(forwardSeconds)
-    && forwardSeconds >= DECODER_STALL_FORWARD_SECONDS;
   const missingData = waitingNow && !decoderStall;
   const lag = lagResource(status.inventory?.resources);
   return {
     headline: videoHeadline({ status, missingData, decoderStall, forwardSeconds, currentTime: readouts?.currentTime, lag }),
+    ...(decoderStall ? { hint: DECODER_STALL_HINT } : {}),
     subline: videoSubline({ status, missingData, lag, readouts }),
     lines: lineRowsOf(status, { live: false, inventoryQuiet: status.inventory?.inflight === 0 && status.inventory?.queued === 0 }),
   };
@@ -394,6 +407,12 @@ export function renderCdnLines(documentObject, container, view = {}) {
   headline.className = 'cdn-headline';
   headline.textContent = view.headline;
   container.append(headline);
+  if (typeof view.hint === 'string' && view.hint.length > 0) {
+    const hint = documentObject.createElement('p');
+    hint.className = 'cdn-hint';
+    hint.textContent = view.hint;
+    container.append(hint);
+  }
   if (typeof view.subline === 'string' && view.subline.length > 0) {
     const subline = documentObject.createElement('p');
     subline.className = 'cdn-subline';

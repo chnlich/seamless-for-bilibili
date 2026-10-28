@@ -259,6 +259,7 @@
     return [...rows.values()].sort((left, right) => String(left.mirror).localeCompare(String(right.mirror)));
   }
   var DECODER_STALL_FORWARD_SECONDS = 2;
+  var DECODER_STALL_HINT = "部分电脑在 Chrome 设置 › 系统里关掉「使用图形加速功能」并重启 Chrome 后，这种卡顿就会消失";
   function videoHeadline({ status, missingData, decoderStall, forwardSeconds, currentTime, lag }) {
     if (decoderStall) return `播放器解码没跟上，缓冲里还有 ${Math.round(forwardSeconds)} 秒数据`;
     if (missingData) {
@@ -292,7 +293,18 @@
     const status = response.downloadStatus;
     const wait = live === true && liveEnabled2 !== false ? liveWaitOf(status.liveInventory, nowMs) : void 0;
     if (wait !== void 0) return { headline: wait.headline, subline: void 0, lines: waitLineRows(status, wait) };
+    const waitingNow = live !== true && readouts?.waiting === true && Number.isFinite(readouts?.currentTime);
+    const forwardSeconds = readouts?.forwardSeconds;
+    const decoderStall = waitingNow && Number.isFinite(forwardSeconds) && forwardSeconds >= DECODER_STALL_FORWARD_SECONDS;
     if (!status.hasRecords) {
+      if (decoderStall) {
+        return {
+          headline: videoHeadline({ status, missingData: false, decoderStall, forwardSeconds, currentTime: readouts.currentTime, lag: void 0 }),
+          hint: DECODER_STALL_HINT,
+          subline: void 0,
+          lines: []
+        };
+      }
       const switchOn = live === true ? liveEnabled2 !== false : vodEnabled !== false;
       const headline = switchOn ? DOWNLOAD_CARD_TEXT.noRecords : live === true ? DOWNLOAD_CARD_TEXT.liveSwitchOff : DOWNLOAD_CARD_TEXT.videoSwitchOff;
       return { headline, subline: void 0, lines: [] };
@@ -301,13 +313,11 @@
       const headline = status.anyLineBytesInWindow ? `正在下载 · 合计 ${speedText(status.totalBitsPerSecond)}` : DOWNLOAD_CARD_TEXT.quietLive;
       return { headline, subline: void 0, lines: lineRowsOf(status, { live: true, inventoryQuiet: false }) };
     }
-    const waitingNow = readouts?.waiting === true && Number.isFinite(readouts?.currentTime);
-    const forwardSeconds = readouts?.forwardSeconds;
-    const decoderStall = waitingNow && Number.isFinite(forwardSeconds) && forwardSeconds >= DECODER_STALL_FORWARD_SECONDS;
     const missingData = waitingNow && !decoderStall;
     const lag = lagResource(status.inventory?.resources);
     return {
       headline: videoHeadline({ status, missingData, decoderStall, forwardSeconds, currentTime: readouts?.currentTime, lag }),
+      ...decoderStall ? { hint: DECODER_STALL_HINT } : {},
       subline: videoSubline({ status, missingData, lag, readouts }),
       lines: lineRowsOf(status, { live: false, inventoryQuiet: status.inventory?.inflight === 0 && status.inventory?.queued === 0 })
     };
@@ -380,6 +390,12 @@
     headline.className = "cdn-headline";
     headline.textContent = view.headline;
     container.append(headline);
+    if (typeof view.hint === "string" && view.hint.length > 0) {
+      const hint = documentObject.createElement("p");
+      hint.className = "cdn-hint";
+      hint.textContent = view.hint;
+      container.append(hint);
+    }
     if (typeof view.subline === "string" && view.subline.length > 0) {
       const subline = documentObject.createElement("p");
       subline.className = "cdn-subline";

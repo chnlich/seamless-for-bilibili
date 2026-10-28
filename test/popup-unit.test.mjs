@@ -299,6 +299,7 @@ function downloadCard({
   renderCdnLines(document, container, view);
   return {
     headline: container.querySelector('.cdn-headline')?.textContent ?? null,
+    hint: container.querySelector('.cdn-hint')?.textContent ?? null,
     subline: container.querySelector('.cdn-subline')?.textContent ?? null,
     message: container.querySelector('.cdn-empty')?.textContent ?? null,
     rows: [...container.querySelectorAll('.cdn-line')].map((line) => ({
@@ -329,6 +330,7 @@ test('downloading moment: total and per-line speeds, how far ahead, and the leg 
     readouts: { waiting: false, currentTime: 45, duration: DURATION, forwardSeconds: 40 },
   });
   assert.equal(card.headline, '正在下载 · 合计 49 Mbps');
+  assert.equal(card.hint, null);
   assert.equal(card.subline, '已提前下载到约 1:25（全长 24:20）');
   assert.deepEqual(card.rows, [
     { name: 'hz-mirrorakam', text: '下载中 · 49 Mbps', tone: 'ok' },
@@ -389,6 +391,7 @@ test('with no records the card says so, or names the switch that is off', () => 
   const card = downloadCard({ ...noRecords });
   assert.equal(card.rows.length, 0);
   assert.equal(card.subline, null);
+  assert.equal(card.hint, null);
 });
 
 test('waiting with the data already in hand writes no retry rounds', () => {
@@ -416,7 +419,29 @@ test('waiting with 124 seconds buffered names the decoder and keeps the download
     readouts: { waiting: true, currentTime: 6056, duration: 9637, forwardSeconds: 124 },
   });
   assert.equal(card.headline, '播放器解码没跟上，缓冲里还有 124 秒数据');
+  assert.equal(card.hint, '部分电脑在 Chrome 设置 › 系统里关掉「使用图形加速功能」并重启 Chrome 后，这种卡顿就会消失');
   assert.equal(card.subline, '整个视频已下载（全长 160:37）');
+});
+
+test('decoder stall without download records still shows the hint', () => {
+  const card = downloadCard({
+    events: [],
+    latestInventory: undefined,
+    nowMs: NOW_A,
+    vodEnabled: false,
+    readouts: { waiting: true, currentTime: 10, forwardSeconds: 124 },
+  });
+  assert.equal(card.headline, '播放器解码没跟上，缓冲里还有 124 秒数据');
+  assert.equal(card.hint, '部分电脑在 Chrome 设置 › 系统里关掉「使用图形加速功能」并重启 Chrome 后，这种卡顿就会消失');
+  assert.equal(card.subline, null);
+  assert.deepEqual(card.rows, []);
+});
+
+test('the decoder hint sits between the headline and download progress', () => {
+  const document = popupDocument();
+  const container = document.querySelector('[data-cdn-lines]');
+  renderCdnLines(document, container, { headline: 'headline', hint: 'hint', subline: 'progress', lines: [] });
+  assert.deepEqual([...container.children].map((element) => element.className), ['cdn-headline', 'cdn-hint', 'cdn-subline']);
 });
 
 test('waiting with under 2 seconds buffered still reads as waiting for data', () => {
@@ -428,6 +453,7 @@ test('waiting with under 2 seconds buffered still reads as waiting for data', ()
   });
   assert.equal(card.headline, '正在等 1:31 处的数据');
   assert.equal(card.subline, null);
+  assert.equal(card.hint, null);
 });
 
 test('2.6 seconds buffered rounds to 3 seconds in the decoder line, same as the buffer card', () => {
@@ -438,6 +464,7 @@ test('2.6 seconds buffered rounds to 3 seconds in the decoder line, same as the 
     readouts: { waiting: true, currentTime: 91.3, duration: DURATION, forwardSeconds: 2.6 },
   });
   assert.equal(card.headline, '播放器解码没跟上，缓冲里还有 3 秒数据');
+  assert.equal(card.hint, '部分电脑在 Chrome 设置 › 系统里关掉「使用图形加速功能」并重启 Chrome 后，这种卡顿就会消失');
 });
 
 test('a new playback session starts the retry rounds at zero', () => {
@@ -529,8 +556,10 @@ test('live page with two lines: per-line speeds and the total, no second line', 
     latestInventory: undefined,
     nowMs: NOW_A,
     live: true,
+    readouts: { waiting: true, currentTime: 10, forwardSeconds: 124 },
   });
   assert.equal(card.headline, '正在下载 · 合计 1.0 Mbps');
+  assert.equal(card.hint, null);
   assert.equal(card.subline, null);
   assert.deepEqual(card.rows, [
     { name: 'ov-gotcha207', text: '下载中 · 0.5 Mbps', tone: 'ok' },

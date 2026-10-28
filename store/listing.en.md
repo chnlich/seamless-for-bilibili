@@ -29,6 +29,7 @@ draft is the ready-to-paste text for a future locale-specific listing once `_loc
   What to know
   • It uses more data: a bit over 10% more on video; live runs at 1 to 2.3 times what you would use without the extension. To skip the extra live data, turn off "Live enhancement" on its own in the popup.
   • It cannot help when your own connection is not fast enough.
+  • When a video freezes with 2 seconds or more still buffered, the player is usually unable to decode fast enough; the problem is not the connection, and this extension cannot help. On some computers, turning off "Use graphics acceleration when available" in Chrome Settings › System and restarting Chrome stops these stalls; the popup shows this hint when they occur.
   • Data stays on your computer; nothing is uploaded. Source code is public: https://github.com/chnlich/seamless-for-bilibili
 
   This extension is an independent third-party tool, not affiliated with or in partnership with Bilibili.
