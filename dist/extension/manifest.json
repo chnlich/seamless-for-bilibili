@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Seamless for Bilibili",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "海外党看 Bilibili 视频和直播总是卡？Seamless for Bilibili 就是来解决这个问题的，让播放更顺畅。",
   "minimum_chrome_version": "120",
   "permissions": [

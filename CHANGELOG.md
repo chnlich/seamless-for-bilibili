@@ -2,6 +2,11 @@
 
 ## 中文
 
+### 1.2.2 · [release/1.2.2](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.2)
+
+- 弹窗「下载线路」卡片在播放器没暂停却播不动时分清两种原因：播放位置之后的缓冲不到 2 秒，仍写「正在等 m:ss 处的数据」；缓冲里还有 2 秒及以上数据，改写「播放器解码没跟上，缓冲里还有 N 秒数据」，第二行照常显示下载进度，不再把解码卡顿说成在等下载。
+- 直播卡顿时，弹窗「下载线路」卡片说出此刻在等什么，不再一律写「空闲」：分片请求在途满 2 秒写「在等一个分片，已 N 秒没收到数据」（已收到部分字节时写「分片下载中，已 N 秒，收到 X KB」），在途线路写「等待中 N 秒」或已收到的字节；没有在途请求时，播放列表 3 秒以上没有新分片写「播放列表 N 秒没有新分片」（FLV 后备也没有新画面时后接「，FLV 后备也没有新画面」），播放列表 3 秒以上没刷新写「播放器 N 秒没有请求数据」。结束的线路另有「播放器已取消」「FLV 里没有这段画面」两种写法。
+
 ### 1.2.1 · [release/1.2.1](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.1)
 
 - 视频页现在也接管 Bilibili 播放信息列出的 PCDN 等 CDN 地址，并可与路径不同的镜像地址竞速，避免这些请求绕过下载增强。
@@ -22,6 +27,11 @@
 - 首次在 Chrome Web Store 发布。
 
 ## English
+
+### 1.2.2 · [release/1.2.2](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.2)
+
+- The popup's download-lines card now tells two stalls apart when the player is not paused but cannot advance: with under 2 seconds buffered ahead it still reads 「正在等 m:ss 处的数据」 (waiting for the data at m:ss); with 2 seconds or more buffered it reads 「播放器解码没跟上，缓冲里还有 N 秒数据」 (the player's decoder is not keeping up; N seconds of data are still buffered), and the second line keeps showing the download progress, so a decoder stall is no longer reported as waiting for the download.
+- When a live stream stalls, the download-lines card now says what the extension is waiting for instead of reading 「空闲」 (idle) throughout: a segment request in flight for 2 seconds or more reads 「在等一个分片，已 N 秒没收到数据」 (waiting for a segment, no data for N seconds), or 「分片下载中，已 N 秒，收到 X KB」 (segment downloading, N seconds so far, X KB received) once some bytes arrived, with the lines in flight reading 「等待中 N 秒」 (waiting N seconds) or the bytes received; with no request in flight, a playlist that has added no segment for 3 seconds or more reads 「播放列表 N 秒没有新分片」 (playlist has no new segment for N seconds), followed by 「，FLV 后备也没有新画面」 (, the FLV backup has no new frames either) when the FLV connection is silent too, and a playlist that has not refreshed for 3 seconds or more reads 「播放器 N 秒没有请求数据」 (the player has requested no data for N seconds). Finished lines gain two live-page texts: 「播放器已取消」 (the player cancelled the request) and 「FLV 里没有这段画面」 (the FLV has no frames for this segment).
 
 ### 1.2.1 · [release/1.2.1](https://github.com/chnlich/seamless-for-bilibili/tree/release/1.2.1)
 
